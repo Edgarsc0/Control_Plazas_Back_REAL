@@ -92,7 +92,8 @@ def main():
             "mov_pos_detalle",
             "bajas_sig_list",
             "bajas_motivos_pie",
-            "bajas_historico"
+            "bajas_historico",
+            "movimientos_personal_stats"
         ]
         cache.delete_many(cache_keys)
         print("Caché invalidada con éxito.")

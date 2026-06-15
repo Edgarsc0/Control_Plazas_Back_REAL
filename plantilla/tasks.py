@@ -222,65 +222,65 @@ def _importar_csv_empleados_completos(csv_path: str, guardar_historico: bool = F
         for row in reader:
             registros.append(
                 EmpleadosCompletosSigStaging(
-                    id_field=row.get("Id", "")[:2] or None,
-                    numeral=row.get("numeral", "")[:6] or None,
+                    id_field=row.get("Id") or None,
+                    numeral=row.get("numeral") or None,
                     ua=row.get("ua") or None,
-                    cent=row.get("cent", "")[:1] or None,
-                    dir=row.get("dir", "")[:2] or None,
-                    subd=row.get("subd", "")[:1] or None,
-                    jd=row.get("jd", "")[:1] or None,
-                    depto=row.get("depto", "")[:11] or None,
+                    cent=row.get("cent") or None,
+                    dir=row.get("dir") or None,
+                    subd=row.get("subd") or None,
+                    jd=row.get("jd") or None,
+                    depto=row.get("depto") or None,
                     aduana=row.get("Aduana") or None,
-                    id_tipo=row.get("id tipo", "")[:1] or None,
+                    id_tipo=row.get("id tipo") or None,
                     tipo=row.get("tipo") or None,
                     estado=row.get("estado") or None,
                     municipio=row.get("municipio") or None,
-                    latitud=row.get("latitud", "")[:12] or None,
-                    longitud=row.get("longitud", "")[:13] or None,
+                    latitud=row.get("latitud") or None,
+                    longitud=row.get("longitud") or None,
                     ua2=row.get("ua2") or None,
-                    posicion=row.get("Posición", "")[:8] or None,
-                    estado_nomina=row.get("Estado Nómina", "")[:1] or None,
-                    id_empleado=row.get("Id Empleado", "")[:10] or None,
-                    rfc=row.get("RFC", "")[:13] or None,
-                    curp=row.get("CURP", "")[:18] or None,
-                    nombres=row.get("Nombres", "")[:44] or None,
-                    motivo=row.get("Motivo", "")[:30] or None,
+                    posicion=row.get("Posición") or None,
+                    estado_nomina=row.get("Estado Nómina") or None,
+                    id_empleado=row.get("Id Empleado") or None,
+                    rfc=row.get("RFC") or None,
+                    curp=row.get("CURP") or None,
+                    nombres=row.get("Nombres") or None,
+                    motivo=row.get("Motivo") or None,
                     fecha_efectiva_personal=row.get("Fecha efectiva (Personal)") or None,
                     fecha_de_captura=row.get("Fecha de captura") or None,
                     qna=row.get("Qna") or None,
-                    fecha_prevista_de_salida=row.get("Fecha prevista de salida", "")[:10] or None,
+                    fecha_prevista_de_salida=row.get("Fecha prevista de salida") or None,
                     nj=row.get("NJ") or None,
-                    codigo_presupuestal=row.get("Código Presupuestal", "")[:10] or None,
-                    nivel=row.get("Nivel", "")[:4] or None,
+                    codigo_presupuestal=row.get("Código Presupuestal") or None,
+                    nivel=row.get("Nivel") or None,
                     escala=row.get("Escala") or None,
-                    smb=row.get("SMB", "")[:8] or None,
-                    smn=row.get("SMN", "")[:9] or None,
+                    smb=row.get("SMB") or None,
+                    smn=row.get("SMN") or None,
                     partida=row.get("Partida") or None,
-                    tipo_de_contratacion=row.get("TIPO DE CONTRATACIÓN", "")[:8] or None,
+                    tipo_de_contratacion=row.get("TIPO DE CONTRATACIÓN") or None,
                     cd_un=row.get("Cd UN") or None,
-                    unidad_de_negocio=row.get("Unidad de Negocio", "")[:74] or None,
+                    unidad_de_negocio=row.get("Unidad de Negocio") or None,
                     cd_ua=row.get("Cd UA") or None,
                     unidad_administrativa=row.get("Unidad Administrativa") or None,
-                    cd_pto_funcional=row.get("Cd Pto Funcional", "")[:6] or None,
-                    nombre_puesto_funcional=row.get("Nombre Puesto Funcional", "")[:123] or None,
+                    cd_pto_funcional=row.get("Cd Pto Funcional") or None,
+                    nombre_puesto_funcional=row.get("Nombre Puesto Funcional") or None,
                     id_departamento=row.get("Id Departamento") or None,
                     departamento=row.get("Departamento") or None,
                     dependencia_directa=row.get("DependenciaDirecta") or None,
                     observaciones=row.get("OBSERVACIONES") or None,
                     ubicacion=row.get("Ubicación") or None,
-                    descripcion_ubicacion=row.get("Descripción ubicación", "")[:30] or None,
-                    posicion_civil_sedena_semar=row.get("Posición _Civil / SEDENA / SEMAR", "")[:22] or None,
-                    personal_militar_o_civil=row.get("Personal Militar o Civil", "")[:12] or None,
-                    tipo_de_personal_sedena_semar=row.get("Tipo de personal SEDENA / SEMAR", "")[:11] or None,
-                    rango=row.get("Rango", "")[:28] or None,
-                    fecha_de_ingreso=row.get("Fecha de ingreso", "")[:10] or None,
-                    val_estat=row.get("Val_estat", "")[:7] or None,
-                    status_jefe_inm_posicion=row.get("Status Jefe Inm Posición", "")[:9] or None,
-                    numempleado=row.get("Numempleado", "")[:10] or None,
+                    descripcion_ubicacion=row.get("Descripción ubicación") or None,
+                    posicion_civil_sedena_semar=row.get("Posición _Civil / SEDENA / SEMAR") or None,
+                    personal_militar_o_civil=row.get("Personal Militar o Civil") or None,
+                    tipo_de_personal_sedena_semar=row.get("Tipo de personal SEDENA / SEMAR") or None,
+                    rango=row.get("Rango") or None,
+                    fecha_de_ingreso=row.get("Fecha de ingreso") or None,
+                    val_estat=row.get("Val_estat") or None,
+                    status_jefe_inm_posicion=row.get("Status Jefe Inm Posición") or None,
+                    numempleado=row.get("Numempleado") or None,
                     sindicato=row.get("Sindicato") or None,
-                    entidad_federativa=row.get("Entidad Federativa", "")[:19] or None,
-                    tipo_de_aduana=row.get("Tipo de Aduana", "")[:10] or None,
-                    dg_o_aduana_compactada=row.get("DG o Aduana compactada", "")[:21] or None,
+                    entidad_federativa=row.get("Entidad Federativa") or None,
+                    tipo_de_aduana=row.get("Tipo de Aduana") or None,
+                    dg_o_aduana_compactada=row.get("DG o Aduana compactada") or None,
                     proyecto_2024_reduccion_plazas_eventuales=row.get(
                         "Proyecto 2024 Reducción de plazas Eventuales"
                     ) or None,
@@ -289,76 +289,76 @@ def _importar_csv_empleados_completos(csv_path: str, guardar_historico: bool = F
                     validando_posicion_por_documento=row.get(
                         "Validando de posición por documento"
                     ) or None,
-                    val_estatx=row.get("Val_estatx", "")[:7] or None,
-                    nj_comp=row.get("NJ COMP", "")[:21] or None,
+                    val_estatx=row.get("Val_estatx") or None,
+                    nj_comp=row.get("NJ COMP") or None,
                     nj_ok=row.get("NJ OK") or None,
-                    columna=row.get("Columna", "")[:40] or None,
-                    nombre_nj=row.get("nombreNJ", "")[:19] or None,
-                    nj_operativo_comb=row.get("NJOperativoComb", "")[:13] or None,
+                    columna=row.get("Columna") or None,
+                    nombre_nj=row.get("nombreNJ") or None,
+                    nj_operativo_comb=row.get("NJOperativoComb") or None,
                 )
             )
             if guardar_historico:
                 registros_historico.append(
                     EmpleadosCompletosSigHistorico(
-                    id_field=row.get("Id", "")[:2] or None,
-                    numeral=row.get("numeral", "")[:6] or None,
+                    id_field=row.get("Id") or None,
+                    numeral=row.get("numeral") or None,
                     ua=row.get("ua") or None,
-                    cent=row.get("cent", "")[:1] or None,
-                    dir=row.get("dir", "")[:2] or None,
-                    subd=row.get("subd", "")[:1] or None,
-                    jd=row.get("jd", "")[:1] or None,
-                    depto=row.get("depto", "")[:11] or None,
+                    cent=row.get("cent") or None,
+                    dir=row.get("dir") or None,
+                    subd=row.get("subd") or None,
+                    jd=row.get("jd") or None,
+                    depto=row.get("depto") or None,
                     aduana=row.get("Aduana") or None,
-                    id_tipo=row.get("id tipo", "")[:1] or None,
+                    id_tipo=row.get("id tipo") or None,
                     tipo=row.get("tipo") or None,
                     estado=row.get("estado") or None,
                     municipio=row.get("municipio") or None,
-                    latitud=row.get("latitud", "")[:12] or None,
-                    longitud=row.get("longitud", "")[:13] or None,
+                    latitud=row.get("latitud") or None,
+                    longitud=row.get("longitud") or None,
                     ua2=row.get("ua2") or None,
-                    posicion=row.get("Posición", "")[:8] or None,
-                    estado_nomina=row.get("Estado Nómina", "")[:1] or None,
-                    id_empleado=row.get("Id Empleado", "")[:10] or None,
-                    rfc=row.get("RFC", "")[:13] or None,
-                    curp=row.get("CURP", "")[:18] or None,
-                    nombres=row.get("Nombres", "")[:44] or None,
-                    motivo=row.get("Motivo", "")[:30] or None,
+                    posicion=row.get("Posición") or None,
+                    estado_nomina=row.get("Estado Nómina") or None,
+                    id_empleado=row.get("Id Empleado") or None,
+                    rfc=row.get("RFC") or None,
+                    curp=row.get("CURP") or None,
+                    nombres=row.get("Nombres") or None,
+                    motivo=row.get("Motivo") or None,
                     fecha_efectiva_personal=row.get("Fecha efectiva (Personal)") or None,
                     fecha_de_captura=row.get("Fecha de captura") or None,
                     qna=row.get("Qna") or None,
-                    fecha_prevista_de_salida=row.get("Fecha prevista de salida", "")[:10] or None,
+                    fecha_prevista_de_salida=row.get("Fecha prevista de salida") or None,
                     nj=row.get("NJ") or None,
-                    codigo_presupuestal=row.get("Código Presupuestal", "")[:10] or None,
-                    nivel=row.get("Nivel", "")[:4] or None,
+                    codigo_presupuestal=row.get("Código Presupuestal") or None,
+                    nivel=row.get("Nivel") or None,
                     escala=row.get("Escala") or None,
-                    smb=row.get("SMB", "")[:8] or None,
-                    smn=row.get("SMN", "")[:9] or None,
+                    smb=row.get("SMB") or None,
+                    smn=row.get("SMN") or None,
                     partida=row.get("Partida") or None,
-                    tipo_de_contratacion=row.get("TIPO DE CONTRATACIÓN", "")[:8] or None,
+                    tipo_de_contratacion=row.get("TIPO DE CONTRATACIÓN") or None,
                     cd_un=row.get("Cd UN") or None,
-                    unidad_de_negocio=row.get("Unidad de Negocio", "")[:74] or None,
+                    unidad_de_negocio=row.get("Unidad de Negocio") or None,
                     cd_ua=row.get("Cd UA") or None,
                     unidad_administrativa=row.get("Unidad Administrativa") or None,
-                    cd_pto_funcional=row.get("Cd Pto Funcional", "")[:6] or None,
-                    nombre_puesto_funcional=row.get("Nombre Puesto Funcional", "")[:123] or None,
+                    cd_pto_funcional=row.get("Cd Pto Funcional") or None,
+                    nombre_puesto_funcional=row.get("Nombre Puesto Funcional") or None,
                     id_departamento=row.get("Id Departamento") or None,
                     departamento=row.get("Departamento") or None,
                     dependencia_directa=row.get("DependenciaDirecta") or None,
                     observaciones=row.get("OBSERVACIONES") or None,
                     ubicacion=row.get("Ubicación") or None,
-                    descripcion_ubicacion=row.get("Descripción ubicación", "")[:30] or None,
-                    posicion_civil_sedena_semar=row.get("Posición _Civil / SEDENA / SEMAR", "")[:22] or None,
-                    personal_militar_o_civil=row.get("Personal Militar o Civil", "")[:12] or None,
-                    tipo_de_personal_sedena_semar=row.get("Tipo de personal SEDENA / SEMAR", "")[:11] or None,
-                    rango=row.get("Rango", "")[:28] or None,
-                    fecha_de_ingreso=row.get("Fecha de ingreso", "")[:10] or None,
-                    val_estat=row.get("Val_estat", "")[:7] or None,
-                    status_jefe_inm_posicion=row.get("Status Jefe Inm Posición", "")[:9] or None,
-                    numempleado=row.get("Numempleado", "")[:10] or None,
+                    descripcion_ubicacion=row.get("Descripción ubicación") or None,
+                    posicion_civil_sedena_semar=row.get("Posición _Civil / SEDENA / SEMAR") or None,
+                    personal_militar_o_civil=row.get("Personal Militar o Civil") or None,
+                    tipo_de_personal_sedena_semar=row.get("Tipo de personal SEDENA / SEMAR") or None,
+                    rango=row.get("Rango") or None,
+                    fecha_de_ingreso=row.get("Fecha de ingreso") or None,
+                    val_estat=row.get("Val_estat") or None,
+                    status_jefe_inm_posicion=row.get("Status Jefe Inm Posición") or None,
+                    numempleado=row.get("Numempleado") or None,
                     sindicato=row.get("Sindicato") or None,
-                    entidad_federativa=row.get("Entidad Federativa", "")[:19] or None,
-                    tipo_de_aduana=row.get("Tipo de Aduana", "")[:10] or None,
-                    dg_o_aduana_compactada=row.get("DG o Aduana compactada", "")[:21] or None,
+                    entidad_federativa=row.get("Entidad Federativa") or None,
+                    tipo_de_aduana=row.get("Tipo de Aduana") or None,
+                    dg_o_aduana_compactada=row.get("DG o Aduana compactada") or None,
                     proyecto_2024_reduccion_plazas_eventuales=row.get(
                         "Proyecto 2024 Reducción de plazas Eventuales"
                     ) or None,
@@ -367,12 +367,12 @@ def _importar_csv_empleados_completos(csv_path: str, guardar_historico: bool = F
                     validando_posicion_por_documento=row.get(
                         "Validando de posición por documento"
                     ) or None,
-                    val_estatx=row.get("Val_estatx", "")[:7] or None,
-                    nj_comp=row.get("NJ COMP", "")[:21] or None,
+                    val_estatx=row.get("Val_estatx") or None,
+                    nj_comp=row.get("NJ COMP") or None,
                     nj_ok=row.get("NJ OK") or None,
-                    columna=row.get("Columna", "")[:40] or None,
-                    nombre_nj=row.get("nombreNJ", "")[:19] or None,
-                    nj_operativo_comb=row.get("NJOperativoComb", "")[:13] or None,
+                    columna=row.get("Columna") or None,
+                    nombre_nj=row.get("nombreNJ") or None,
+                    nj_operativo_comb=row.get("NJOperativoComb") or None,
                 )
             )
 
@@ -482,7 +482,7 @@ def _importar_csv_posiciones(csv_path: str, guardar_historico: bool = False, bit
                     motivo=row.get("Motivo") or None,
                     cd_un=row.get("Cd UN") or None,
                     unidad_de_negocio=row.get("Unidad de Negocio") or None,
-                    unidad_adva=row.get("Unidad Adva#") or None,
+                    unidad_adva=row.get("Unidad Adva.") or None,
                     cd_departamento=row.get("Cd Departamento") or None,
                     cd_puesto=row.get("Cd Puesto") or None,
                     estado_ptal=row.get("Estado Ptal") or None,
@@ -524,7 +524,7 @@ def _importar_csv_posiciones(csv_path: str, guardar_historico: bool = False, bit
                     motivo=row.get("Motivo") or None,
                     cd_un=row.get("Cd UN") or None,
                     unidad_de_negocio=row.get("Unidad de Negocio") or None,
-                    unidad_adva=row.get("Unidad Adva#") or None,
+                    unidad_adva=row.get("Unidad Adva.") or None,
                     cd_departamento=row.get("Cd Departamento") or None,
                     cd_puesto=row.get("Cd Puesto") or None,
                     estado_ptal=row.get("Estado Ptal") or None,
@@ -604,6 +604,22 @@ def _importar_csv_historial_posicion(csv_path: str, guardar_historico: bool = Fa
                 except:
                     return None
 
+            def get_datetime(idx):
+                val = get_val(idx)
+                if not val: return None
+                # Ejemplo: '2025-12-04-12.38.35.000000'
+                if len(val) >= 19 and val[10] == '-':
+                    date_part = val[:10]
+                    time_part = val[11:19].replace('.', ':')
+                    try:
+                        from django.utils.timezone import make_aware
+                        from datetime import datetime
+                        dt_naive = datetime.strptime(f"{date_part} {time_part}", "%Y-%m-%d %H:%M:%S")
+                        return make_aware(dt_naive)
+                    except:
+                        return f"{date_part} {time_part}"
+                return get_date(idx)
+
             kwargs = dict(
                 posicion=get_val(0, 50),
                 num_empleado=get_val(1, 20),
@@ -638,7 +654,7 @@ def _importar_csv_historial_posicion(csv_path: str, guardar_historico: bool = Fa
                 ubicacion=get_val(30, 100),
                 id_estbl=get_val(31, 50),
                 salida_prevista=get_date(32),
-                fecha_ult_actz=get_val(33),
+                fecha_ult_actz=get_datetime(33),
                 por=get_val(34, 50),
                 ult_inicio=get_date(35),
                 fecha_inicial=get_date(36),
@@ -746,6 +762,21 @@ def _swap_blue_green_tables(bitacora=None):
     _truncar_tabla(CpTblMovCompleto290526Staging, bitacora)
 
 
+def _calcular_y_actualizar_vacancias(bitacora):
+    """
+    Ejecuta el Stored Procedure sp_obtener_todas_vacancias, el cual 
+    calcula la fecha de vacancia de cada posición activa e internamente
+    hace el UPDATE del campo FECHA VACANCIA en MOV_POS.
+    """
+    _append_log(bitacora, "Calculando y asignando fechas de vacancia directamente en BD...")
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("CALL sp_obtener_todas_vacancias();")
+            _append_log(bitacora, "Actualización de fechas de vacancia completada exitosamente.")
+    except Exception as e:
+        _append_log(bitacora, f"Error calculando fechas de vacancia: {str(e)}")
+        logger.error(f"Error en _calcular_y_actualizar_vacancias: {str(e)}", exc_info=True)
+
 # ---------------------------------------------------------------------------
 # Tarea principal
 # ---------------------------------------------------------------------------
@@ -786,7 +817,11 @@ def importar_zafiro(self):
     bitacora = ZafiroBitacora.objects.create(
         status="RUNNING",
         es_historico=es_historico,
-        logs_en_vivo=""
+        logs_en_vivo="",
+        registros_posiciones=0,
+        registros_completos=0,
+        registros_bajas=0,
+        registros_historial=0
     )
     _append_log(bitacora, "=== Iniciando tarea importar_zafiro ===")
     
@@ -823,6 +858,9 @@ def importar_zafiro(self):
         # Realizar el intercambio atómico (Blue-Green Swap)
         _swap_blue_green_tables(bitacora)
 
+        # ── 5. Calcular y Actualizar Fechas de Vacancia ────────────────────
+        _calcular_y_actualizar_vacancias(bitacora)
+
         duracion = round(time.time() - inicio, 1)
         
         # Guardar éxito en ZafiroBitacora
@@ -830,6 +868,7 @@ def importar_zafiro(self):
         bitacora.registros_posiciones = total_posiciones
         bitacora.registros_completos = total_completos
         bitacora.registros_bajas = total_bajas
+        bitacora.registros_historial = total_historial
         bitacora.status = "EXITO"
         bitacora.save()
 
@@ -856,7 +895,8 @@ def importar_zafiro(self):
                 "mov_pos_detalle",
                 "bajas_sig_list",
                 "bajas_motivos_pie",
-                "bajas_historico"
+                "bajas_historico",
+                "movimientos_personal_stats"
             ]
             cache.delete_many(cache_keys)
 
@@ -870,7 +910,7 @@ def importar_zafiro(self):
 
         _append_log(
             bitacora,
-            f"=== Tarea completada en {duracion}s | Posiciones: {total_posiciones} | Completos: {total_completos} | Bajas: {total_bajas} ==="
+            f"=== Tarea completada en {duracion}s | Posiciones: {total_posiciones} | Completos: {total_completos} | Bajas: {total_bajas} | Historial: {total_historial} ==="
         )
 
         return {

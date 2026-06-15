@@ -83,6 +83,9 @@ DATABASES = {
         "PORT": os.getenv("DB_PORT", "3306"),
         "OPTIONS": {
             "init_command": "SET sql_mode='STRICT_TRANS_TABLES'",
+            "connect_timeout": 10,
+            "read_timeout": 60,
+            "write_timeout": 60,
         },
     },
     "control_gestion": {
@@ -94,6 +97,9 @@ DATABASES = {
         "PORT": os.getenv("DB_CONTROL_GESTION_PORT", "3306"),
         "OPTIONS": {
             "init_command": "SET sql_mode='STRICT_TRANS_TABLES'",
+            "connect_timeout": 10,
+            "read_timeout": 60,
+            "write_timeout": 60,
         },
     },
 }

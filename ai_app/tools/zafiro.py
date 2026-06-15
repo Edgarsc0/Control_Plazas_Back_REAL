@@ -28,6 +28,7 @@ def estado_sincronizacion_zafiro() -> str:
     res += f"  - Plazas (MOV_POS): {ultimo.registros_posiciones:,} registros\n"
     res += f"  - Empleados en Nómina (SIG): {ultimo.registros_completos:,} registros\n"
     res += f"  - Bajas/Desincorporaciones: {ultimo.registros_bajas:,} registros\n"
+    res += f"  - Historial Posición: {getattr(ultimo, 'registros_historial', 0):,} registros\n"
     
     if ultimo.error_message:
         res += f"\n❌ Mensaje de Error en Última Sincronización:\n  {ultimo.error_message}\n"
@@ -35,6 +36,6 @@ def estado_sincronizacion_zafiro() -> str:
     res += "\n📜 Historial de Últimas 5 Sincronizaciones:\n"
     for item in bitacora:
         item_status = "✅ OK" if item.status == "OK" else f"❌ {item.status}"
-        res += f"  - {item.fecha_ejecucion.strftime('%Y-%m-%d %H:%M:%S')} | Estatus: {item_status} | Duración: {item.duracion_segundos or 0:.1f}s | Plazas: {item.registros_posiciones} | SIG: {item.registros_completos} | Bajas: {item.registros_bajas}\n"
+        res += f"  - {item.fecha_ejecucion.strftime('%Y-%m-%d %H:%M:%S')} | Estatus: {item_status} | Duración: {item.duracion_segundos or 0:.1f}s | Plazas: {item.registros_posiciones} | SIG: {item.registros_completos} | Bajas: {item.registros_bajas} | Historial: {getattr(item, 'registros_historial', 0)}\n"
 
     return res.strip()

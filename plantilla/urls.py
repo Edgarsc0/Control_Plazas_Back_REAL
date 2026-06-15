@@ -26,9 +26,21 @@ from .views import (
     OrganigramaSearchView,
     TorreCaballito3DView,
     TorreCaballitoEmpleadosView,
+    MovimientosPersonalListView,
+    MovimientosPersonalStatsView,
 )
 
 urlpatterns = [
+    path(
+        "movimientos-personal/",
+        MovimientosPersonalListView.as_view(),
+        name="movimientos-personal",
+    ),
+    path(
+        "movimientos-personal/stats/",
+        MovimientosPersonalStatsView.as_view(),
+        name="movimientos-personal-stats",
+    ),
     path(
         "torre-caballito/",
         TorreCaballito3DView.as_view(),

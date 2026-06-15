@@ -18,6 +18,24 @@ LATEST_MOVPOS_RAW_SQL = """
     ) ranked WHERE rn = 1
 """
 
+OCUPADAS_RAW_SQL = """
+    SELECT                                                                                                                                                           
+        e.`Posición`
+    FROM EMPLEADOS_COMPLETOS_SIG e
+    INNER JOIN MOV_POS m 
+        ON e.`Posición` = m.`Nº Pos Actual`
+    INNER JOIN (
+        SELECT id FROM (
+            SELECT id, ROW_NUMBER() OVER (
+                PARTITION BY `Nº Pos Actual`
+                ORDER BY `F Efva` DESC, `Fecha Captura` DESC, `F/H Últ Actz` DESC, id DESC
+            ) as rn
+            FROM MOV_POS
+        ) ranked WHERE rn = 1
+    ) latest ON m.id = latest.id
+    WHERE m.`Estado Psn` = 'A' AND `Estado Nómina` <> ' ' AND `Estado Nómina` IS NOT NULL;
+"""
+
 from django.core.cache import cache
 from django.db import connection
 
@@ -965,6 +983,9 @@ class MovPosDetalleView(APIView):
                 with connection.cursor() as cursor:
                     cursor.execute(LATEST_MOVPOS_RAW_SQL)
                     sub_ids = [row[0] for row in cursor.fetchall() if row[0]]
+                    
+                    cursor.execute(OCUPADAS_RAW_SQL)
+                    posiciones_ocupadas = set([row[0] for row in cursor.fetchall() if row[0]])
 
                 # 3. Filtrar los últimos registros
                 queryset = MovPos.objects.filter(id__in=sub_ids).filter(no_pos_actual__in=posiciones_list)
@@ -974,6 +995,7 @@ class MovPosDetalleView(APIView):
                 for r in resultados:
                     pos = r.get('no_pos_actual')
                     r['total_movimientos'] = counts.get(pos, 1)
+                    r['estatus_ocupacion'] = 'Ocupada' if pos in posiciones_ocupadas else 'Vacante'
 
                 cache.set(cache_key, resultados, 300)
                 return Response(resultados, status=status.HTTP_200_OK)
@@ -996,6 +1018,9 @@ class MovPosDetalleView(APIView):
             with connection.cursor() as cursor:
                 cursor.execute(LATEST_MOVPOS_RAW_SQL)
                 sub_ids = [row[0] for row in cursor.fetchall() if row[0]]
+
+                cursor.execute(OCUPADAS_RAW_SQL)
+                posiciones_ocupadas = set([row[0] for row in cursor.fetchall() if row[0]])
             
             # 3. Filtrar los últimos registros
             queryset = MovPos.objects.filter(id__in=sub_ids)
@@ -1005,6 +1030,7 @@ class MovPosDetalleView(APIView):
             for r in resultados:
                 pos = r.get('no_pos_actual')
                 r['total_movimientos'] = counts.get(pos, 1)
+                r['estatus_ocupacion'] = 'Ocupada' if pos in posiciones_ocupadas else 'Vacante'
             
             cache.set(cache_key, resultados, 1200)
             return Response(resultados, status=status.HTTP_200_OK)
@@ -1137,6 +1163,7 @@ class ZafiroBitacoraView(APIView):
                 "registros_posiciones": log.registros_posiciones,
                 "registros_completos": log.registros_completos,
                 "registros_bajas": log.registros_bajas,
+                "registros_historial": log.registros_historial,
                 "status": log.status,
                 "error_message": log.error_message,
                 "es_historico": log.es_historico,
@@ -1458,35 +1485,60 @@ class TorreCaballitoEmpleadosView(APIView):
         piso = request.query_params.get('piso', None)
         ua = request.query_params.get('ua', None)
         
-        if not piso or not ua:
-            return Response({"error": "Faltan parametros piso y ua"}, status=400)
+        if not piso:
+            return Response({"error": "Falta el parametro piso"}, status=400)
             
         from django.db import connection
-        query = '''
-            SELECT 
-                e.`Posición`,
-                e.`Numempleado`,
-                e.`Nombres`,
-                e.`Unidad Administrativa`,
-                e.`Descripción ubicación`,
-                e.`Estado Nómina`
-            FROM EMPLEADOS_COMPLETOS_SIG e
-            INNER JOIN (
-                SELECT `Nº Pos Actual` FROM (
-                    SELECT `Nº Pos Actual`, `Estado Psn`, ROW_NUMBER() OVER (
-                        PARTITION BY `Nº Pos Actual` 
-                        ORDER BY `F Efva` DESC, `Fecha Captura` DESC, `F/H Últ Actz` DESC, id DESC
-                    ) as rn
-                    FROM MOV_POS
-                ) ranked WHERE rn = 1 AND `Estado Psn` = 'A'
-            ) activas ON e.`Posición` = activas.`Nº Pos Actual`
-            WHERE e.`Descripción ubicación` = %s 
-              AND e.`Unidad Administrativa` = %s
-            ORDER BY e.`Nombres`;
-        '''
+        if ua and ua.strip():
+            query = '''
+                SELECT 
+                    e.`Posición`,
+                    e.`Numempleado`,
+                    e.`Nombres`,
+                    e.`Unidad Administrativa`,
+                    e.`Descripción ubicación`,
+                    e.`Estado Nómina`
+                FROM EMPLEADOS_COMPLETOS_SIG e
+                INNER JOIN (
+                    SELECT `Nº Pos Actual` FROM (
+                        SELECT `Nº Pos Actual`, `Estado Psn`, ROW_NUMBER() OVER (
+                            PARTITION BY `Nº Pos Actual` 
+                            ORDER BY `F Efva` DESC, `Fecha Captura` DESC, `F/H Últ Actz` DESC, id DESC
+                        ) as rn
+                        FROM MOV_POS
+                    ) ranked WHERE rn = 1 AND `Estado Psn` = 'A'
+                ) activas ON e.`Posición` = activas.`Nº Pos Actual`
+                WHERE e.`Descripción ubicación` = %s 
+                  AND e.`Unidad Administrativa` = %s
+                ORDER BY e.`Nombres`;
+            '''
+            params = [piso, ua]
+        else:
+            query = '''
+                SELECT 
+                    e.`Posición`,
+                    e.`Numempleado`,
+                    e.`Nombres`,
+                    e.`Unidad Administrativa`,
+                    e.`Descripción ubicación`,
+                    e.`Estado Nómina`
+                FROM EMPLEADOS_COMPLETOS_SIG e
+                INNER JOIN (
+                    SELECT `Nº Pos Actual` FROM (
+                        SELECT `Nº Pos Actual`, `Estado Psn`, ROW_NUMBER() OVER (
+                            PARTITION BY `Nº Pos Actual` 
+                            ORDER BY `F Efva` DESC, `Fecha Captura` DESC, `F/H Últ Actz` DESC, id DESC
+                        ) as rn
+                        FROM MOV_POS
+                    ) ranked WHERE rn = 1 AND `Estado Psn` = 'A'
+                ) activas ON e.`Posición` = activas.`Nº Pos Actual`
+                WHERE e.`Descripción ubicación` = %s 
+                ORDER BY e.`Nombres`;
+            '''
+            params = [piso]
         
         with connection.cursor() as cursor:
-            cursor.execute(query, [piso, ua])
+            cursor.execute(query, params)
             results = cursor.fetchall()
             
         data = []
@@ -1541,8 +1593,8 @@ class TorreCaballitoSearchView(APIView):
             ) activas ON e.`Posición` = activas.`Nº Pos Actual`
             WHERE e.`Descripción ubicación` IS NOT NULL
               AND (
-                  e.`Descripción ubicación` LIKE '%Caballito Reforma 10 P%'
-                  OR e.`Descripción ubicación` LIKE '%Torre Caballito Reforma 10 P%'
+                  e.`Descripción ubicación` LIKE '%%Caballito Reforma 10 P%%'
+                  OR e.`Descripción ubicación` LIKE '%%Torre Caballito Reforma 10 P%%'
               )
               AND (e.`Nombres` LIKE %s OR e.`Numempleado` LIKE %s)
             LIMIT 20;
@@ -1564,3 +1616,255 @@ class TorreCaballitoSearchView(APIView):
                 r['piso_num'] = None
                 
         return Response({"results": results})
+
+
+from rest_framework.pagination import PageNumberPagination
+
+class MovimientosPersonalPagination(PageNumberPagination):
+    page_size = 50
+    page_size_query_param = 'page_size'
+    max_page_size = 10000
+
+class MovimientosPersonalListView(APIView):
+    permission_classes = [IsAuthenticated]
+    pagination_class = MovimientosPersonalPagination
+
+    def get(self, request):
+        from .models import CpTblMovCompleto290526
+        from .serializers import CpTblMovCompleto290526Serializer
+        
+        queryset = CpTblMovCompleto290526.objects.all()
+        
+        # Check if requesting distinct values for a field
+        distinct_field = request.query_params.get('distinct_field', '').strip()
+        
+        # Search query
+        search_query = request.query_params.get('search', '').strip()
+        if search_query:
+            queryset = queryset.filter(
+                Q(posicion__icontains=search_query) |
+                Q(num_empleado__icontains=search_query) |
+                Q(nombre__icontains=search_query) |
+                Q(ap_pat__icontains=search_query) |
+                Q(ap_mat__icontains=search_query) |
+                Q(accion_nombre__icontains=search_query) |
+                Q(motivo_nombre__icontains=search_query) |
+                Q(un_admin__icontains=search_query)
+            )
+
+        # Dynamic Column Filters
+        valid_fields = [f.name for f in CpTblMovCompleto290526._meta.get_fields()]
+        text_fields = [f.name for f in CpTblMovCompleto290526._meta.get_fields() if f.get_internal_type() in ['CharField', 'TextField']]
+        from django.db.models.functions import Trim
+        
+        for param, val in request.query_params.items():
+            if param == 'distinct_field':
+                continue
+            is_exclude = False
+            actual_param = param
+            if param.startswith('exclude__'):
+                is_exclude = True
+                actual_param = param[9:]
+                
+            base_field = actual_param.split('__')[0]
+            
+            # Skip applying filter on the column we are querying distinct values for
+            if distinct_field and base_field == distinct_field:
+                continue
+                
+            if base_field in valid_fields and val:
+                is_text = base_field in text_fields
+                target_field = f"trimmed_{base_field}" if is_text else base_field
+                if is_text and target_field not in queryset.query.annotations:
+                    queryset = queryset.annotate(**{target_field: Trim(base_field)})
+                
+                # Detect lookup suffix if any
+                if '__' in actual_param:
+                    suffix = actual_param.split('__', 1)[1]
+                    actual_param_target = f"{target_field}__{suffix}"
+                else:
+                    suffix = None
+                    actual_param_target = target_field
+                
+                val_list = [v.strip() for v in val.split(',') if v.strip()]
+                if suffix == 'in' or (not suffix and len(val_list) > 1):
+                    lookup = f"{target_field}__in"
+                    if is_exclude:
+                        queryset = queryset.exclude(**{lookup: val_list})
+                    else:
+                        queryset = queryset.filter(**{lookup: val_list})
+                elif suffix:
+                    # Specific suffix (e.g. __istartswith, __iexact, etc.)
+                    if is_exclude:
+                        queryset = queryset.exclude(**{actual_param_target: val_list[0] if len(val_list) == 1 else val_list})
+                    else:
+                        queryset = queryset.filter(**{actual_param_target: val_list[0] if len(val_list) == 1 else val_list})
+                else:
+                    if is_text:
+                        lookup = f"{target_field}__icontains"
+                        if is_exclude:
+                            queryset = queryset.exclude(**{lookup: val_list[0]})
+                        else:
+                            queryset = queryset.filter(**{lookup: val_list[0]})
+                    else:
+                        lookup = target_field
+                        if is_exclude:
+                            queryset = queryset.exclude(**{lookup: val_list[0]})
+                        else:
+                            queryset = queryset.filter(**{lookup: val_list[0]})
+
+        # If distinct_field requested, return distinct values directly
+        if distinct_field in valid_fields:
+            is_text = distinct_field in text_fields
+            target_distinct_field = f"trimmed_{distinct_field}" if is_text else distinct_field
+            if is_text and target_distinct_field not in queryset.query.annotations:
+                queryset = queryset.annotate(**{target_distinct_field: Trim(distinct_field)})
+            
+            # Apply search filter on the distinct field if present
+            distinct_search = request.query_params.get('distinct_search', '').strip()
+            if distinct_search:
+                if is_text:
+                    queryset = queryset.filter(**{f"{target_distinct_field}__icontains": distinct_search})
+                else:
+                    queryset = queryset.filter(**{target_distinct_field: distinct_search})
+            
+            distinct_qs = (
+                queryset.values(target_distinct_field)
+                .annotate(count=Count('*'))
+                .order_by(target_distinct_field)
+            )
+            
+            results = []
+            for item in distinct_qs:
+                val = item[target_distinct_field]
+                results.append({
+                    'value': val if val is not None else '',
+                    'count': item['count']
+                })
+            return Response(results)
+
+        # Sorting
+        sort_by_param = request.query_params.get('sort_by', '').strip()
+        sort_order = request.query_params.get('sort_order', 'asc').strip().lower()
+        if sort_by_param:
+            sort_fields = [f.strip() for f in sort_by_param.split(',')]
+            order_by_args = []
+            for field in sort_fields:
+                if field in valid_fields:
+                    is_text = field in text_fields
+                    target_sort_field = f"trimmed_{field}" if is_text else field
+                    if is_text and target_sort_field not in queryset.query.annotations:
+                        queryset = queryset.annotate(**{target_sort_field: Trim(field)})
+                    if sort_order == 'desc':
+                        order_by_args.append(f"-{target_sort_field}")
+                    else:
+                        order_by_args.append(target_sort_field)
+            if order_by_args:
+                queryset = queryset.order_by(*order_by_args)
+            else:
+                queryset = queryset.order_by('-fecha_efectiva', '-sec')
+        else:
+            # Default ordering
+            queryset = queryset.order_by('-fecha_efectiva', '-sec')
+
+        # Excel download or full list without pagination
+        no_pagination = request.query_params.get('no_pagination', 'false').strip().lower() == 'true'
+        if no_pagination:
+            serializer = CpTblMovCompleto290526Serializer(queryset, many=True)
+            return Response(serializer.data)
+
+        paginator = self.pagination_class()
+        page = paginator.paginate_queryset(queryset, request, view=self)
+        if page is not None:
+            serializer = CpTblMovCompleto290526Serializer(page, many=True)
+            return paginator.get_paginated_response(serializer.data)
+
+        serializer = CpTblMovCompleto290526Serializer(queryset, many=True)
+        return Response(serializer.data)
+
+
+class MovimientosPersonalStatsView(APIView):
+    """
+    Devuelve la estadística de movimientos de personal agrupado por accion_nombre y año.
+    Respuesta: {
+        "by_year": {
+            "2026": [{"accion_nombre": "REINGRESO", "total": 10}, ...],
+            ...
+        },
+        "all": [{"accion_nombre": "REINGRESO", "total": 150}, ...]
+    }
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        accion_nombre = request.query_params.get('accion_nombre')
+
+        from django.core.cache import cache
+        import hashlib
+        
+        if accion_nombre:
+            name_hash = hashlib.md5(accion_nombre.encode('utf-8')).hexdigest()
+            cache_key = f"movimientos_personal_stats_{name_hash}"
+        else:
+            cache_key = "movimientos_personal_stats"
+
+        cached_data = cache.get(cache_key)
+        if cached_data is not None:
+            return Response(cached_data, status=status.HTTP_200_OK)
+
+        from .models import CpTblMovCompleto290526
+        from django.db.models.functions import ExtractYear
+        from django.db.models import Count
+
+        queryset = CpTblMovCompleto290526.objects
+        if accion_nombre:
+            queryset = queryset.filter(accion_nombre=accion_nombre)
+            group_field = 'motivo_nombre'
+        else:
+            group_field = 'accion_nombre'
+
+        # Fetch stats grouped by year and group_field
+        stats_by_year = (
+            queryset
+            .exclude(**{f"{group_field}__isnull": True})
+            .exclude(**{f"{group_field}__exact": ""})
+            .annotate(year=ExtractYear('fecha_efectiva'))
+            .values('year', group_field)
+            .annotate(total=Count('*'))
+            .order_by('-year', '-total')
+        )
+
+        # Fetch stats for ALL years combined
+        stats_all = (
+            queryset
+            .exclude(**{f"{group_field}__isnull": True})
+            .exclude(**{f"{group_field}__exact": ""})
+            .values(group_field)
+            .annotate(total=Count('*'))
+            .order_by('-total')
+        )
+
+        by_year_dict = {}
+        for row in stats_by_year:
+            year_val = row['year']
+            year_str = str(year_val) if year_val is not None else "Sin Año"
+            if year_str not in by_year_dict:
+                by_year_dict[year_str] = []
+            by_year_dict[year_str].append({
+                group_field: row[group_field],
+                "total": row['total']
+            })
+
+        all_list = [{
+            group_field: row[group_field],
+            "total": row['total']
+        } for row in stats_all]
+
+        result = {
+            "by_year": by_year_dict,
+            "all": all_list
+        }
+
+        cache.set(cache_key, result, 1200)
+        return Response(result, status=status.HTTP_200_OK)
+

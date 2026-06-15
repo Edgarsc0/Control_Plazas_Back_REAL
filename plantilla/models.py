@@ -756,6 +756,9 @@ class MovPosBase(models.Model):
     fecha_captura = models.CharField(
         db_column="Fecha Captura", max_length=255, blank=True, null=True
     )
+    fecha_vacancia = models.CharField(
+        db_column="FECHA VACANCIA", max_length=255, blank=True, null=True
+    )
     cd_motivo = models.CharField(
         db_column="Cd Motivo", max_length=255, blank=True, null=True
     )
@@ -938,6 +941,7 @@ class ZafiroBitacora(models.Model):
     registros_posiciones = models.IntegerField(default=0)
     registros_completos = models.IntegerField(default=0)
     registros_bajas = models.IntegerField(default=0)
+    registros_historial = models.IntegerField(default=0)
     status = models.CharField(max_length=50, default="OK")
     error_message = models.TextField(null=True, blank=True)
     es_historico = models.BooleanField(default=False)
@@ -953,7 +957,7 @@ class ZafiroBitacora(models.Model):
 
 
 class CpTblMovCompleto290526Base(models.Model):
-    posicion = models.CharField(max_length=50, blank=True, null=True)
+    posicion = models.CharField(max_length=50, primary_key=True)
     num_empleado = models.CharField(max_length=20, blank=True, null=True)
     columna_c = models.CharField(
         db_column="columna_C", max_length=100, blank=True, null=True
@@ -1014,7 +1018,7 @@ class CpTblMovCompleto290526Base(models.Model):
 
 class CpTblMovCompleto290526(CpTblMovCompleto290526Base):
     class Meta:
-        managed = True
+        managed = False
         db_table = "cp_tbl_mov_completo_29_05_26"
 
 class CpTblMovCompleto290526Staging(CpTblMovCompleto290526Base):
