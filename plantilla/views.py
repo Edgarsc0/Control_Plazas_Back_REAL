@@ -1,12 +1,14 @@
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework import status
-from rest_framework.permissions import IsAuthenticated, AllowAny
-from django.conf import settings
+import json
 
-from .models import PlantillaQuincenal, Plantilla1800Plazas, EmpleadosCompletosSig, MovPos
-from django.db.models import Count, Q, Sum, Case, When, IntegerField, Max, Subquery, OuterRef
-from django.db.models.expressions import RawSQL
+from django.conf import settings
+from django.db.models import Case, Count, F, IntegerField, Q, Sum, When
+from rest_framework import status
+from rest_framework.pagination import PageNumberPagination
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
+from .models import CuadroVacancia, EmpleadosCompletosSig, MovPos, Plantilla1800Plazas
 
 LATEST_MOVPOS_RAW_SQL = """
     SELECT id FROM (
@@ -39,6 +41,7 @@ OCUPADAS_RAW_SQL = """
 from django.core.cache import cache
 from django.db import connection
 
+
 def obtener_posiciones_activas():
     # Cache active position codes for 60 seconds to speed up parallel requests on page load
     cache_key = "active_position_codes"
@@ -57,32 +60,35 @@ def obtener_posiciones_activas():
             ) ranked WHERE rn = 1 AND `Estado Psn` = 'A'
         """)
         result = [row[0] for row in cursor.fetchall() if row[0]]
-        
+
     cache.set(cache_key, result, 1200)
     return result
 
 
 # Create your views here.
 import io
+
 import pandas as pd
 from django.http import HttpResponse
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
-from openpyxl.styles import PatternFill, Font, Border, Side, Alignment
+
 
 class ExportExcelView(APIView):
     """
     Vista genérica para exportar datos JSON a un archivo Excel (.xlsx) real con estilos institucionales.
     """
+
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
         data = request.data
-        filename = request.query_params.get('filename', 'Export.xlsx')
+        filename = request.query_params.get("filename", "Export.xlsx")
 
         if not data or not isinstance(data, list):
             return Response(
                 {"error": "Se requiere una lista de objetos para exportar."},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         try:
@@ -91,30 +97,38 @@ class ExportExcelView(APIView):
 
             # Crear el archivo Excel en memoria
             output = io.BytesIO()
-            
+
             # Forzar conversión de todas las columnas a tipos básicos para evitar errores de serialización
             for col in df.columns:
-                if df[col].dtype == 'object':
-                    df[col] = df[col].fillna('')
+                if df[col].dtype == "object":
+                    df[col] = df[col].fillna("")
 
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                df.to_excel(writer, index=False, sheet_name='Plantilla')
-                
+            with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                df.to_excel(writer, index=False, sheet_name="Plantilla")
+
                 workbook = writer.book
-                worksheet = writer.sheets['Plantilla']
+                worksheet = writer.sheets["Plantilla"]
 
                 # --- ESTILOS ROBUSTOS ---
                 # Usamos códigos ARGB completos (FF + Hex) para máxima compatibilidad
-                header_fill = PatternFill(start_color="FF621F32", end_color="FF621F32", fill_type="solid")
-                zebra_fill = PatternFill(start_color="FFF9FAFB", end_color="FFF9FAFB", fill_type="solid")
-                header_font = Font(color="FFFFFFFF", bold=True, size=11, name='Calibri')
-                data_font = Font(size=10, name='Calibri')
-                
-                side = Side(style='thin', color="FFD1D5DB")
+                header_fill = PatternFill(
+                    start_color="FF621F32", end_color="FF621F32", fill_type="solid"
+                )
+                zebra_fill = PatternFill(
+                    start_color="FFF9FAFB", end_color="FFF9FAFB", fill_type="solid"
+                )
+                header_font = Font(color="FFFFFFFF", bold=True, size=11, name="Calibri")
+                data_font = Font(size=10, name="Calibri")
+
+                side = Side(style="thin", color="FFD1D5DB")
                 thin_border = Border(left=side, right=side, top=side, bottom=side)
 
-                align_center = Alignment(horizontal='center', vertical='center', wrap_text=True)
-                align_left = Alignment(horizontal='left', vertical='center', wrap_text=True)
+                align_center = Alignment(
+                    horizontal="center", vertical="center", wrap_text=True
+                )
+                align_left = Alignment(
+                    horizontal="left", vertical="center", wrap_text=True
+                )
 
                 # --- PROCESAR ENCABEZADOS ---
                 for col_num, column_title in enumerate(df.columns, 1):
@@ -123,27 +137,32 @@ class ExportExcelView(APIView):
                     cell.font = header_font
                     cell.border = thin_border
                     cell.alignment = align_center
-                    
+
                     # Cálculo de ancho ultra-seguro
                     try:
                         # Obtenemos el máximo largo de los datos en esta columna
                         # Filtramos nulos y convertimos a string antes de medir
                         lengths = df[column_title].astype(str).map(len)
                         max_val_len = lengths.max() if not lengths.empty else 0
-                        
+
                         # Manejo de NaN o valores no numéricos en el cálculo
-                        if pd.isna(max_val_len): max_val_len = 0
-                        
+                        if pd.isna(max_val_len):
+                            max_val_len = 0
+
                         header_len = len(str(column_title))
                         final_width = max(float(max_val_len), float(header_len)) + 3
-                        
-                        worksheet.column_dimensions[get_column_letter(col_num)].width = min(final_width, 60)
+
+                        worksheet.column_dimensions[
+                            get_column_letter(col_num)
+                        ].width = min(final_width, 60)
                     except:
-                        worksheet.column_dimensions[get_column_letter(col_num)].width = 20
+                        worksheet.column_dimensions[
+                            get_column_letter(col_num)
+                        ].width = 20
 
                 # --- PROCESAR DATOS ---
                 # Limitamos el procesamiento de estilos si el dataset es masivo para evitar timeouts
-                max_styled_rows = 5000 
+                max_styled_rows = 5000
                 rows_to_process = min(len(df), max_styled_rows)
 
                 for row_num in range(2, rows_to_process + 2):
@@ -157,7 +176,7 @@ class ExportExcelView(APIView):
                             cell.fill = zebra_fill
 
                 # Congelar paneles
-                worksheet.freeze_panes = 'B2'
+                worksheet.freeze_panes = "B2"
 
             output.seek(0)
             file_data = output.read()
@@ -168,19 +187,20 @@ class ExportExcelView(APIView):
             # Preparar la respuesta HTTP
             response = HttpResponse(
                 file_data,
-                content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
-            response['Content-Disposition'] = f'attachment; filename="{filename}"'
-            
+            response["Content-Disposition"] = f'attachment; filename="{filename}"'
+
             return response
 
         except Exception as e:
             # Loguear el error en la consola del servidor para diagnóstico
             import traceback
+
             traceback.print_exc()
             return Response(
                 {"error": "Fallo crítico al generar Excel", "detail": str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
 
@@ -195,7 +215,7 @@ class PlantillaVacantesPorNivelView(APIView):
             return Response(cached_data, status=status.HTTP_200_OK)
 
         active_position_codes = obtener_posiciones_activas()
-        
+
         resultados = list(
             EmpleadosCompletosSig.objects.filter(posicion__in=active_position_codes)
             .values("nivel")
@@ -225,14 +245,12 @@ class PlantillaVacantesPorNivelResumenView(APIView):
             return cached_data
 
         active_position_codes = obtener_posiciones_activas()
-        
-        base_qs = EmpleadosCompletosSig.objects.filter(posicion__in=active_position_codes).exclude(
-            Q(estado_nomina__isnull=True) | Q(estado_nomina="Estado Nomina")
-        )
 
-        estados_unicos = (
-            base_qs.values_list("estado_nomina", flat=True).distinct()
-        )
+        base_qs = EmpleadosCompletosSig.objects.filter(
+            posicion__in=active_position_codes
+        ).exclude(Q(estado_nomina__isnull=True) | Q(estado_nomina="Estado Nomina"))
+
+        estados_unicos = base_qs.values_list("estado_nomina", flat=True).distinct()
 
         # total_niveles: Conteo de niveles distintos
         # total_registros: Conteo total de filas válidas
@@ -291,7 +309,7 @@ class EmpleadosCompletosEstatusNominaResumenView(APIView):
                 .values("estado_nomina")
                 .annotate(total=Count("pk"))
             )
-            
+
             resumen = {
                 "total_registros": total_registros,
                 "Activo": 0,
@@ -300,11 +318,11 @@ class EmpleadosCompletosEstatusNominaResumenView(APIView):
                 "Licencia": 0,
                 "Licencia_Medica": 0,
             }
-            
+
             for item in conteo_raw:
                 estado = item.get("estado_nomina")
                 total = item.get("total") or 0
-                
+
                 # Normalizar estados según el mapeo solicitado
                 if not estado or estado.strip() == "":
                     label = "Vacante"
@@ -320,9 +338,9 @@ class EmpleadosCompletosEstatusNominaResumenView(APIView):
                         label = "Licencia_Medica"
                     else:
                         label = "Vacante"
-                
+
                 resumen[label] = resumen.get(label, 0) + total
-            
+
             cache.set(cache_key, resumen, 1200)
             return Response(resumen, status=status.HTTP_200_OK)
         except Exception as e:
@@ -349,7 +367,9 @@ class EmpleadosCompletosActivosDetalleView(APIView):
                 posiciones_qs = Plantilla1800Plazas.objects.all()
                 if oficio:
                     if oficio == "(vacío)":
-                        posiciones_qs = posiciones_qs.filter(Q(of_de_solicitud__isnull=True) | Q(of_de_solicitud=""))
+                        posiciones_qs = posiciones_qs.filter(
+                            Q(of_de_solicitud__isnull=True) | Q(of_de_solicitud="")
+                        )
                     else:
                         posiciones_qs = posiciones_qs.filter(of_de_solicitud=oficio)
                 if nivel:
@@ -358,7 +378,9 @@ class EmpleadosCompletosActivosDetalleView(APIView):
                 posiciones_list = list(posiciones_qs.values_list("posición", flat=True))
 
                 # Filtrar EmpleadosCompletosSig
-                queryset = EmpleadosCompletosSig.objects.filter(posicion__in=posiciones_list)
+                queryset = EmpleadosCompletosSig.objects.filter(
+                    posicion__in=posiciones_list
+                )
                 resultados = list(queryset.values())
 
                 cache.set(cache_key, resultados, 300)
@@ -378,11 +400,13 @@ class EmpleadosCompletosActivosDetalleView(APIView):
             active_position_codes = obtener_posiciones_activas()
 
             # 2. Obtener todos los registros de EMPLEADOS_COMPLETOS_SIG en esas posiciones
-            queryset = EmpleadosCompletosSig.objects.filter(posicion__in=active_position_codes)
-            
+            queryset = EmpleadosCompletosSig.objects.filter(
+                posicion__in=active_position_codes
+            )
+
             # 3. Serializar directamente
             resultados = list(queryset.values())
-            
+
             cache.set(cache_key, resultados, 1200)
             return Response(resultados, status=status.HTTP_200_OK)
         except Exception as e:
@@ -414,7 +438,7 @@ class EmpleadosPorNivelYEstatusView(APIView):
             "Suspendido": "S",
             "Licencia": "L",
             "Licencia Médica": "P",
-            "Vacante": "V"
+            "Vacante": "V",
         }
         db_estado_nomina = estatus_map_reverse.get(estado_nomina, estado_nomina)
 
@@ -434,7 +458,9 @@ class EmpleadosPorNivelYEstatusView(APIView):
 
             if estado_nomina == "Vacante":
                 # La UI agrupa bajo "Vacante" todo lo que no sea A, S, L, P
-                queryset = base_qs.exclude(estado_nomina__in=['A', 'a', 'S', 's', 'L', 'l', 'P', 'p'])
+                queryset = base_qs.exclude(
+                    estado_nomina__in=["A", "a", "S", "s", "L", "l", "P", "p"]
+                )
             else:
                 queryset = base_qs.filter(estado_nomina__iexact=db_estado_nomina)
 
@@ -516,11 +542,16 @@ class OcupacionPorOficiosResumenView(APIView):
         # 4. Obtener los conteos de ocupados agrupados
         conteo_ocupado = (
             Plantilla1800Plazas.objects.exclude(
-                Q(rfc__isnull=True) | Q(rfc="") |
-                Q(curp__isnull=True) | Q(curp="") |
-                Q(num_empleado__isnull=True) | Q(num_empleado="") |
-                Q(nombres__isnull=True) | Q(nombres="")
-            ).values("of_de_solicitud", "nivel")
+                Q(rfc__isnull=True)
+                | Q(rfc="")
+                | Q(curp__isnull=True)
+                | Q(curp="")
+                | Q(num_empleado__isnull=True)
+                | Q(num_empleado="")
+                | Q(nombres__isnull=True)
+                | Q(nombres="")
+            )
+            .values("of_de_solicitud", "nivel")
             .annotate(cantidad=Count("id"))
             .order_by("of_de_solicitud", "nivel")
         )
@@ -535,13 +566,15 @@ class OcupacionPorOficiosResumenView(APIView):
 
             if oficina not in ocupadas_dict:
                 ocupadas_dict[oficina] = {}
-            ocupadas_dict[oficina][nivel] = ocupadas_dict[oficina].get(nivel, 0) + cantidad
+            ocupadas_dict[oficina][nivel] = (
+                ocupadas_dict[oficina].get(nivel, 0) + cantidad
+            )
 
         # 5. Construir las filas
         filas = []
         totales_generales = {nivel: 0 for nivel in niveles}
         totales_generales["(vacío)"] = 0
-        
+
         totales_ocupados_generales = {nivel: 0 for nivel in niveles}
         totales_ocupados_generales["(vacío)"] = 0
 
@@ -549,7 +582,9 @@ class OcupacionPorOficiosResumenView(APIView):
         total_ocupadas_gral = 0
 
         # Ordenar oficinas
-        oficinas_ordenadas = sorted(list(data_dict.keys()), key=lambda x: (x == "(vacío)", x))
+        oficinas_ordenadas = sorted(
+            list(data_dict.keys()), key=lambda x: (x == "(vacío)", x)
+        )
 
         for oficina in oficinas_ordenadas:
             conteos_nivel = data_dict[oficina]
@@ -564,7 +599,7 @@ class OcupacionPorOficiosResumenView(APIView):
                 count_nivel = conteos_nivel.get(nivel, 0)
                 fila[nivel] = count_nivel
                 totales_generales[nivel] += count_nivel
-                
+
                 count_ocupadas = ocupadas_oficina.get(nivel, 0)
                 fila[f"ocupadas_{nivel}"] = count_ocupadas
                 totales_ocupados_generales[nivel] += count_ocupadas
@@ -573,14 +608,14 @@ class OcupacionPorOficiosResumenView(APIView):
             count_vacio = conteos_nivel.get("(vacío)", 0)
             fila["(vacío)"] = count_vacio
             totales_generales["(vacío)"] += count_vacio
-            
+
             count_ocupadas_vacio = ocupadas_oficina.get("(vacío)", 0)
             fila["ocupadas_(vacío)"] = count_ocupadas_vacio
             totales_ocupados_generales["(vacío)"] += count_ocupadas_vacio
 
             fila["Total Resultado"] = total_oficina
             fila["ocupadas_Total Resultado"] = total_ocupadas_oficina
-            
+
             total_gral += total_oficina
             total_ocupadas_gral += total_ocupadas_oficina
 
@@ -591,10 +626,10 @@ class OcupacionPorOficiosResumenView(APIView):
         for nivel in niveles:
             fila_total[nivel] = totales_generales[nivel]
             fila_total[f"ocupadas_{nivel}"] = totales_ocupados_generales[nivel]
-            
+
         fila_total["(vacío)"] = totales_generales["(vacío)"]
         fila_total["ocupadas_(vacío)"] = totales_ocupados_generales["(vacío)"]
-        
+
         fila_total["Total Resultado"] = total_gral
         fila_total["ocupadas_Total Resultado"] = total_ocupadas_gral
 
@@ -604,16 +639,23 @@ class OcupacionPorOficiosResumenView(APIView):
         columnas = ["Of. De Solicitud"] + niveles + ["(vacío)", "Total Resultado"]
 
         # 8. Conteo de posiciones ocupadas que inician con 2026
-        ocupadas_2026 = Plantilla1800Plazas.objects.filter(
-            posición__startswith='2026'
-        ).exclude(rfc__isnull=True).exclude(rfc__exact='') \
-         .exclude(curp__isnull=True).exclude(curp__exact='') \
-         .exclude(num_empleado__isnull=True).exclude(num_empleado__exact='') \
-         .exclude(nombres__isnull=True).exclude(nombres__exact='') \
-         .count()
+        ocupadas_2026 = (
+            Plantilla1800Plazas.objects.filter(posición__startswith="2026")
+            .exclude(rfc__isnull=True)
+            .exclude(rfc__exact="")
+            .exclude(curp__isnull=True)
+            .exclude(curp__exact="")
+            .exclude(num_empleado__isnull=True)
+            .exclude(num_empleado__exact="")
+            .exclude(nombres__isnull=True)
+            .exclude(nombres__exact="")
+            .count()
+        )
 
         # 9. Conteo de empleados ocupados en EmpleadosCompletosSig que inician con 2026
-        ocupadas_sig = EmpleadosCompletosSig.objects.filter(val_estat='Ocupada', posicion__startswith='2026').count()
+        ocupadas_sig = EmpleadosCompletosSig.objects.filter(
+            val_estat="Ocupada", posicion__startswith="2026"
+        ).count()
 
         return {
             "filas": filas,
@@ -705,7 +747,7 @@ class RegistrosPorOficio1800PlazasView(APIView):
         data = {
             "total_registros": total_registros,
             "resultados": resultados,
-            "tipo_vista": "resumen" if resumen else "detallado"
+            "tipo_vista": "resumen" if resumen else "detallado",
         }
         if not resumen:
             data["total"] = total_count
@@ -724,48 +766,57 @@ class Plantilla1800PlazasListView(APIView):
     """
     Vista para listar y actualizar registros de la plantilla de 1800 plazas.
     """
+
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        queryset = Plantilla1800Plazas.objects.all().order_by('id')
+        queryset = Plantilla1800Plazas.objects.all().order_by("id")
         # Simple pagination or limit if needed, for now all
         resultados = list(queryset.values())
         return Response(resultados, status=status.HTTP_200_OK)
 
     def patch(self, request):
         """
-        Actualización parcial de registros. 
+        Actualización parcial de registros.
         Se espera un objeto con el ID y los campos a cambiar, o una lista de ellos.
         """
         data = request.data
         if not isinstance(data, list):
             data = [data]
-        
+
         actualizados = 0
         errores = []
 
         for item in data:
-            id_registro = item.get('id')
+            id_registro = item.get("id")
             if not id_registro:
                 errores.append({"error": "ID no proporcionado", "item": item})
                 continue
-            
+
             try:
                 registro = Plantilla1800Plazas.objects.get(id=id_registro)
                 for field, value in item.items():
-                    if field != 'id' and hasattr(registro, field):
+                    if field != "id" and hasattr(registro, field):
                         setattr(registro, field, value)
                 registro.save()
                 actualizados += 1
             except Plantilla1800Plazas.DoesNotExist:
-                errores.append({"error": f"Registro con ID {id_registro} no existe", "id": id_registro})
+                errores.append(
+                    {
+                        "error": f"Registro con ID {id_registro} no existe",
+                        "id": id_registro,
+                    }
+                )
             except Exception as e:
                 errores.append({"error": str(e), "id": id_registro})
 
-        return Response({
-            "mensaje": f"{actualizados} registros actualizados correctamente.",
-            "errores": errores
-        }, status=status.HTTP_200_OK if not errores else status.HTTP_207_MULTI_STATUS)
+        return Response(
+            {
+                "mensaje": f"{actualizados} registros actualizados correctamente.",
+                "errores": errores,
+            },
+            status=status.HTTP_200_OK if not errores else status.HTTP_207_MULTI_STATUS,
+        )
 
 
 class EmpleadosEstatusPorNivelUaView(APIView):
@@ -773,6 +824,7 @@ class EmpleadosEstatusPorNivelUaView(APIView):
     Vista para resumir el estatus de la nómina por nivel y por unidad administrativa (UA)
     de los empleados correspondientes a las posiciones activas.
     """
+
     permission_classes = [IsAuthenticated]
 
     def get(self, request, *args, **kwargs):
@@ -786,37 +838,40 @@ class EmpleadosEstatusPorNivelUaView(APIView):
             active_position_codes = obtener_posiciones_activas()
 
             # 2. Obtener todos los registros de EMPLEADOS_COMPLETOS_SIG en esas posiciones
-            active_employees = EmpleadosCompletosSig.objects.filter(posicion__in=active_position_codes)
+            active_employees = EmpleadosCompletosSig.objects.filter(
+                posicion__in=active_position_codes
+            )
 
             # 3. Agrupación por Nivel y Estado de Nómina
-            nivel_data = active_employees.values('nivel', 'estado_nomina').annotate(count=Count('id'))
-            
+            nivel_data = active_employees.values("nivel", "estado_nomina").annotate(
+                count=Count("id")
+            )
+
             por_nivel = {}
             for item in nivel_data:
-                nv = item['nivel'] or "SIN NIVEL"
-                est = item['estado_nomina'] or "SIN ESTATUS"
+                nv = item["nivel"] or "SIN NIVEL"
+                est = item["estado_nomina"] or "SIN ESTATUS"
                 if nv not in por_nivel:
                     por_nivel[nv] = {}
-                por_nivel[nv][est] = item['count']
+                por_nivel[nv][est] = item["count"]
 
             # 4. Agrupación por Unidad Administrativa, Nivel y Estado de Nómina
-            ua_data = active_employees.values('unidad_administrativa', 'nivel', 'estado_nomina').annotate(count=Count('id'))
-            
+            ua_data = active_employees.values(
+                "unidad_administrativa", "nivel", "estado_nomina"
+            ).annotate(count=Count("id"))
+
             por_ua = {}
             for item in ua_data:
-                ua_name = item['unidad_administrativa'] or "SIN UA"
-                nv = item['nivel'] or "SIN NIVEL"
-                est = item['estado_nomina'] or "SIN ESTATUS"
+                ua_name = item["unidad_administrativa"] or "SIN UA"
+                nv = item["nivel"] or "SIN NIVEL"
+                est = item["estado_nomina"] or "SIN ESTATUS"
                 if ua_name not in por_ua:
                     por_ua[ua_name] = {}
                 if nv not in por_ua[ua_name]:
                     por_ua[ua_name][nv] = {}
-                por_ua[ua_name][nv][est] = item['count']
+                por_ua[ua_name][nv][est] = item["count"]
 
-            res_data = {
-                "por_nivel": por_nivel,
-                "por_ua": por_ua
-            }
+            res_data = {"por_nivel": por_nivel, "por_ua": por_ua}
             cache.set(cache_key, res_data, 1200)
             return Response(res_data, status=status.HTTP_200_OK)
         except Exception as e:
@@ -829,6 +884,7 @@ class EmpleadosDistribucionGeograficaView(APIView):
     """
     Retorna la distribución geográfica agrupada por coordenadas para los empleados activos.
     """
+
     permission_classes = [IsAuthenticated]
 
     def get(self, request, *args, **kwargs):
@@ -842,106 +898,110 @@ class EmpleadosDistribucionGeograficaView(APIView):
             active_position_codes = obtener_posiciones_activas()
 
             # 2. Obtener todos los registros de EMPLEADOS_COMPLETOS_SIG en esas posiciones con coordenadas válidas
-            active_employees = EmpleadosCompletosSig.objects.filter(
-                posicion__in=active_position_codes
-            ).exclude(
-                latitud__isnull=True
-            ).exclude(
-                latitud=''
-            ).exclude(
-                longitud__isnull=True
-            ).exclude(
-                longitud=''
+            active_employees = (
+                EmpleadosCompletosSig.objects.filter(posicion__in=active_position_codes)
+                .exclude(latitud__isnull=True)
+                .exclude(latitud="")
+                .exclude(longitud__isnull=True)
+                .exclude(longitud="")
             )
 
             # 3. Traer los campos necesarios para agrupar
             queryset_values = active_employees.values(
-                'latitud', 
-                'longitud', 
-                'descripcion_ubicacion', 
-                'aduana', 
-                'tipo',
-                'unidad_administrativa'
+                "latitud",
+                "longitud",
+                "descripcion_ubicacion",
+                "aduana",
+                "tipo",
+                "unidad_administrativa",
             )
 
             groups = {}
             for emp in queryset_values:
-                lat_raw = emp['latitud']
-                lng_raw = emp['longitud']
-                
+                lat_raw = emp["latitud"]
+                lng_raw = emp["longitud"]
+
                 if not lat_raw or not lng_raw:
                     continue
-                
+
                 lat = lat_raw.strip()
                 lng = lng_raw.strip()
-                
+
                 if not lat or not lng:
                     continue
-                
+
                 try:
                     float(lat)
                     float(lng)
                 except ValueError:
                     continue
-                
+
                 key = (lat, lng)
-                aduana_name = emp['aduana'] or ""
+                aduana_name = emp["aduana"] or ""
                 is_aduana = aduana_name.strip().upper().startswith("ADUANA")
-                tipo_val = emp['tipo'] or ""
-                desc = emp['descripcion_ubicacion'] or ""
-                ua = emp['unidad_administrativa'] or ""
+                tipo_val = emp["tipo"] or ""
+                desc = emp["descripcion_ubicacion"] or ""
+                ua = emp["unidad_administrativa"] or ""
 
                 if key not in groups:
                     groups[key] = {
-                        'latitud': lat,
-                        'longitud': lng,
-                        'descripcion_ubicacion': desc,
-                        'aduana': aduana_name,
-                        'is_aduana': is_aduana,
-                        'tipo': tipo_val,
-                        'count': 0,
-                        'descripciones_set': set(),
-                        'aduanas_set': set(),
-                        'tipos_set': set(),
-                        'uas_set': set()
+                        "latitud": lat,
+                        "longitud": lng,
+                        "descripcion_ubicacion": desc,
+                        "aduana": aduana_name,
+                        "is_aduana": is_aduana,
+                        "tipo": tipo_val,
+                        "count": 0,
+                        "descripciones_set": set(),
+                        "aduanas_set": set(),
+                        "tipos_set": set(),
+                        "uas_set": set(),
                     }
 
                 g = groups[key]
-                g['count'] += 1
+                g["count"] += 1
                 if desc:
-                    g['descripciones_set'].add(desc)
+                    g["descripciones_set"].add(desc)
                 if aduana_name:
-                    g['aduanas_set'].add(aduana_name)
+                    g["aduanas_set"].add(aduana_name)
                 if tipo_val:
-                    g['tipos_set'].add(tipo_val)
+                    g["tipos_set"].add(tipo_val)
                 if ua:
-                    g['uas_set'].add(ua)
+                    g["uas_set"].add(ua)
 
                 if is_aduana:
-                    g['is_aduana'] = True
-                    if not g['aduana'] or not g['aduana'].strip().upper().startswith("ADUANA"):
-                        g['aduana'] = aduana_name
-                    if tipo_val and not g['tipo']:
-                        g['tipo'] = tipo_val
+                    g["is_aduana"] = True
+                    if not g["aduana"] or not g["aduana"].strip().upper().startswith(
+                        "ADUANA"
+                    ):
+                        g["aduana"] = aduana_name
+                    if tipo_val and not g["tipo"]:
+                        g["tipo"] = tipo_val
 
             resultados = []
             for key, g in groups.items():
-                nombre_principal = g['aduana'] if g['is_aduana'] and g['aduana'] else g['descripcion_ubicacion']
-                if not nombre_principal and g['descripciones_set']:
-                    nombre_principal = list(g['descripciones_set'])[0]
-                
-                resultados.append({
-                    'latitud': float(g['latitud']),
-                    'longitud': float(g['longitud']),
-                    'nombre': nombre_principal or "Ubicación sin nombre",
-                    'is_aduana': g['is_aduana'],
-                    'tipo': g['tipo'],
-                    'count': g['count'],
-                    'descripciones': list(g['descripciones_set']),
-                    'aduanas': list(g['aduanas_set']),
-                    'tipos': list(g['tipos_set']),
-                    'uas': list(g['uas_set'])
-                })
+                nombre_principal = (
+                    g["aduana"]
+                    if g["is_aduana"] and g["aduana"]
+                    else g["descripcion_ubicacion"]
+                )
+                if not nombre_principal and g["descripciones_set"]:
+                    nombre_principal = list(g["descripciones_set"])[0]
+
+                resultados.append(
+                    {
+                        "latitud": float(g["latitud"]),
+                        "longitud": float(g["longitud"]),
+                        "nombre": nombre_principal or "Ubicación sin nombre",
+                        "is_aduana": g["is_aduana"],
+                        "tipo": g["tipo"],
+                        "count": g["count"],
+                        "descripciones": list(g["descripciones_set"]),
+                        "aduanas": list(g["aduanas_set"]),
+                        "tipos": list(g["tipos_set"]),
+                        "uas": list(g["uas_set"]),
+                    }
+                )
 
             cache.set(cache_key, resultados, 1200)
             return Response(resultados, status=status.HTTP_200_OK)
@@ -950,94 +1010,733 @@ class EmpleadosDistribucionGeograficaView(APIView):
                 {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
+
+def get_mov_pos_stats():
+    cache_key = "mov_pos_card_stats"
+    stats = cache.get(cache_key)
+    if stats is None:
+        from django.db import connection
+
+        query = """
+            SELECT 
+                COUNT(*) as total_movimientos,
+                COUNT(DISTINCT `Nº Pos Actual`) as todas_posiciones,
+                SUM(CASE WHEN rn = 1 AND `Estado Psn` = 'A' THEN 1 ELSE 0 END) as posiciones_activas,
+                SUM(CASE WHEN rn = 1 AND `Estado Psn` = 'I' THEN 1 ELSE 0 END) as posiciones_inactivas
+            FROM (
+                SELECT 
+                    `Estado Psn`,
+                    `Nº Pos Actual`,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY `Nº Pos Actual` 
+                        ORDER BY `F Efva` DESC, `Fecha Captura` DESC, `F/H Últ Actz` DESC, id DESC
+                    ) as rn
+                FROM MOV_POS
+            ) ranked;
+        """
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(query)
+                row = cursor.fetchone()
+                if row:
+                    stats = {
+                        "total_movimientos": int(row[0]) if row[0] is not None else 0,
+                        "todas_posiciones": int(row[1]) if row[1] is not None else 0,
+                        "posiciones_activas": int(row[2]) if row[2] is not None else 0,
+                        "posiciones_inactivas": int(row[3])
+                        if row[3] is not None
+                        else 0,
+                    }
+                else:
+                    stats = {
+                        "total_movimientos": 0,
+                        "todas_posiciones": 0,
+                        "posiciones_activas": 0,
+                        "posiciones_inactivas": 0,
+                    }
+        except Exception:
+            stats = {
+                "total_movimientos": 0,
+                "todas_posiciones": 0,
+                "posiciones_activas": 0,
+                "posiciones_inactivas": 0,
+            }
+        cache.set(cache_key, stats, 600)  # Cache for 10 minutes
+    return stats
+
+
+class MovPosPagination(PageNumberPagination):
+    page_size = 50
+    page_size_query_param = "page_size"
+    max_page_size = 10000
+
+    def get_paginated_response(self, data):
+        stats = get_mov_pos_stats()
+        return Response(
+            {
+                "next": self.get_next_link(),
+                "previous": self.get_previous_link(),
+                "count": self.page.paginator.count,
+                "results": data,
+                "stats": stats,
+            }
+        )
+
+
 class MovPosDetalleView(APIView):
     permission_classes = [IsAuthenticated]
+    pagination_class = MovPosPagination
 
     def get(self, request, *args, **kwargs):
+        from django.db import connection
+        from django.db.models import Count, Q
+        from django.db.models.functions import Trim
+
+        from .models import MovPos, Plantilla1800Plazas
+
+        queryset = MovPos.objects.all()
+
         oficio = request.query_params.get("oficio")
         nivel = request.query_params.get("nivel")
 
         if oficio or nivel:
-            cache_key = f"mov_pos_detalle_{oficio}_{nivel}"
-            cached_data = cache.get(cache_key)
-            if cached_data is not None:
-                return Response(cached_data, status=status.HTTP_200_OK)
+            posiciones_qs = Plantilla1800Plazas.objects.all()
+            if oficio:
+                if oficio == "(vacío)":
+                    posiciones_qs = posiciones_qs.filter(
+                        Q(of_de_solicitud__isnull=True) | Q(of_de_solicitud="")
+                    )
+                else:
+                    posiciones_qs = posiciones_qs.filter(of_de_solicitud=oficio)
+            if nivel:
+                posiciones_qs = posiciones_qs.filter(nivel=nivel)
 
-            try:
-                # Obtener posiciones de Plantilla1800Plazas que cumplan los filtros
-                posiciones_qs = Plantilla1800Plazas.objects.all()
-                if oficio:
-                    if oficio == "(vacío)":
-                        posiciones_qs = posiciones_qs.filter(Q(of_de_solicitud__isnull=True) | Q(of_de_solicitud=""))
-                    else:
-                        posiciones_qs = posiciones_qs.filter(of_de_solicitud=oficio)
-                if nivel:
-                    posiciones_qs = posiciones_qs.filter(nivel=nivel)
+            posiciones_list = list(posiciones_qs.values_list("posición", flat=True))
+            queryset = queryset.filter(no_pos_actual__in=posiciones_list)
 
-                posiciones_list = list(posiciones_qs.values_list("posición", flat=True))
-
-                # 1. Contar movimientos totales por posición
-                counts = dict(MovPos.objects.filter(no_pos_actual__in=posiciones_list).values_list('no_pos_actual').annotate(c=Count('id')))
-
-                # 2. Obtener el último registro por posición de MovPos
+        # is_latest filter (defaults to True unless explicitly requested as 'false')
+        is_latest = request.query_params.get("is_latest", "true").lower() != "false"
+        if is_latest:
+            cache_key_latest = "latest_movpos_sub_ids"
+            sub_ids = cache.get(cache_key_latest)
+            if sub_ids is None:
                 with connection.cursor() as cursor:
                     cursor.execute(LATEST_MOVPOS_RAW_SQL)
                     sub_ids = [row[0] for row in cursor.fetchall() if row[0]]
-                    
+                cache.set(cache_key_latest, sub_ids, 600)  # Cache for 10 minutes
+            queryset = queryset.filter(id__in=sub_ids)
+
+        # Search query
+        search_query = request.query_params.get("search", "").strip()
+        if search_query:
+            queryset = queryset.filter(
+                Q(no_pos_actual__icontains=search_query)
+                | Q(motivo__icontains=search_query)
+                | Q(unidad_de_negocio__icontains=search_query)
+                | Q(unidad_adva__icontains=search_query)
+                | Q(puesto_ptal__icontains=search_query)
+                | Q(descr__icontains=search_query)
+                | Q(nombre_puesto__icontains=search_query)
+            )
+
+        # Dynamic Column Filters
+        valid_fields = [f.name for f in MovPos._meta.get_fields()]
+        text_fields = [
+            f.name
+            for f in MovPos._meta.get_fields()
+            if f.get_internal_type() in ["CharField", "TextField"]
+        ]
+
+        for param, val in request.query_params.items():
+            if param in [
+                "distinct_field",
+                "distinct_search",
+                "page",
+                "page_size",
+                "search",
+                "is_latest",
+                "no_pagination",
+                "sort_by",
+                "sort_order",
+                "oficio",
+                "nivel",
+                "advanced_filters",
+            ]:
+                continue
+            is_exclude = False
+            actual_param = param
+            if param.startswith("exclude__"):
+                is_exclude = True
+                actual_param = param[9:]
+
+            base_field = actual_param.split("__")[0]
+
+            if base_field in valid_fields and val:
+                is_text = base_field in text_fields
+                target_field = f"trimmed_{base_field}" if is_text else base_field
+                if is_text and target_field not in queryset.query.annotations:
+                    queryset = queryset.annotate(**{target_field: Trim(base_field)})
+
+                # Detect lookup suffix if any
+                if "__" in actual_param:
+                    suffix = actual_param.split("__", 1)[1]
+                    actual_param_target = f"{target_field}__{suffix}"
+                else:
+                    suffix = None
+                    actual_param_target = target_field
+
+                val_list = [v.strip() for v in val.split(",") if v.strip()]
+                if suffix == "in" or (not suffix and len(val_list) > 1):
+                    lookup = f"{target_field}__in"
+                    if is_exclude:
+                        queryset = queryset.exclude(**{lookup: val_list})
+                    else:
+                        queryset = queryset.filter(**{lookup: val_list})
+                elif suffix:
+                    if is_exclude:
+                        queryset = queryset.exclude(
+                            **{
+                                actual_param_target: val_list[0]
+                                if len(val_list) == 1
+                                else val_list
+                            }
+                        )
+                    else:
+                        queryset = queryset.filter(
+                            **{
+                                actual_param_target: val_list[0]
+                                if len(val_list) == 1
+                                else val_list
+                            }
+                        )
+                else:
+                    if is_text:
+                        lookup = f"{target_field}__icontains"
+                        if is_exclude:
+                            queryset = queryset.exclude(**{lookup: val_list[0]})
+                        else:
+                            queryset = queryset.filter(**{lookup: val_list[0]})
+                    else:
+                        lookup = target_field
+                        if is_exclude:
+                            queryset = queryset.exclude(**{lookup: val_list[0]})
+                        else:
+                            queryset = queryset.filter(**{lookup: val_list[0]})
+
+        # "ocupacion" is a computed column (not a real model field), so the
+        # generic Dynamic Column Filters loop above silently skips it.
+        # Apply it explicitly here, before pagination/sorting/distinct.
+        # Covers both the dropdown (__in) and the free-text column filter
+        # (__icontains/__istartswith/__iendswith/__iexact, incl. exclude__).
+        ocupacion_param_key = None
+        for k in request.query_params.keys():
+            base = k[9:] if k.startswith("exclude__") else k
+            if base == "ocupacion" or base.startswith("ocupacion__"):
+                ocupacion_param_key = k
+                break
+
+        if ocupacion_param_key:
+            cache_key_ocupadas = "mov_pos_ocupadas_set"
+            posiciones_ocupadas = cache.get(cache_key_ocupadas)
+            if posiciones_ocupadas is None:
+                with connection.cursor() as cursor:
                     cursor.execute(OCUPADAS_RAW_SQL)
-                    posiciones_ocupadas = set([row[0] for row in cursor.fetchall() if row[0]])
+                    posiciones_ocupadas = set(
+                        [row[0] for row in cursor.fetchall() if row[0]]
+                    )
+                cache.set(cache_key_ocupadas, posiciones_ocupadas, 600)
 
-                # 3. Filtrar los últimos registros
-                queryset = MovPos.objects.filter(id__in=sub_ids).filter(no_pos_actual__in=posiciones_list)
-                resultados = list(queryset.values())
+            ocupacion_raw = request.query_params.get(ocupacion_param_key, "")
+            is_exclude = ocupacion_param_key.startswith("exclude__")
+            suffix = (
+                ocupacion_param_key.split("__", 1)[1]
+                if "__"
+                in (ocupacion_param_key[9:] if is_exclude else ocupacion_param_key)
+                else "in"
+            )
 
-                # 4. Mapear en memoria
-                for r in resultados:
-                    pos = r.get('no_pos_actual')
-                    r['total_movimientos'] = counts.get(pos, 1)
-                    r['estatus_ocupacion'] = 'Ocupada' if pos in posiciones_ocupadas else 'Vacante'
+            if suffix == "in":
+                selected_vals = set(
+                    v.strip() for v in ocupacion_raw.split(",") if v.strip()
+                )
+            else:
+                # Free-text condition: evaluate against the two possible values.
+                needle = ocupacion_raw.strip().lower()
+                candidates = ["Ocupada", "Vacante"]
+                if suffix in ("icontains",):
+                    selected_vals = {c for c in candidates if needle in c.lower()}
+                elif suffix in ("istartswith",):
+                    selected_vals = {
+                        c for c in candidates if c.lower().startswith(needle)
+                    }
+                elif suffix in ("iendswith",):
+                    selected_vals = {
+                        c for c in candidates if c.lower().endswith(needle)
+                    }
+                elif suffix in ("iexact",):
+                    selected_vals = {c for c in candidates if c.lower() == needle}
+                else:
+                    selected_vals = set(candidates)
 
-                cache.set(cache_key, resultados, 300)
-                return Response(resultados, status=status.HTTP_200_OK)
-            except Exception as e:
-                return Response(
-                    {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            if is_exclude:
+                selected_vals = {"Ocupada", "Vacante"} - selected_vals
+
+            want_ocupada = "Ocupada" in selected_vals
+            want_vacante = "Vacante" in selected_vals
+
+            if want_ocupada and not want_vacante:
+                queryset = queryset.filter(no_pos_actual__in=list(posiciones_ocupadas))
+            elif want_vacante and not want_ocupada:
+                queryset = queryset.exclude(no_pos_actual__in=list(posiciones_ocupadas))
+            elif not want_ocupada and not want_vacante:
+                queryset = queryset.none()
+
+        # "total_movimientos" is also a computed column (count of historical
+        # rows per posicion), so it needs the same explicit handling.
+        total_mov_raw = request.query_params.get(
+            "total_movimientos__in"
+        ) or request.query_params.get("total_movimientos")
+        if total_mov_raw:
+            selected_counts = set()
+            for v in total_mov_raw.split(","):
+                v = v.strip()
+                if v:
+                    try:
+                        selected_counts.add(int(v))
+                    except ValueError:
+                        pass
+            if selected_counts:
+                pos_list = list(
+                    queryset.values_list("no_pos_actual", flat=True).distinct()
+                )
+                full_counts = dict(
+                    MovPos.objects.filter(no_pos_actual__in=pos_list)
+                    .values("no_pos_actual")
+                    .annotate(c=Count("id"))
+                    .values_list("no_pos_actual", "c")
+                )
+                match_pos = [p for p, c in full_counts.items() if c in selected_counts]
+                queryset = queryset.filter(no_pos_actual__in=match_pos)
+            else:
+                queryset = queryset.none()
+
+        # If distinct_field requested, return distinct values directly
+        distinct_field = request.query_params.get("distinct_field", "").strip()
+
+        # Special handling for computed columns not present in the model
+        if distinct_field == "ocupacion":
+            cache_key_ocupadas = "mov_pos_ocupadas_set"
+            posiciones_ocupadas = cache.get(cache_key_ocupadas)
+            if posiciones_ocupadas is None:
+                with connection.cursor() as cursor:
+                    cursor.execute(OCUPADAS_RAW_SQL)
+                    posiciones_ocupadas = set(
+                        [row[0] for row in cursor.fetchall() if row[0]]
+                    )
+                cache.set(cache_key_ocupadas, posiciones_ocupadas, 600)
+            all_pos = list(queryset.values_list("no_pos_actual", flat=True))
+            ocupadas = sum(1 for p in all_pos if p in posiciones_ocupadas)
+            vacantes = len(all_pos) - ocupadas
+            results = []
+            if ocupadas > 0:
+                results.append({"value": "Ocupada", "count": ocupadas})
+            if vacantes > 0:
+                results.append({"value": "Vacante", "count": vacantes})
+            return Response(results)
+
+        if distinct_field == "total_movimientos":
+            pos_list = list(queryset.values_list("no_pos_actual", flat=True).distinct())
+            if pos_list:
+                full_counts = dict(
+                    MovPos.objects.filter(no_pos_actual__in=pos_list)
+                    .values("no_pos_actual")
+                    .annotate(c=Count("id"))
+                    .values_list("no_pos_actual", "c")
+                )
+                count_dist = {}
+                for c in full_counts.values():
+                    count_dist[c] = count_dist.get(c, 0) + 1
+                results = [
+                    {"value": str(k), "count": v} for k, v in sorted(count_dist.items())
+                ]
+            else:
+                results = []
+            return Response(results)
+
+        if distinct_field in valid_fields:
+            is_text = distinct_field in text_fields
+            target_distinct_field = (
+                f"trimmed_{distinct_field}" if is_text else distinct_field
+            )
+            if is_text and target_distinct_field not in queryset.query.annotations:
+                queryset = queryset.annotate(
+                    **{target_distinct_field: Trim(distinct_field)}
                 )
 
-        cache_key = "mov_pos_detalle"
-        cached_data = cache.get(cache_key)
-        if cached_data is not None:
-            return Response(cached_data, status=status.HTTP_200_OK)
+            # Apply search filter on the distinct field if present
+            distinct_search = request.query_params.get("distinct_search", "").strip()
+            if distinct_search:
+                if is_text:
+                    queryset = queryset.filter(
+                        **{f"{target_distinct_field}__icontains": distinct_search}
+                    )
+                else:
+                    queryset = queryset.filter(
+                        **{target_distinct_field: distinct_search}
+                    )
 
-        try:
-            # 1. Contar movimientos totales por posición (Consulta agrupada súper rápida)
-            counts = dict(MovPos.objects.values_list('no_pos_actual').annotate(c=Count('id')))
-
-            # 2. Obtener el último registro por posición de MovPos
-            # Evaluamos la subquery en memoria de Python para evitar subconsultas correlacionadas lentas en SQLite
-            with connection.cursor() as cursor:
-                cursor.execute(LATEST_MOVPOS_RAW_SQL)
-                sub_ids = [row[0] for row in cursor.fetchall() if row[0]]
-
-                cursor.execute(OCUPADAS_RAW_SQL)
-                posiciones_ocupadas = set([row[0] for row in cursor.fetchall() if row[0]])
-            
-            # 3. Filtrar los últimos registros
-            queryset = MovPos.objects.filter(id__in=sub_ids)
-            resultados = list(queryset.values())
-            
-            # 4. Mapear en memoria para evitar el problema N+1 o Subquery correlacionado en SQL
-            for r in resultados:
-                pos = r.get('no_pos_actual')
-                r['total_movimientos'] = counts.get(pos, 1)
-                r['estatus_ocupacion'] = 'Ocupada' if pos in posiciones_ocupadas else 'Vacante'
-            
-            cache.set(cache_key, resultados, 1200)
-            return Response(resultados, status=status.HTTP_200_OK)
-        except Exception as e:
-            return Response(
-                {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            distinct_qs = (
+                queryset.values(target_distinct_field)
+                .annotate(count=Count("*"))
+                .order_by(target_distinct_field)
             )
+
+            results = []
+            for item in distinct_qs:
+                val = item[target_distinct_field]
+                results.append(
+                    {"value": val if val is not None else "", "count": item["count"]}
+                )
+            return Response(results)
+
+        # Advanced filters (built from the "Filtros Avanzados" modal).
+        # JSON array of: { column, condition, compareType, compareColumn, value, logic }
+        # logic on item i combines (AND/OR) with the running Q from items 0..i-1.
+        advanced_filters_raw = request.query_params.get("advanced_filters", "").strip()
+        if advanced_filters_raw:
+            try:
+                advanced_conditions = json.loads(advanced_filters_raw)
+            except (ValueError, TypeError):
+                advanced_conditions = []
+
+            if isinstance(advanced_conditions, list):
+                advanced_conditions = advanced_conditions[:20]  # sanity cap
+
+                date_lookup_by_condition = {
+                    "before": "lt",
+                    "after": "gt",
+                    "equals": None,
+                    "not_equals": None,
+                }
+                text_lookup_by_condition = {
+                    "contains": ("icontains", False),
+                    "not_contains": ("icontains", True),
+                    "starts_with": ("istartswith", False),
+                    "not_starts_with": ("istartswith", True),
+                    "ends_with": ("iendswith", False),
+                    "not_ends_with": ("iendswith", True),
+                    "equals": ("iexact", False),
+                    "not_equals": ("iexact", True),
+                }
+
+                def resolve_target_field(field_name):
+                    """Returns the field name to filter/sort on, annotating Trim() for text fields."""
+                    if field_name in text_fields:
+                        target = f"trimmed_{field_name}"
+                        nonlocal queryset
+                        if target not in queryset.query.annotations:
+                            queryset = queryset.annotate(**{target: Trim(field_name)})
+                        return target
+                    return field_name
+
+                # "ocupacion" and "total_movimientos" are computed columns (not real
+                # model fields), so they're invisible to valid_fields/text_fields and
+                # would otherwise be silently dropped by build_condition_q below.
+                COMPUTED_COLUMNS = {"ocupacion", "total_movimientos"}
+
+                def get_posiciones_ocupadas():
+                    cache_key_ocupadas = "mov_pos_ocupadas_set"
+                    posiciones_ocupadas = cache.get(cache_key_ocupadas)
+                    if posiciones_ocupadas is None:
+                        with connection.cursor() as cursor:
+                            cursor.execute(OCUPADAS_RAW_SQL)
+                            posiciones_ocupadas = set(
+                                [row[0] for row in cursor.fetchall() if row[0]]
+                            )
+                        cache.set(cache_key_ocupadas, posiciones_ocupadas, 600)
+                    return posiciones_ocupadas
+
+                def text_condition_matches(haystack, condition, needle):
+                    s = str(haystack).lower()
+                    n = str(needle).lower()
+                    if condition == "contains":
+                        return n in s
+                    if condition == "not_contains":
+                        return n not in s
+                    if condition == "starts_with":
+                        return s.startswith(n)
+                    if condition == "not_starts_with":
+                        return not s.startswith(n)
+                    if condition == "ends_with":
+                        return s.endswith(n)
+                    if condition == "not_ends_with":
+                        return not s.endswith(n)
+                    if condition == "equals":
+                        return s == n
+                    if condition == "not_equals":
+                        return s != n
+                    return False
+
+                def build_computed_condition_q(column, condition, value):
+                    nonlocal queryset
+                    if column == "ocupacion":
+                        posiciones_ocupadas = get_posiciones_ocupadas()
+                        candidates = ["Ocupada", "Vacante"]
+                        selected = {
+                            c
+                            for c in candidates
+                            if text_condition_matches(c, condition, value)
+                        }
+
+                        want_ocupada = "Ocupada" in selected
+                        want_vacante = "Vacante" in selected
+                        if want_ocupada and want_vacante:
+                            return Q(no_pos_actual__isnull=False) | Q(
+                                no_pos_actual__isnull=True
+                            )
+                        if want_ocupada:
+                            return Q(no_pos_actual__in=list(posiciones_ocupadas))
+                        if want_vacante:
+                            return ~Q(no_pos_actual__in=list(posiciones_ocupadas))
+                        return Q(pk__in=[])
+
+                    if column == "total_movimientos":
+                        pos_list = list(
+                            queryset.values_list("no_pos_actual", flat=True).distinct()
+                        )
+                        if not pos_list:
+                            return Q(pk__in=[])
+                        full_counts = dict(
+                            MovPos.objects.filter(no_pos_actual__in=pos_list)
+                            .values("no_pos_actual")
+                            .annotate(c=Count("id"))
+                            .values_list("no_pos_actual", "c")
+                        )
+                        match_pos = [
+                            p
+                            for p, c in full_counts.items()
+                            if text_condition_matches(c, condition, value)
+                        ]
+                        if not match_pos:
+                            return Q(pk__in=[])
+                        return Q(no_pos_actual__in=match_pos)
+
+                    return None
+
+                def build_condition_q(cond):
+                    if not isinstance(cond, dict):
+                        return None
+                    column = cond.get("column")
+
+                    if column in COMPUTED_COLUMNS:
+                        if cond.get("compareType", "valor") == "campo":
+                            return None  # comparing a computed column to another field isn't supported
+                        value = cond.get("value", "")
+                        if value is None or str(value).strip() == "":
+                            return None
+                        return build_computed_condition_q(
+                            column,
+                            cond.get("condition", "contains"),
+                            str(value).strip(),
+                        )
+
+                    if column not in valid_fields:
+                        return None
+
+                    condition = cond.get("condition", "contains")
+                    compare_type = cond.get("compareType", "valor")
+                    target_field = resolve_target_field(column)
+                    is_text = column in text_fields
+
+                    if compare_type == "campo":
+                        compare_column = cond.get("compareColumn")
+                        if compare_column not in valid_fields:
+                            return None
+                        target_compare_field = resolve_target_field(compare_column)
+                        f_expr = F(target_compare_field)
+
+                        if condition == "equals":
+                            return Q(**{target_field: f_expr})
+                        if condition == "not_equals":
+                            return ~Q(**{target_field: f_expr})
+                        if condition == "before":
+                            return Q(**{f"{target_field}__lt": f_expr})
+                        if condition == "after":
+                            return Q(**{f"{target_field}__gt": f_expr})
+                        return None
+
+                    # compare_type == 'valor'
+                    value = cond.get("value", "")
+                    if value is None or str(value).strip() == "":
+                        return None
+                    value = str(value).strip()
+
+                    if condition in ("before", "after"):
+                        lookup = date_lookup_by_condition.get(condition)
+                        if not lookup:
+                            return None
+                        return Q(**{f"{target_field}__{lookup}": value})
+
+                    if is_text and condition in text_lookup_by_condition:
+                        lookup, negate = text_lookup_by_condition[condition]
+                        q = Q(**{f"{target_field}__{lookup}": value})
+                        return ~q if negate else q
+
+                    if condition == "equals":
+                        return Q(**{target_field: value})
+                    if condition == "not_equals":
+                        return ~Q(**{target_field: value})
+
+                    return None
+
+                combined_q = None
+                for cond in advanced_conditions:
+                    q = build_condition_q(cond)
+                    if q is None:
+                        continue
+                    if combined_q is None:
+                        combined_q = q
+                    elif (cond.get("logic") or "AND").upper() == "OR":
+                        combined_q = combined_q | q
+                    else:
+                        combined_q = combined_q & q
+
+                if combined_q is not None:
+                    queryset = queryset.filter(combined_q)
+
+        # Sorting
+        sort_by_param = request.query_params.get("sort_by", "").strip()
+        sort_order = request.query_params.get("sort_order", "desc").strip().lower()
+        if sort_by_param:
+            sort_fields = [f.strip() for f in sort_by_param.split(",")]
+            order_by_args = []
+            for field in sort_fields:
+                if field in valid_fields:
+                    is_text = field in text_fields
+                    target_sort_field = f"trimmed_{field}" if is_text else field
+                    if is_text and target_sort_field not in queryset.query.annotations:
+                        queryset = queryset.annotate(**{target_sort_field: Trim(field)})
+                    if sort_order == "desc":
+                        order_by_args.append(f"-{target_sort_field}")
+                    else:
+                        order_by_args.append(target_sort_field)
+            if order_by_args:
+                queryset = queryset.order_by(*order_by_args)
+            else:
+                queryset = queryset.order_by(
+                    "-f_efva", "-fecha_captura", "no_pos_actual"
+                )
+        else:
+            # Default ordering requested by the user:
+            # SELECT * FROM MOV_POS ORDERY BY fecha efectiva DESC, FECHA CAPTURA DESC, y ordenar tambien por posicion
+            queryset = queryset.order_by("-f_efva", "-fecha_captura", "no_pos_actual")
+
+        # Excel download or full list without pagination (bypass pagination if is_latest is true)
+        no_pagination = (
+            request.query_params.get("no_pagination", "false").strip().lower() == "true"
+            or is_latest
+        )
+        if no_pagination:
+            resultados = list(queryset.values())
+            counts = dict(
+                MovPos.objects.values_list("no_pos_actual").annotate(c=Count("id"))
+            )
+
+            cache_key_ocupadas = "mov_pos_ocupadas_set"
+            posiciones_ocupadas = cache.get(cache_key_ocupadas)
+            if posiciones_ocupadas is None:
+                with connection.cursor() as cursor:
+                    cursor.execute(OCUPADAS_RAW_SQL)
+                    posiciones_ocupadas = set(
+                        [row[0] for row in cursor.fetchall() if row[0]]
+                    )
+                cache.set(cache_key_ocupadas, posiciones_ocupadas, 600)
+
+            for r in resultados:
+                pos = r.get("no_pos_actual")
+                r["total_movimientos"] = counts.get(pos, 1)
+                r["estatus_ocupacion"] = (
+                    "Ocupada" if pos in posiciones_ocupadas else "Vacante"
+                )
+                r["ocupacion"] = r["estatus_ocupacion"]
+                r["fecha_vacancia"] = (
+                    "" if pos in posiciones_ocupadas else r.get("fecha_vacancia", "")
+                )
+
+            is_excel_mode = (
+                request.query_params.get("no_pagination", "false").strip().lower()
+                == "true"
+            )
+            if not is_excel_mode:
+                stats = get_mov_pos_stats()
+                return Response(
+                    {
+                        "next": None,
+                        "previous": None,
+                        "count": len(resultados),
+                        "results": resultados,
+                        "stats": stats,
+                    }
+                )
+            return Response(resultados)
+
+        paginator = self.pagination_class()
+        page = paginator.paginate_queryset(queryset.values(), request, view=self)
+        if page is not None:
+            resultados = list(page)
+            counts = dict(
+                MovPos.objects.values_list("no_pos_actual").annotate(c=Count("id"))
+            )
+
+            cache_key_ocupadas = "mov_pos_ocupadas_set"
+            posiciones_ocupadas = cache.get(cache_key_ocupadas)
+            if posiciones_ocupadas is None:
+                with connection.cursor() as cursor:
+                    cursor.execute(OCUPADAS_RAW_SQL)
+                    posiciones_ocupadas = set(
+                        [row[0] for row in cursor.fetchall() if row[0]]
+                    )
+                cache.set(cache_key_ocupadas, posiciones_ocupadas, 600)
+
+            for r in resultados:
+                pos = r.get("no_pos_actual")
+                r["total_movimientos"] = counts.get(pos, 1)
+                r["estatus_ocupacion"] = (
+                    "Ocupada" if pos in posiciones_ocupadas else "Vacante"
+                )
+                r["ocupacion"] = r["estatus_ocupacion"]
+                r["fecha_vacancia"] = (
+                    "" if pos in posiciones_ocupadas else r.get("fecha_vacancia", "")
+                )
+            return paginator.get_paginated_response(resultados)
+
+        resultados = list(queryset.values())
+        counts = dict(
+            MovPos.objects.values_list("no_pos_actual").annotate(c=Count("id"))
+        )
+
+        cache_key_ocupadas = "mov_pos_ocupadas_set"
+        posiciones_ocupadas = cache.get(cache_key_ocupadas)
+        if posiciones_ocupadas is None:
+            with connection.cursor() as cursor:
+                cursor.execute(OCUPADAS_RAW_SQL)
+                posiciones_ocupadas = set(
+                    [row[0] for row in cursor.fetchall() if row[0]]
+                )
+            cache.set(cache_key_ocupadas, posiciones_ocupadas, 600)
+
+        for r in resultados:
+            pos = r.get("no_pos_actual")
+            r["total_movimientos"] = counts.get(pos, 1)
+            r["estatus_ocupacion"] = (
+                "Ocupada" if pos in posiciones_ocupadas else "Vacante"
+            )
+            r["ocupacion"] = r["estatus_ocupacion"]
+            r["fecha_vacancia"] = (
+                "" if pos in posiciones_ocupadas else r.get("fecha_vacancia", "")
+            )
+        return Response(resultados)
+
 
 class MovPosHistoriaView(APIView):
     permission_classes = [IsAuthenticated]
@@ -1046,16 +1745,16 @@ class MovPosHistoriaView(APIView):
         posicion = request.query_params.get("posicion")
         if not posicion:
             return Response(
-                {"error": "Parámetro 'posicion' es requerido."}, 
-                status=status.HTTP_400_BAD_REQUEST
+                {"error": "Parámetro 'posicion' es requerido."},
+                status=status.HTTP_400_BAD_REQUEST,
             )
-        
+
         try:
             # Obtener todos los registros para la posición, ordenados del más reciente al más antiguo
-            queryset = MovPos.objects.filter(no_pos_actual=posicion).order_by('-id')
-            
+            queryset = MovPos.objects.filter(no_pos_actual=posicion).order_by("-id")
+
             resultados = list(queryset.values())
-            
+
             return Response(resultados, status=status.HTTP_200_OK)
         except Exception as e:
             return Response(
@@ -1063,29 +1762,32 @@ class MovPosHistoriaView(APIView):
             )
 
 
-from django.db import connection
-
 class CadenaMandoView(APIView):
     """
     Vista para buscar la cadena de mando jerárquica (Bottom-Up) en EMPLEADOS_COMPLETOS_SIG.
     Busca por posición, nombre completo o número de empleado, y usa un CTE recursivo para subir la jerarquía.
     """
+
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        query = request.query_params.get('q', '').strip()
+        query = request.query_params.get("q", "").strip()
         if not query:
-            return Response({"error": "Se requiere el parámetro 'q' para buscar."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": "Se requiere el parámetro 'q' para buscar."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         # 1. Buscar la posición base (la hoja/subordinado)
         base_employee = EmpleadosCompletosSig.objects.filter(
-            Q(posicion=query) | 
-            Q(nombres__icontains=query) | 
-            Q(id_empleado=query)
+            Q(posicion=query) | Q(nombres__icontains=query) | Q(id_empleado=query)
         ).first()
 
         if not base_employee:
-            return Response({"error": f"No se encontró un empleado con el criterio '{query}'."}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {"error": f"No se encontró un empleado con el criterio '{query}'."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
 
         base_posicion = base_employee.posicion
 
@@ -1129,71 +1831,123 @@ class CadenaMandoView(APIView):
                 cursor.execute(sql, [base_posicion])
                 columns = [col[0] for col in cursor.description]
                 results = [dict(zip(columns, row)) for row in cursor.fetchall()]
-                
-                return Response({
-                    "empleado_base": {
-                        "posicion": base_employee.posicion,
-                        "nombres": base_employee.nombres,
-                        "puesto_funcional": base_employee.nombre_puesto_funcional if hasattr(base_employee, 'nombre_puesto_funcional') else '',
-                        "nivel": base_employee.nivel if hasattr(base_employee, 'nivel') else '',
+
+                return Response(
+                    {
+                        "empleado_base": {
+                            "posicion": base_employee.posicion,
+                            "nombres": base_employee.nombres,
+                            "puesto_funcional": base_employee.nombre_puesto_funcional
+                            if hasattr(base_employee, "nombre_puesto_funcional")
+                            else "",
+                            "nivel": base_employee.nivel
+                            if hasattr(base_employee, "nivel")
+                            else "",
+                        },
+                        "cadena": results,
                     },
-                    "cadena": results
-                }, status=status.HTTP_200_OK)
+                    status=status.HTTP_200_OK,
+                )
         except Exception as e:
-            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response(
+                {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
 
 from .models import ZafiroBitacora
+
 
 class ZafiroBitacoraView(APIView):
     """
     Endpoint para obtener el historial de ejecuciones de ZAFIRO.
     """
+
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         limit = int(request.query_params.get("limit", 50))
         logs = ZafiroBitacora.objects.all()[:limit]
-        
+
         data = []
         for log in logs:
-            data.append({
-                "id": log.id,
-                "fecha_ejecucion": log.fecha_ejecucion.isoformat(),
-                "duracion_segundos": log.duracion_segundos,
-                "registros_posiciones": log.registros_posiciones,
-                "registros_completos": log.registros_completos,
-                "registros_bajas": log.registros_bajas,
-                "registros_historial": log.registros_historial,
-                "status": log.status,
-                "error_message": log.error_message,
-                "es_historico": log.es_historico,
-                "logs_en_vivo": log.logs_en_vivo,
-            })
-            
+            data.append(
+                {
+                    "id": log.id,
+                    "fecha_ejecucion": log.fecha_ejecucion.isoformat(),
+                    "duracion_segundos": log.duracion_segundos,
+                    "registros_posiciones": log.registros_posiciones,
+                    "registros_completos": log.registros_completos,
+                    "registros_bajas": log.registros_bajas,
+                    "registros_historial": log.registros_historial,
+                    "status": log.status,
+                    "error_message": log.error_message,
+                    "es_historico": log.es_historico,
+                    "logs_en_vivo": log.logs_en_vivo,
+                }
+            )
+
         return Response(data, status=status.HTTP_200_OK)
+
 
 class UltimaActualizacionZafiroView(APIView):
     """
     Endpoint público para obtener la fecha y estatus de la última actualización exitosa de ZAFIRO.
     """
+
     permission_classes = [AllowAny]
 
     def get(self, request):
-        last_success = ZafiroBitacora.objects.filter(status="EXITO").order_by("-fecha_ejecucion").first()
+        last_success = (
+            ZafiroBitacora.objects.filter(status="EXITO")
+            .order_by("-fecha_ejecucion")
+            .first()
+        )
         if not last_success:
-            last_success = ZafiroBitacora.objects.filter(status="OK").order_by("-fecha_ejecucion").first()
+            last_success = (
+                ZafiroBitacora.objects.filter(status="OK")
+                .order_by("-fecha_ejecucion")
+                .first()
+            )
         if not last_success:
             last_success = ZafiroBitacora.objects.all().first()
-            
+
         if last_success:
-            return Response({
-                "fecha": last_success.fecha_ejecucion.isoformat(),
-                "status": last_success.status
-            }, status=status.HTTP_200_OK)
-            
+            return Response(
+                {
+                    "fecha": last_success.fecha_ejecucion.isoformat(),
+                    "status": last_success.status,
+                },
+                status=status.HTTP_200_OK,
+            )
+
         return Response({"fecha": None, "status": None}, status=status.HTTP_200_OK)
 
+
+class IniciarSincronizacionZafiroView(APIView):
+    """
+    Endpoint para arrancar manualmente la sincronización de ZAFIRO.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if ZafiroBitacora.objects.filter(status="RUNNING").exists():
+            return Response(
+                {"error": "Ya hay una sincronización en ejecución en este momento."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        from .tasks import importar_zafiro
+
+        importar_zafiro.delay()
+        return Response(
+            {"message": "Sincronización manual iniciada correctamente."},
+            status=status.HTTP_200_OK,
+        )
+
+
 from django.views import View
+
 
 class ZafiroSSEView(View):
     """
@@ -1201,13 +1955,13 @@ class ZafiroSSEView(View):
     """
 
     def get(self, request):
-        from django.http import StreamingHttpResponse
         import redis
+        from django.http import StreamingHttpResponse
 
         def event_stream():
             r = redis.Redis.from_url(settings.CELERY_BROKER_URL)
             pubsub = r.pubsub()
-            pubsub.subscribe('zafiro_updates')
+            pubsub.subscribe("zafiro_updates")
 
             # Enviamos evento de inicialización de conexión
             yield "data: init\n\n"
@@ -1215,32 +1969,38 @@ class ZafiroSSEView(View):
             try:
                 while True:
                     # Esperar mensajes en el canal de redis con timeout de 20s
-                    message = pubsub.get_message(ignore_subscribe_messages=True, timeout=20.0)
+                    message = pubsub.get_message(
+                        ignore_subscribe_messages=True, timeout=20.0
+                    )
                     if message:
-                        date_str = message['data'].decode('utf-8')
+                        date_str = message["data"].decode("utf-8")
                         yield f"data: {date_str}\n\n"
                     else:
                         # Mantener conexión viva enviando pings
                         yield ": ping\n\n"
             except GeneratorExit:
                 try:
-                    pubsub.unsubscribe('zafiro_updates')
+                    pubsub.unsubscribe("zafiro_updates")
                     pubsub.close()
                 except Exception:
                     pass
 
-        response = StreamingHttpResponse(event_stream(), content_type="text/event-stream")
-        response['Cache-Control'] = 'no-cache'
-        response['X-Accel-Buffering'] = 'no'
+        response = StreamingHttpResponse(
+            event_stream(), content_type="text/event-stream"
+        )
+        response["Cache-Control"] = "no-cache"
+        response["X-Accel-Buffering"] = "no"
         return response
 
+
 from .models import BajasSig
-from django.db.models import Count
+
 
 class BajasSigListView(APIView):
     """
     Endpoint para obtener todos los registros de bajas sin paginación.
     """
+
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
@@ -1258,7 +2018,9 @@ class BajasSigListView(APIView):
                 posiciones_qs = Plantilla1800Plazas.objects.all()
                 if oficio:
                     if oficio == "(vacío)":
-                        posiciones_qs = posiciones_qs.filter(Q(of_de_solicitud__isnull=True) | Q(of_de_solicitud=""))
+                        posiciones_qs = posiciones_qs.filter(
+                            Q(of_de_solicitud__isnull=True) | Q(of_de_solicitud="")
+                        )
                     else:
                         posiciones_qs = posiciones_qs.filter(of_de_solicitud=oficio)
                 if nivel:
@@ -1266,7 +2028,9 @@ class BajasSigListView(APIView):
 
                 posiciones_list = list(posiciones_qs.values_list("posición", flat=True))
 
-                bajas = list(BajasSig.objects.filter(posicion__in=posiciones_list).values())
+                bajas = list(
+                    BajasSig.objects.filter(posicion__in=posiciones_list).values()
+                )
                 cache.set(cache_key, bajas, 300)
                 return Response(bajas, status=status.HTTP_200_OK)
             except Exception as e:
@@ -1289,6 +2053,7 @@ class BajasMotivosPieView(APIView):
     Devuelve el conteo de bajas agrupado por Motivo para la gráfica de pastel.
     Respuesta: [{"motivo": "...", "total": N}, ...] ordenado por total descendente.
     """
+
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
@@ -1298,14 +2063,15 @@ class BajasMotivosPieView(APIView):
             return Response(cached_data, status=status.HTTP_200_OK)
 
         data = (
-            BajasSig.objects
-            .exclude(motivo_descr__isnull=True)
+            BajasSig.objects.exclude(motivo_descr__isnull=True)
             .exclude(motivo_descr__exact="")
             .values("motivo_descr")
             .annotate(total=Count("id"))
             .order_by("-total")
         )
-        result = [{"motivo": row["motivo_descr"], "total": row["total"]} for row in data]
+        result = [
+            {"motivo": row["motivo_descr"], "total": row["total"]} for row in data
+        ]
         cache.set(cache_key, result, 1200)
         return Response(result, status=status.HTTP_200_OK)
 
@@ -1315,6 +2081,7 @@ class BajasHistoricoView(APIView):
     Devuelve la evolución histórica de bajas_sig obtenida de ZAFIRO_BITACORA.
     Agrupado por día (el registro más reciente de cada día donde registros_bajas > 0).
     """
+
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
@@ -1324,12 +2091,18 @@ class BajasHistoricoView(APIView):
             return Response(cached_data, status=status.HTTP_200_OK)
 
         from .models import ZafiroBitacora
-        queryset = ZafiroBitacora.objects.filter(registros_bajas__gt=0).order_by('fecha_ejecucion')
+
+        queryset = ZafiroBitacora.objects.filter(registros_bajas__gt=0).order_by(
+            "fecha_ejecucion"
+        )
         bajas_por_dia = {}
         for r in queryset:
             bajas_por_dia[str(r.fecha_ejecucion.date())] = r.registros_bajas
-        
-        resultado = [{"fecha": fecha, "registros_bajas": count} for fecha, count in sorted(bajas_por_dia.items())]
+
+        resultado = [
+            {"fecha": fecha, "registros_bajas": count}
+            for fecha, count in sorted(bajas_por_dia.items())
+        ]
         cache.set(cache_key, resultado, 1200)
         return Response(resultado, status=status.HTTP_200_OK)
 
@@ -1340,11 +2113,13 @@ class ExportarEstatusExcelView(APIView):
     Si ya existe en caché para esa consulta exacta, lo retorna instantáneamente.
     Si no, lo genera de forma síncrona en el hilo de la petición y lo retorna.
     """
+
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         from django.core.cache import cache
         from django.utils import timezone
+
         from plantilla.tasks import generar_excel_estatus_task
 
         uas_param = request.query_params.get("uas", "")
@@ -1352,34 +2127,48 @@ class ExportarEstatusExcelView(APIView):
         group_by = request.query_params.get("group_by", "ua")
 
         # Consultar si ya existe el archivo Excel final generado en caché para esta consulta exacta
-        cache_key_excel = f"excel_estatus_file_{uas_param}_{levels_param}_{group_by}"
+        import hashlib
+
+        raw_key = f"excel_estatus_file_{uas_param}_{levels_param}_{group_by}"
+        cache_key_excel = (
+            f"excel_estatus_file_{hashlib.md5(raw_key.encode('utf-8')).hexdigest()}"
+        )
         cached_excel_data = cache.get(cache_key_excel)
         if cached_excel_data is not None:
-            filename = f"Reporte_Plantilla_Estatus_{timezone.now().strftime('%Y-%m-%d')}.xlsx"
+            filename = (
+                f"Reporte_Plantilla_Estatus_{timezone.now().strftime('%Y-%m-%d')}.xlsx"
+            )
             response = HttpResponse(
                 cached_excel_data,
-                content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
-            response['Content-Disposition'] = f'attachment; filename="{filename}"'
+            response["Content-Disposition"] = f'attachment; filename="{filename}"'
             return response
 
         try:
             # Ejecutar la generación de forma síncrona
             generar_excel_estatus_task.__wrapped__(uas_param, levels_param, group_by)
         except Exception as e:
-            return HttpResponse(f"Error generando el reporte de Excel: {str(e)}", status=500)
+            return HttpResponse(
+                f"Error generando el reporte de Excel: {str(e)}", status=500
+            )
 
         # Recuperar el archivo generado desde la caché
         file_data = cache.get(cache_key_excel)
         if not file_data:
-            return HttpResponse("Error: No se pudo recuperar el archivo generado de la caché.", status=500)
+            return HttpResponse(
+                "Error: No se pudo recuperar el archivo generado de la caché.",
+                status=500,
+            )
 
-        filename = f"Reporte_Plantilla_Estatus_{timezone.now().strftime('%Y-%m-%d')}.xlsx"
+        filename = (
+            f"Reporte_Plantilla_Estatus_{timezone.now().strftime('%Y-%m-%d')}.xlsx"
+        )
         response = HttpResponse(
             file_data,
-            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
         return response
 
 
@@ -1389,9 +2178,10 @@ class OrganigramaSearchView(APIView):
     Si no se envía query, retorna todo el catálogo (útil para caché en memoria).
     Retorna la unidad_negocio para que el frontend sepa qué JSON cargar.
     """
+
     def get(self, request):
         query = request.GET.get("q", "").strip()
-            
+
         with connection.cursor() as cursor:
             if not query:
                 sql = """
@@ -1407,15 +2197,15 @@ class OrganigramaSearchView(APIView):
                     LIMIT 50
                 """
                 cursor.execute(sql, [f"%{query}%", f"%{query}%"])
-            
+
             rows = cursor.fetchall()
-            
+
         results = [
             {
                 "departamento": r[0],
                 "descripcion_larga": r[1],
                 "unidad_negocio": r[2],
-                "nivel_direccion": r[3]
+                "nivel_direccion": r[3],
             }
             for r in rows
         ]
@@ -1424,10 +2214,11 @@ class OrganigramaSearchView(APIView):
 
 class TorreCaballito3DView(APIView):
     permission_classes = [IsAuthenticated]
-    
+
     def get(self, request):
         from django.db import connection
-        query = '''
+
+        query = """
             SELECT 
                 e.`Descripción ubicación`,
                 e.`Unidad Administrativa`,
@@ -1449,48 +2240,42 @@ class TorreCaballito3DView(APIView):
               )
             GROUP BY e.`Descripción ubicación`, e.`Unidad Administrativa`
             ORDER BY e.`Descripción ubicación`, Total DESC;
-        '''
-        
+        """
+
         with connection.cursor() as cursor:
             cursor.execute(query)
             results = cursor.fetchall()
-            
+
         # Aggregate by floor
         floors_dict = {}
         for row in results:
             piso = row[0]
             ua = row[1] if row[1] else "No Asignada"
             count = row[2]
-            
+
             if piso not in floors_dict:
-                floors_dict[piso] = {
-                    'piso': piso,
-                    'count': 0,
-                    'uas': []
-                }
-            
-            floors_dict[piso]['count'] += count
-            floors_dict[piso]['uas'].append({
-                'nombre': ua,
-                'count': count
-            })
-            
+                floors_dict[piso] = {"piso": piso, "count": 0, "uas": []}
+
+            floors_dict[piso]["count"] += count
+            floors_dict[piso]["uas"].append({"nombre": ua, "count": count})
+
         return Response(list(floors_dict.values()))
 
 
 class TorreCaballitoEmpleadosView(APIView):
     permission_classes = [IsAuthenticated]
-    
+
     def get(self, request):
-        piso = request.query_params.get('piso', None)
-        ua = request.query_params.get('ua', None)
-        
+        piso = request.query_params.get("piso", None)
+        ua = request.query_params.get("ua", None)
+
         if not piso:
             return Response({"error": "Falta el parametro piso"}, status=400)
-            
+
         from django.db import connection
+
         if ua and ua.strip():
-            query = '''
+            query = """
                 SELECT 
                     e.`Posición`,
                     e.`Numempleado`,
@@ -1511,10 +2296,10 @@ class TorreCaballitoEmpleadosView(APIView):
                 WHERE e.`Descripción ubicación` = %s 
                   AND e.`Unidad Administrativa` = %s
                 ORDER BY e.`Nombres`;
-            '''
+            """
             params = [piso, ua]
         else:
-            query = '''
+            query = """
                 SELECT 
                     e.`Posición`,
                     e.`Numempleado`,
@@ -1534,47 +2319,56 @@ class TorreCaballitoEmpleadosView(APIView):
                 ) activas ON e.`Posición` = activas.`Nº Pos Actual`
                 WHERE e.`Descripción ubicación` = %s 
                 ORDER BY e.`Nombres`;
-            '''
+            """
             params = [piso]
-        
+
         with connection.cursor() as cursor:
             cursor.execute(query, params)
             results = cursor.fetchall()
-            
+
         data = []
         for row in results:
             raw_estatus = row[5]
-            if not raw_estatus or str(raw_estatus).strip() == '':
+            if not raw_estatus or str(raw_estatus).strip() == "":
                 estatus = "Vacante"
             else:
                 val = str(raw_estatus).strip().upper()
-                if val == "A": estatus = "Activo"
-                elif val == "S": estatus = "Suspendido"
-                elif val == "L": estatus = "Licencia"
-                elif val == "P": estatus = "Licencia Médica"
-                else: estatus = "Vacante"
-                
-            data.append({
-                "posicion": row[0],
-                "num_empleado": row[1],
-                "nombre": row[2],
-                "ua": row[3],
-                "ubicacion": row[4],
-                "estado_nomina": estatus
-            })
-            
+                if val == "A":
+                    estatus = "Activo"
+                elif val == "S":
+                    estatus = "Suspendido"
+                elif val == "L":
+                    estatus = "Licencia"
+                elif val == "P":
+                    estatus = "Licencia Médica"
+                else:
+                    estatus = "Vacante"
+
+            data.append(
+                {
+                    "posicion": row[0],
+                    "num_empleado": row[1],
+                    "nombre": row[2],
+                    "ua": row[3],
+                    "ubicacion": row[4],
+                    "estado_nomina": estatus,
+                }
+            )
+
         return Response(data)
+
 
 class TorreCaballitoSearchView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        q = request.query_params.get('q', '').strip()
+        q = request.query_params.get("q", "").strip()
         if not q or len(q) < 3:
             return Response({"results": []})
-        
+
         from django.db import connection
-        query = '''
+
+        query = """
             SELECT
                 e.`Posición`,
                 e.`Numempleado`,
@@ -1598,32 +2392,39 @@ class TorreCaballitoSearchView(APIView):
               )
               AND (e.`Nombres` LIKE %s OR e.`Numempleado` LIKE %s)
             LIMIT 20;
-        '''
-        
-        like_q = f'%{q}%'
+        """
+
+        like_q = f"%{q}%"
         with connection.cursor() as cursor:
             cursor.execute(query, [like_q, like_q])
             columns = [col[0] for col in cursor.description]
             results = [dict(zip(columns, row)) for row in cursor.fetchall()]
-            
+
         # Parse piso for frontend convenience
         import re
+
         for r in results:
-            match = re.search(r'10\s*P(?:iso)?\s*(\d+)', r['Descripción ubicación'] or '', re.IGNORECASE)
+            match = re.search(
+                r"10\s*P(?:iso)?\s*(\d+)",
+                r["Descripción ubicación"] or "",
+                re.IGNORECASE,
+            )
             if match:
-                r['piso_num'] = match.group(1)
+                r["piso_num"] = match.group(1)
             else:
-                r['piso_num'] = None
-                
+                r["piso_num"] = None
+
         return Response({"results": results})
 
 
 from rest_framework.pagination import PageNumberPagination
 
+
 class MovimientosPersonalPagination(PageNumberPagination):
     page_size = 50
-    page_size_query_param = 'page_size'
+    page_size_query_param = "page_size"
     max_page_size = 10000
+
 
 class MovimientosPersonalListView(APIView):
     permission_classes = [IsAuthenticated]
@@ -1632,62 +2433,62 @@ class MovimientosPersonalListView(APIView):
     def get(self, request):
         from .models import CpTblMovCompleto290526
         from .serializers import CpTblMovCompleto290526Serializer
-        
+
         queryset = CpTblMovCompleto290526.objects.all()
-        
+
         # Check if requesting distinct values for a field
-        distinct_field = request.query_params.get('distinct_field', '').strip()
-        
+        distinct_field = request.query_params.get("distinct_field", "").strip()
+
         # Search query
-        search_query = request.query_params.get('search', '').strip()
+        search_query = request.query_params.get("search", "").strip()
         if search_query:
             queryset = queryset.filter(
-                Q(posicion__icontains=search_query) |
-                Q(num_empleado__icontains=search_query) |
-                Q(nombre__icontains=search_query) |
-                Q(ap_pat__icontains=search_query) |
-                Q(ap_mat__icontains=search_query) |
-                Q(accion_nombre__icontains=search_query) |
-                Q(motivo_nombre__icontains=search_query) |
-                Q(un_admin__icontains=search_query)
+                Q(posicion__icontains=search_query)
+                | Q(num_empleado__icontains=search_query)
+                | Q(nombre__icontains=search_query)
+                | Q(ap_pat__icontains=search_query)
+                | Q(ap_mat__icontains=search_query)
+                | Q(accion_nombre__icontains=search_query)
+                | Q(motivo_nombre__icontains=search_query)
+                | Q(un_admin__icontains=search_query)
             )
 
         # Dynamic Column Filters
         valid_fields = [f.name for f in CpTblMovCompleto290526._meta.get_fields()]
-        text_fields = [f.name for f in CpTblMovCompleto290526._meta.get_fields() if f.get_internal_type() in ['CharField', 'TextField']]
+        text_fields = [
+            f.name
+            for f in CpTblMovCompleto290526._meta.get_fields()
+            if f.get_internal_type() in ["CharField", "TextField"]
+        ]
         from django.db.models.functions import Trim
-        
+
         for param, val in request.query_params.items():
-            if param == 'distinct_field':
+            if param == "distinct_field":
                 continue
             is_exclude = False
             actual_param = param
-            if param.startswith('exclude__'):
+            if param.startswith("exclude__"):
                 is_exclude = True
                 actual_param = param[9:]
-                
-            base_field = actual_param.split('__')[0]
-            
-            # Skip applying filter on the column we are querying distinct values for
-            if distinct_field and base_field == distinct_field:
-                continue
-                
+
+            base_field = actual_param.split("__")[0]
+
             if base_field in valid_fields and val:
                 is_text = base_field in text_fields
                 target_field = f"trimmed_{base_field}" if is_text else base_field
                 if is_text and target_field not in queryset.query.annotations:
                     queryset = queryset.annotate(**{target_field: Trim(base_field)})
-                
+
                 # Detect lookup suffix if any
-                if '__' in actual_param:
-                    suffix = actual_param.split('__', 1)[1]
+                if "__" in actual_param:
+                    suffix = actual_param.split("__", 1)[1]
                     actual_param_target = f"{target_field}__{suffix}"
                 else:
                     suffix = None
                     actual_param_target = target_field
-                
-                val_list = [v.strip() for v in val.split(',') if v.strip()]
-                if suffix == 'in' or (not suffix and len(val_list) > 1):
+
+                val_list = [v.strip() for v in val.split(",") if v.strip()]
+                if suffix == "in" or (not suffix and len(val_list) > 1):
                     lookup = f"{target_field}__in"
                     if is_exclude:
                         queryset = queryset.exclude(**{lookup: val_list})
@@ -1696,9 +2497,21 @@ class MovimientosPersonalListView(APIView):
                 elif suffix:
                     # Specific suffix (e.g. __istartswith, __iexact, etc.)
                     if is_exclude:
-                        queryset = queryset.exclude(**{actual_param_target: val_list[0] if len(val_list) == 1 else val_list})
+                        queryset = queryset.exclude(
+                            **{
+                                actual_param_target: val_list[0]
+                                if len(val_list) == 1
+                                else val_list
+                            }
+                        )
                     else:
-                        queryset = queryset.filter(**{actual_param_target: val_list[0] if len(val_list) == 1 else val_list})
+                        queryset = queryset.filter(
+                            **{
+                                actual_param_target: val_list[0]
+                                if len(val_list) == 1
+                                else val_list
+                            }
+                        )
                 else:
                     if is_text:
                         lookup = f"{target_field}__icontains"
@@ -1716,38 +2529,45 @@ class MovimientosPersonalListView(APIView):
         # If distinct_field requested, return distinct values directly
         if distinct_field in valid_fields:
             is_text = distinct_field in text_fields
-            target_distinct_field = f"trimmed_{distinct_field}" if is_text else distinct_field
+            target_distinct_field = (
+                f"trimmed_{distinct_field}" if is_text else distinct_field
+            )
             if is_text and target_distinct_field not in queryset.query.annotations:
-                queryset = queryset.annotate(**{target_distinct_field: Trim(distinct_field)})
-            
+                queryset = queryset.annotate(
+                    **{target_distinct_field: Trim(distinct_field)}
+                )
+
             # Apply search filter on the distinct field if present
-            distinct_search = request.query_params.get('distinct_search', '').strip()
+            distinct_search = request.query_params.get("distinct_search", "").strip()
             if distinct_search:
                 if is_text:
-                    queryset = queryset.filter(**{f"{target_distinct_field}__icontains": distinct_search})
+                    queryset = queryset.filter(
+                        **{f"{target_distinct_field}__icontains": distinct_search}
+                    )
                 else:
-                    queryset = queryset.filter(**{target_distinct_field: distinct_search})
-            
+                    queryset = queryset.filter(
+                        **{target_distinct_field: distinct_search}
+                    )
+
             distinct_qs = (
                 queryset.values(target_distinct_field)
-                .annotate(count=Count('*'))
+                .annotate(count=Count("*"))
                 .order_by(target_distinct_field)
             )
-            
+
             results = []
             for item in distinct_qs:
                 val = item[target_distinct_field]
-                results.append({
-                    'value': val if val is not None else '',
-                    'count': item['count']
-                })
+                results.append(
+                    {"value": val if val is not None else "", "count": item["count"]}
+                )
             return Response(results)
 
         # Sorting
-        sort_by_param = request.query_params.get('sort_by', '').strip()
-        sort_order = request.query_params.get('sort_order', 'asc').strip().lower()
+        sort_by_param = request.query_params.get("sort_by", "").strip()
+        sort_order = request.query_params.get("sort_order", "asc").strip().lower()
         if sort_by_param:
-            sort_fields = [f.strip() for f in sort_by_param.split(',')]
+            sort_fields = [f.strip() for f in sort_by_param.split(",")]
             order_by_args = []
             for field in sort_fields:
                 if field in valid_fields:
@@ -1755,20 +2575,22 @@ class MovimientosPersonalListView(APIView):
                     target_sort_field = f"trimmed_{field}" if is_text else field
                     if is_text and target_sort_field not in queryset.query.annotations:
                         queryset = queryset.annotate(**{target_sort_field: Trim(field)})
-                    if sort_order == 'desc':
+                    if sort_order == "desc":
                         order_by_args.append(f"-{target_sort_field}")
                     else:
                         order_by_args.append(target_sort_field)
             if order_by_args:
                 queryset = queryset.order_by(*order_by_args)
             else:
-                queryset = queryset.order_by('-fecha_efectiva', '-sec')
+                queryset = queryset.order_by("-fecha_efectiva", "-sec")
         else:
             # Default ordering
-            queryset = queryset.order_by('-fecha_efectiva', '-sec')
+            queryset = queryset.order_by("-fecha_efectiva", "-sec")
 
         # Excel download or full list without pagination
-        no_pagination = request.query_params.get('no_pagination', 'false').strip().lower() == 'true'
+        no_pagination = (
+            request.query_params.get("no_pagination", "false").strip().lower() == "true"
+        )
         if no_pagination:
             serializer = CpTblMovCompleto290526Serializer(queryset, many=True)
             return Response(serializer.data)
@@ -1794,77 +2616,156 @@ class MovimientosPersonalStatsView(APIView):
         "all": [{"accion_nombre": "REINGRESO", "total": 150}, ...]
     }
     """
+
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        accion_nombre = request.query_params.get('accion_nombre')
+        accion_nombre = request.query_params.get("accion_nombre")
+        fecha_captura__in = request.query_params.get("fecha_captura__in")
+
+        import hashlib
 
         from django.core.cache import cache
-        import hashlib
-        
+
+        cache_key_base = "movimientos_personal_stats"
         if accion_nombre:
-            name_hash = hashlib.md5(accion_nombre.encode('utf-8')).hexdigest()
-            cache_key = f"movimientos_personal_stats_{name_hash}"
-        else:
-            cache_key = "movimientos_personal_stats"
+            cache_key_base += f"_{accion_nombre}"
+        if fecha_captura__in:
+            cache_key_base += f"_fc_{fecha_captura__in}"
+
+        name_hash = hashlib.md5(cache_key_base.encode("utf-8")).hexdigest()
+        cache_key = f"mov_stats_{name_hash}"
 
         cached_data = cache.get(cache_key)
         if cached_data is not None:
             return Response(cached_data, status=status.HTTP_200_OK)
 
-        from .models import CpTblMovCompleto290526
-        from django.db.models.functions import ExtractYear
         from django.db.models import Count
+        from django.db.models.functions import ExtractYear
+
+        from .models import CpTblMovCompleto290526
 
         queryset = CpTblMovCompleto290526.objects
+
+        if fecha_captura__in:
+            val_list = [v.strip() for v in fecha_captura__in.split(",") if v.strip()]
+            from django.db.models import Q
+
+            q_objects = Q()
+            for val in val_list:
+                q_objects |= Q(fecha_captura__startswith=val)
+            queryset = queryset.filter(q_objects)
+
         if accion_nombre:
             queryset = queryset.filter(accion_nombre=accion_nombre)
-            group_field = 'motivo_nombre'
+            group_field = "motivo_nombre"
         else:
-            group_field = 'accion_nombre'
+            group_field = "accion_nombre"
 
         # Fetch stats grouped by year and group_field
         stats_by_year = (
-            queryset
-            .exclude(**{f"{group_field}__isnull": True})
+            queryset.exclude(**{f"{group_field}__isnull": True})
             .exclude(**{f"{group_field}__exact": ""})
-            .annotate(year=ExtractYear('fecha_efectiva'))
-            .values('year', group_field)
-            .annotate(total=Count('*'))
-            .order_by('-year', '-total')
+            .annotate(year=ExtractYear("fecha_efectiva"))
+            .values("year", group_field)
+            .annotate(total=Count("*"))
+            .order_by("-year", "-total")
         )
 
         # Fetch stats for ALL years combined
         stats_all = (
-            queryset
-            .exclude(**{f"{group_field}__isnull": True})
+            queryset.exclude(**{f"{group_field}__isnull": True})
             .exclude(**{f"{group_field}__exact": ""})
             .values(group_field)
-            .annotate(total=Count('*'))
-            .order_by('-total')
+            .annotate(total=Count("*"))
+            .order_by("-total")
         )
 
         by_year_dict = {}
         for row in stats_by_year:
-            year_val = row['year']
+            year_val = row["year"]
             year_str = str(year_val) if year_val is not None else "Sin Año"
             if year_str not in by_year_dict:
                 by_year_dict[year_str] = []
-            by_year_dict[year_str].append({
-                group_field: row[group_field],
-                "total": row['total']
-            })
+            by_year_dict[year_str].append(
+                {group_field: row[group_field], "total": row["total"]}
+            )
 
-        all_list = [{
-            group_field: row[group_field],
-            "total": row['total']
-        } for row in stats_all]
+        all_list = [
+            {group_field: row[group_field], "total": row["total"]} for row in stats_all
+        ]
 
-        result = {
-            "by_year": by_year_dict,
-            "all": all_list
-        }
+        result = {"by_year": by_year_dict, "all": all_list}
 
         cache.set(cache_key, result, 1200)
         return Response(result, status=status.HTTP_200_OK)
 
+
+class CuadroVacanciaView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        try:
+            resultados = CuadroVacancia.objects.all().order_by("-fecha").values()
+            return Response(list(resultados), status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response(
+                {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class DesgloseJerarquicoView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        from django.db import connection
+
+        query = """
+        SELECT
+            e.NJ,
+            e.`Nombre Puesto Funcional`,
+            e.`Nivel`,
+            e.`Posición`,
+            e.`Unidad de Negocio`,
+            e.`Cd UA`,
+            COALESCE(u.nombre, e.`Cd UA`) AS `nombre_ua`,
+            e.`Cd UN`,
+            e.`Código Presupuestal`,
+            e.`Escala`,
+            e.`Partida`,
+            e.`TIPO DE CONTRATACIÓN`,
+            e.`Sindicato`,
+            e.`Entidad Federativa`,
+            e.`nombreNJ`
+        FROM EMPLEADOS_COMPLETOS_SIG e
+        INNER JOIN MOV_POS m 
+            ON e.`Posición` = m.`Nº Pos Actual`
+        INNER JOIN (
+            SELECT id FROM (
+                SELECT id, ROW_NUMBER() OVER (
+                    PARTITION BY `Nº Pos Actual`
+                    ORDER BY `F Efva` DESC, `Fecha Captura` DESC, `F/H Últ Actz` DESC, id DESC
+                ) as rn
+                FROM MOV_POS
+            ) ranked WHERE rn = 1
+        ) latest ON m.id = latest.id
+        LEFT JOIN ua_unidadadministrativa u
+            ON TRIM(e.`Cd UA`) = TRIM(u.codigo)
+        WHERE m.`Estado Psn` = 'A'
+          AND e.`Estado Nómina` = ' '
+          AND m.`Nº Pos Actual` NOT LIKE '103L%%'
+          AND m.`Nº Pos Actual` NOT LIKE '1039%%'
+          AND m.`Partida Ptal` <> '11401';
+        """
+
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(query)
+                columns = [col[0] for col in cursor.description]
+                results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+            return Response(results, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response(
+                {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )

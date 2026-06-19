@@ -84,8 +84,8 @@ DATABASES = {
         "OPTIONS": {
             "init_command": "SET sql_mode='STRICT_TRANS_TABLES'",
             "connect_timeout": 10,
-            "read_timeout": 60,
-            "write_timeout": 60,
+            "read_timeout": 600,
+            "write_timeout": 600,
         },
     },
     "control_gestion": {
@@ -98,8 +98,8 @@ DATABASES = {
         "OPTIONS": {
             "init_command": "SET sql_mode='STRICT_TRANS_TABLES'",
             "connect_timeout": 10,
-            "read_timeout": 60,
-            "write_timeout": 60,
+            "read_timeout": 600,
+            "write_timeout": 600,
         },
     },
 }

@@ -19,7 +19,10 @@ import logging
 import os
 import subprocess
 import time
+import sys
 from pathlib import Path
+
+csv.field_size_limit(sys.maxsize)
 
 from celery import shared_task
 from django.conf import settings
@@ -88,40 +91,50 @@ def _ejecutar_script_node(arg_index: int, download_dir: str, script_path: str, b
     Raises:
         RuntimeError: Si el script falla o el CSV no aparece.
     """
-    csv_name = ZAFIRO_FILES[arg_index]
-    csv_path = Path(download_dir) / csv_name
+    import tempfile
+    import shutil
 
-    # Si existe un CSV previo, lo eliminamos para que la lógica de
-    # detección de "nuevo archivo" en index.js funcione correctamente.
-    if csv_path.exists():
-        csv_path.unlink()
-        _append_log(bitacora, f"CSV previo eliminado: {csv_path}")
+    csv_name = ZAFIRO_FILES[arg_index]
+    final_csv_path = Path(download_dir) / csv_name
+
+    if final_csv_path.exists():
+        final_csv_path.unlink()
+        _append_log(bitacora, f"CSV previo eliminado: {final_csv_path}")
 
     _append_log(bitacora, f"Ejecutando script Node.js: argIndex={arg_index}")
 
-    result = subprocess.run(
-        ["node", script_path, str(arg_index), download_dir],
-        capture_output=True,
-        text=True,
-        timeout=1200,  # 20 minutos máximo
-        cwd=str(Path(script_path).parent),
-    )
-
-    if result.returncode != 0:
-        _append_log(bitacora, f"Script Node.js falló (argIndex={arg_index}):\n{result.stderr}", is_error=True)
-        raise RuntimeError(
-            f"Script Node.js falló con código {result.returncode}: {result.stderr}"
+    with tempfile.TemporaryDirectory(dir=download_dir) as temp_dir:
+        result = subprocess.run(
+            ["node", script_path, str(arg_index), temp_dir],
+            capture_output=True,
+            text=True,
+            timeout=1200,  # 20 minutos máximo
+            cwd=str(Path(script_path).parent),
         )
 
-    _append_log(bitacora, f"Script Node.js completado (argIndex={arg_index})")
+        if result.returncode != 0:
+            _append_log(bitacora, f"Script Node.js falló (argIndex={arg_index}):\n{result.stderr}", is_error=True)
+            raise RuntimeError(
+                f"Script Node.js falló con código {result.returncode}: {result.stderr}"
+            )
 
-    # Verificar que el CSV efectivamente existe
-    if not csv_path.exists():
-        raise RuntimeError(
-            f"El script terminó exitosamente pero no se encontró el CSV: {csv_path}"
-        )
+        _append_log(bitacora, f"Script Node.js completado (argIndex={arg_index})")
 
-    return str(csv_path)
+        # The node script saved it in temp_dir / csv_name
+        temp_csv_path = Path(temp_dir) / csv_name
+        if not temp_csv_path.exists():
+            # If the node script saved it with a different name somehow, let's just grab the first CSV in temp_dir
+            csvs = list(Path(temp_dir).glob("*.csv"))
+            if csvs:
+                temp_csv_path = csvs[0]
+            else:
+                raise RuntimeError(
+                    f"El script terminó exitosamente pero no se encontró ningún CSV en {temp_dir}"
+                )
+        
+        shutil.move(str(temp_csv_path), str(final_csv_path))
+
+    return str(final_csv_path)
 
 
 def _corregir_csv(csv_path: str, script_path: str, bitacora=None) -> str:
@@ -797,11 +810,31 @@ def importar_zafiro(self):
 
     Programada para correr cada 30 minutos (48 veces al día).
     En caso de error, reintenta hasta 2 veces con 5 minutos de espera.
+
+    Usa un lock distribuido en Redis para garantizar que solo una instancia
+    corra a la vez. Si otra instancia ya está en ejecución, esta tarea
+    se descarta sin reintentar.
     """
+    import redis as redis_lib
+
+    # ── Lock distribuido: solo 1 instancia a la vez ────────────────────────
+    LOCK_KEY = "lock:importar_zafiro"
+    LOCK_TTL = 1800  # 30 minutos (safety net por si el worker muere)
+
+    r = redis_lib.Redis.from_url(settings.CELERY_BROKER_URL)
+    lock_acquired = r.set(LOCK_KEY, self.request.id, nx=True, ex=LOCK_TTL)
+
+    if not lock_acquired:
+        logger.warning(
+            "importar_zafiro ya está en ejecución (lock=%s). "
+            "Descartando tarea duplicada %s.",
+            r.get(LOCK_KEY), self.request.id
+        )
+        return {"status": "skipped", "reason": "otra instancia ya está en ejecución"}
+
     download_dir = settings.ZAFIRO_DOWNLOAD_DIR
     script_path = settings.ZAFIRO_SCRIPT_PATH
     resultados = {}
-
 
     logger.info("=== Iniciando tarea importar_zafiro ===")
     inicio = time.time()
@@ -861,6 +894,15 @@ def importar_zafiro(self):
         # ── 5. Calcular y Actualizar Fechas de Vacancia ────────────────────
         _calcular_y_actualizar_vacancias(bitacora)
 
+        # ── 6. Generar/Actualizar Cuadro de Vacancia ───────────────────────
+        _append_log(bitacora, "Generando/Actualizando Cuadro de Vacancia Diario...")
+        try:
+            from django.core.management import call_command
+            call_command("generar_cuadro_vacancia")
+        except Exception as e:
+            _append_log(bitacora, f"Error generando cuadro vacancia: {e}", is_error=True)
+            logger.error("Error generando cuadro vacancia: %s", e)
+
         duracion = round(time.time() - inicio, 1)
         
         # Guardar éxito en ZafiroBitacora
@@ -874,8 +916,6 @@ def importar_zafiro(self):
 
         # Publicar evento de actualización exitosa a Redis para tiempo real (SSE)
         try:
-            import redis
-            r = redis.Redis.from_url(settings.CELERY_BROKER_URL)
             r.publish('zafiro_updates', bitacora.fecha_ejecucion.isoformat())
         except Exception as e:
             logger.error("Error al publicar evento de actualización en Redis: %s", e)
@@ -901,8 +941,6 @@ def importar_zafiro(self):
             cache.delete_many(cache_keys)
 
             # Invalidar todos los archivos Excel cacheados de estatus (con patrón en Redis)
-            import redis
-            r = redis.Redis.from_url(settings.CELERY_BROKER_URL)
             for key in r.scan_iter("*excel_estatus_file_*"):
                 r.delete(key)
         except Exception:
@@ -919,7 +957,6 @@ def importar_zafiro(self):
             **resultados,
         }
 
-
     except Exception as exc:
         duracion = round(time.time() - inicio, 1)
         bitacora.duracion_segundos = duracion
@@ -928,6 +965,10 @@ def importar_zafiro(self):
         bitacora.save()
         _append_log(bitacora, f"Error en importar_zafiro: {exc}", is_error=True)
         raise self.retry(exc=exc)
+
+    finally:
+        # Siempre liberar el lock al terminar (éxito, error, o retry)
+        r.delete(LOCK_KEY)
 
 
 @shared_task(bind=True, name="plantilla.tasks.generar_excel_estatus_task")
@@ -1361,7 +1402,9 @@ def generar_excel_estatus_task(self, uas_param, levels_param, group_by):
     file_data = output.read()
 
     # Guardar en caché permanente del reporte
-    cache_key_excel = f"excel_estatus_file_{uas_param}_{levels_param}_{group_by}"
+    import hashlib
+    raw_key = f"excel_estatus_file_{uas_param}_{levels_param}_{group_by}"
+    cache_key_excel = f"excel_estatus_file_{hashlib.md5(raw_key.encode('utf-8')).hexdigest()}"
     cache.set(cache_key_excel, file_data, 1200)
 
     # Guardar temporalmente en caché el resultado de esta tarea de descarga

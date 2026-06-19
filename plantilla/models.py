@@ -1032,3 +1032,20 @@ class CpTblMovCompleto290526Historico(CpTblMovCompleto290526Base):
     class Meta:
         managed = False
         db_table = "cp_tbl_mov_completo_29_05_26_historico"
+
+class CuadroVacancia(models.Model):
+    fecha = models.DateField(unique=True)
+    ocupadas_permanente = models.IntegerField(default=0)
+    ocupadas_eventual = models.IntegerField(default=0)
+    ocupadas_total = models.IntegerField(default=0)
+    vacantes_permanente = models.IntegerField(default=0)
+    vacantes_eventual = models.IntegerField(default=0)
+    vacantes_total = models.IntegerField(default=0)
+    total_permanente = models.IntegerField(default=0)
+    total_eventual = models.IntegerField(default=0)
+    total = models.IntegerField(default=0)
+
+    class Meta:
+        db_table = 'cuadro_vacancia'
+        verbose_name = 'Cuadro Vacancia'
+        verbose_name_plural = 'Cuadros Vacancia'

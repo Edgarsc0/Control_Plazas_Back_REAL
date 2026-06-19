@@ -18,6 +18,7 @@ from .views import (
     CadenaMandoView,
     ZafiroBitacoraView,
     UltimaActualizacionZafiroView,
+    IniciarSincronizacionZafiroView,
     ZafiroSSEView,
     BajasSigListView,
     BajasMotivosPieView,
@@ -28,6 +29,8 @@ from .views import (
     TorreCaballitoEmpleadosView,
     MovimientosPersonalListView,
     MovimientosPersonalStatsView,
+    CuadroVacanciaView,
+    DesgloseJerarquicoView,
 )
 
 urlpatterns = [
@@ -65,6 +68,11 @@ urlpatterns = [
         "bitacora/ultima/",
         UltimaActualizacionZafiroView.as_view(),
         name="zafiro_bitacora_ultima",
+    ),
+    path(
+        "bitacora/iniciar/",
+        IniciarSincronizacionZafiroView.as_view(),
+        name="zafiro_iniciar_sincronizacion",
     ),
     path(
         "bitacora/",
@@ -165,5 +173,15 @@ urlpatterns = [
         "organigrama_search/",
         OrganigramaSearchView.as_view(),
         name="organigrama_search",
+    ),
+    path(
+        "cuadro_vacancia/",
+        CuadroVacanciaView.as_view(),
+        name="cuadro_vacancia",
+    ),
+    path(
+        "desglose_jerarquico/",
+        DesgloseJerarquicoView.as_view(),
+        name="desglose_jerarquico",
     ),
 ]
