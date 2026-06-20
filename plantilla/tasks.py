@@ -924,6 +924,8 @@ def importar_zafiro(self):
         try:
             from django.core.cache import cache
             cache_keys = [
+                "plantilla_1800_list_json",
+                "latest_movpos_sub_ids",
                 "active_position_codes",
                 "active_employees_filtered",
                 "plantilla_vacantes_por_nivel",

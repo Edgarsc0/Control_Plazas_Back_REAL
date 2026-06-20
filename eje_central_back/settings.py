@@ -15,7 +15,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 SECRET_KEY = "django-insecure-cft@qf5e6762e-(&nsu&(hqn543(d"
 
-DEBUG = True
+DEBUG = os.getenv("DEBUG", "False").strip().lower() == "true"
 
 ALLOWED_HOSTS = ["*"]
 
@@ -142,6 +142,10 @@ CORS_ALLOWED_ORIGINS = [
 
 # Django REST Framework configuration
 REST_FRAMEWORK = {
+    "DEFAULT_RENDERER_CLASSES": [
+        "eje_central_back.renderers.ORJSONRenderer",
+        "rest_framework.renderers.BrowsableAPIRenderer",
+    ],
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.AllowAny",
     ],

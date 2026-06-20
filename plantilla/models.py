@@ -410,6 +410,10 @@ class Plantilla1800Plazas(models.Model):
     class Meta:
         managed = True
         db_table = "plantilla_1800_plazas"
+        indexes = [
+            models.Index(fields=["of_de_solicitud", "nivel"], name="idx_p1800_ofsol_niv"),
+            models.Index(fields=["nivel"], name="idx_p1800_nivel"),
+        ]
 
     def __str__(self):
         return f"Plantilla 1800 - {self.num_empleado} ({self.nombres})"
@@ -907,6 +911,9 @@ class MovPos(MovPosBase):
     class Meta:
         managed = True
         db_table = "MOV_POS"
+        indexes = [
+            models.Index(fields=["f_efva", "fecha_captura"], name="idx_movpos_fefva_fcap"),
+        ]
 
 
 class MovPosHistorico(MovPosBase):

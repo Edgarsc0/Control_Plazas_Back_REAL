@@ -41,6 +41,8 @@ OCUPADAS_RAW_SQL = """
 from django.core.cache import cache
 from django.db import connection
 
+from eje_central_back.renderers import orjson_dumps, orjson_response
+
 
 def obtener_posiciones_activas():
     # Cache active position codes for 60 seconds to speed up parallel requests on page load
@@ -769,11 +771,20 @@ class Plantilla1800PlazasListView(APIView):
 
     permission_classes = [IsAuthenticated]
 
+    CACHE_KEY = "plantilla_1800_list_json"
+
     def get(self, request):
-        queryset = Plantilla1800Plazas.objects.all().order_by("id")
-        # Simple pagination or limit if needed, for now all
-        resultados = list(queryset.values())
-        return Response(resultados, status=status.HTTP_200_OK)
+        # El dataset cambia sólo en el sync de ZAFIRO o en PATCH. Servimos los
+        # bytes JSON cacheados (orjson) para evitar re-consultar y re-serializar
+        # ~12k filas en cada request.
+        payload = cache.get(self.CACHE_KEY)
+        if payload is None:
+            resultados = list(
+                Plantilla1800Plazas.objects.all().order_by("id").values()
+            )
+            payload = orjson_dumps(resultados)
+            cache.set(self.CACHE_KEY, payload, 3600)
+        return orjson_response(payload)
 
     def patch(self, request):
         """
@@ -810,6 +821,7 @@ class Plantilla1800PlazasListView(APIView):
             except Exception as e:
                 errores.append({"error": str(e), "id": id_registro})
 
+        cache.delete(self.CACHE_KEY)
         return Response(
             {
                 "mensaje": f"{actualizados} registros actualizados correctamente.",
@@ -1111,8 +1123,12 @@ class MovPosDetalleView(APIView):
             if nivel:
                 posiciones_qs = posiciones_qs.filter(nivel=nivel)
 
-            posiciones_list = list(posiciones_qs.values_list("posición", flat=True))
-            queryset = queryset.filter(no_pos_actual__in=posiciones_list)
+            # Subquery en lugar de materializar miles de posiciones en una lista
+            # Python + un IN gigante (evita armar/transferir la lista y deja que
+            # MySQL resuelva el filtro).
+            queryset = queryset.filter(
+                no_pos_actual__in=posiciones_qs.values("posición")
+            )
 
         # is_latest filter (defaults to True unless explicitly requested as 'false')
         is_latest = request.query_params.get("is_latest", "true").lower() != "false"
