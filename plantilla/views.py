@@ -1,7 +1,18 @@
 import json
 
 from django.conf import settings
-from django.db.models import Case, Count, F, IntegerField, Q, Sum, When
+from django.db.models import (
+    Aggregate,
+    Case,
+    CharField,
+    Count,
+    F,
+    IntegerField,
+    Q,
+    Sum,
+    When,
+)
+from django.db.models.functions import Trim
 from rest_framework import status
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -9,6 +20,17 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import CuadroVacancia, EmpleadosCompletosSig, MovPos, Plantilla1800Plazas
+
+
+class GroupConcat(Aggregate):
+    """Agregado GROUP_CONCAT(DISTINCT ...) para MySQL (no incluido en Django).
+
+    Separador 0x1f (unit separator) para no chocar con comas en los valores.
+    """
+
+    function = "GROUP_CONCAT"
+    template = "%(function)s(DISTINCT %(expressions)s SEPARATOR 0x1f)"
+    output_field = CharField()
 
 LATEST_MOVPOS_RAW_SQL = """
     SELECT id FROM (
@@ -906,112 +928,76 @@ class EmpleadosDistribucionGeograficaView(APIView):
             return Response(cached_data, status=status.HTTP_200_OK)
 
         try:
-            # 1. Obtener posiciones actualmente activas
             active_position_codes = obtener_posiciones_activas()
 
-            # 2. Obtener todos los registros de EMPLEADOS_COMPLETOS_SIG en esas posiciones con coordenadas válidas
-            active_employees = (
+            # Agregacion en SQL: agrupa ~13k empleados por coordenada en la DB
+            # (antes se iteraban todos en Python). GROUP_CONCAT(DISTINCT) trae los
+            # valores unicos por grupo; el separador 0x1f evita choques con comas.
+            with connection.cursor() as cursor:
+                cursor.execute("SET SESSION group_concat_max_len = 1000000")
+
+            grupos = (
                 EmpleadosCompletosSig.objects.filter(posicion__in=active_position_codes)
                 .exclude(latitud__isnull=True)
                 .exclude(latitud="")
                 .exclude(longitud__isnull=True)
                 .exclude(longitud="")
+                .annotate(lat=Trim("latitud"), lng=Trim("longitud"))
+                .values("lat", "lng")
+                .annotate(
+                    n=Count("id"),
+                    descripciones=GroupConcat("descripcion_ubicacion"),
+                    aduanas=GroupConcat("aduana"),
+                    tipos=GroupConcat("tipo"),
+                    uas=GroupConcat("unidad_administrativa"),
+                )
             )
 
-            # 3. Traer los campos necesarios para agrupar
-            queryset_values = active_employees.values(
-                "latitud",
-                "longitud",
-                "descripcion_ubicacion",
-                "aduana",
-                "tipo",
-                "unidad_administrativa",
-            )
+            def _split(s):
+                return [x for x in (s.split("\x1f") if s else []) if x]
 
-            groups = {}
-            for emp in queryset_values:
-                lat_raw = emp["latitud"]
-                lng_raw = emp["longitud"]
-
-                if not lat_raw or not lng_raw:
-                    continue
-
-                lat = lat_raw.strip()
-                lng = lng_raw.strip()
-
+            resultados = []
+            for g in grupos:
+                lat, lng = g["lat"], g["lng"]
                 if not lat or not lng:
                     continue
-
                 try:
                     float(lat)
                     float(lng)
-                except ValueError:
+                except (ValueError, TypeError):
                     continue
 
-                key = (lat, lng)
-                aduana_name = emp["aduana"] or ""
-                is_aduana = aduana_name.strip().upper().startswith("ADUANA")
-                tipo_val = emp["tipo"] or ""
-                desc = emp["descripcion_ubicacion"] or ""
-                ua = emp["unidad_administrativa"] or ""
+                descripciones = _split(g["descripciones"])
+                aduanas = _split(g["aduanas"])
+                tipos = _split(g["tipos"])
+                uas = _split(g["uas"])
 
-                if key not in groups:
-                    groups[key] = {
-                        "latitud": lat,
-                        "longitud": lng,
-                        "descripcion_ubicacion": desc,
-                        "aduana": aduana_name,
-                        "is_aduana": is_aduana,
-                        "tipo": tipo_val,
-                        "count": 0,
-                        "descripciones_set": set(),
-                        "aduanas_set": set(),
-                        "tipos_set": set(),
-                        "uas_set": set(),
-                    }
-
-                g = groups[key]
-                g["count"] += 1
-                if desc:
-                    g["descripciones_set"].add(desc)
-                if aduana_name:
-                    g["aduanas_set"].add(aduana_name)
-                if tipo_val:
-                    g["tipos_set"].add(tipo_val)
-                if ua:
-                    g["uas_set"].add(ua)
-
-                if is_aduana:
-                    g["is_aduana"] = True
-                    if not g["aduana"] or not g["aduana"].strip().upper().startswith(
-                        "ADUANA"
-                    ):
-                        g["aduana"] = aduana_name
-                    if tipo_val and not g["tipo"]:
-                        g["tipo"] = tipo_val
-
-            resultados = []
-            for key, g in groups.items():
-                nombre_principal = (
-                    g["aduana"]
-                    if g["is_aduana"] and g["aduana"]
-                    else g["descripcion_ubicacion"]
+                is_aduana = any(a.strip().upper().startswith("ADUANA") for a in aduanas)
+                aduana_principal = next(
+                    (a for a in aduanas if a.strip().upper().startswith("ADUANA")),
+                    aduanas[0] if aduanas else "",
                 )
-                if not nombre_principal and g["descripciones_set"]:
-                    nombre_principal = list(g["descripciones_set"])[0]
+                tipo_principal = tipos[0] if tipos else ""
+                desc_principal = descripciones[0] if descripciones else ""
+
+                nombre_principal = (
+                    aduana_principal if (is_aduana and aduana_principal) else desc_principal
+                )
+                if not nombre_principal and descripciones:
+                    nombre_principal = descripciones[0]
 
                 resultados.append(
                     {
-                        "latitud": float(g["latitud"]),
-                        "longitud": float(g["longitud"]),
+                        "latitud": float(lat),
+                        "longitud": float(lng),
                         "nombre": nombre_principal or "Ubicación sin nombre",
-                        "is_aduana": g["is_aduana"],
-                        "tipo": g["tipo"],
-                        "count": g["count"],
-                        "descripciones": list(g["descripciones_set"]),
-                        "aduanas": list(g["aduanas_set"]),
-                        "tipos": list(g["tipos_set"]),
-                        "uas": list(g["uas_set"]),
+                        "is_aduana": is_aduana,
+                        "tipo": tipo_principal,
+                        "count": g["n"],
+                        "descripciones": descripciones,
+                        "aduanas": aduanas,
+                        "tipos": tipos,
+                        "uas": uas,
                     }
                 )
 
