@@ -19,6 +19,15 @@ CREATE INDEX idx_cp_t_accion
 CREATE INDEX idx_cp_t_motivo
     ON cp_tbl_mov_completo_29_05_26 ((TRIM(motivo_nombre)));
 
+-- IMPORTANTE: el sync hace swap Blue-Green (RENAME staging <-> main), así que la
+-- tabla _staging debe tener los MISMOS índices, o se perderán en el próximo sync.
+CREATE INDEX idx_cps_fefec_sec
+    ON cp_tbl_mov_completo_29_05_26_staging (fecha_efectiva, sec);
+CREATE INDEX idx_cps_t_accion
+    ON cp_tbl_mov_completo_29_05_26_staging ((TRIM(accion_nombre)));
+CREATE INDEX idx_cps_t_motivo
+    ON cp_tbl_mov_completo_29_05_26_staging ((TRIM(motivo_nombre)));
+
 -- Filtros/orden frecuentes adicionales (descomentar según uso real):
 -- CREATE INDEX idx_cptbl_posicion   ON cp_tbl_mov_completo_29_05_26 (posicion);
 -- CREATE INDEX idx_cptbl_numemp     ON cp_tbl_mov_completo_29_05_26 (num_empleado);

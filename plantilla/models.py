@@ -946,18 +946,39 @@ class EmpleadosCompletosSigStaging(EmpleadosCompletosSigBase):
     class Meta:
         managed = True
         db_table = "EMPLEADOS_COMPLETOS_SIG_STAGING"
+        # Mismos índices que la tabla principal: el sync hace swap Blue-Green
+        # (RENAME staging<->main), así que la staging debe traerlos para que la
+        # main viva nunca quede sin índices.
+        indexes = [
+            models.Index(fields=["nivel"], name="idx_emps_nivel"),
+            models.Index(fields=["estado_nomina"], name="idx_emps_estnom"),
+            models.Index(Trim("nivel"), name="idx_emps_t_nivel"),
+            models.Index(Trim("estado_nomina"), name="idx_emps_t_estnom"),
+        ]
 
 
 class BajasSigStaging(BajasSigBase):
     class Meta:
         managed = True
         db_table = "BAJAS_SIG_STAGING"
+        indexes = [
+            models.Index(fields=["posicion"], name="idx_bajs_posicion"),
+            models.Index(fields=["fecha_efectiva"], name="idx_bajs_fefec"),
+            models.Index(Trim("motivo_descr"), name="idx_bajs_t_motdes"),
+            models.Index(Trim("accion_descr"), name="idx_bajs_t_accdes"),
+        ]
 
 
 class MovPosStaging(MovPosBase):
     class Meta:
         managed = True
         db_table = "MOV_POS_STAGING"
+        indexes = [
+            models.Index(fields=["f_efva", "fecha_captura"], name="idx_mps_fefva_fcap"),
+            models.Index(Trim("estado_psn"), name="idx_mps_t_estpsn"),
+            models.Index(Trim("motivo"), name="idx_mps_t_motivo"),
+            models.Index(Trim("unidad_adva"), name="idx_mps_t_unidadv"),
+        ]
 
 
 class ZafiroBitacora(models.Model):
