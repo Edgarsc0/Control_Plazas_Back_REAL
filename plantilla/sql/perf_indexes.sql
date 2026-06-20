@@ -12,6 +12,13 @@
 CREATE INDEX idx_cptbl_fefec_sec
     ON cp_tbl_mov_completo_29_05_26 (fecha_efectiva, sec);
 
+-- Índices funcionales para los filtros de columna (las views filtran con
+-- TRIM(col); un índice plano no se usaría, uno sobre TRIM(col) sí). MySQL 8.0.13+.
+CREATE INDEX idx_cp_t_accion
+    ON cp_tbl_mov_completo_29_05_26 ((TRIM(accion_nombre)));
+CREATE INDEX idx_cp_t_motivo
+    ON cp_tbl_mov_completo_29_05_26 ((TRIM(motivo_nombre)));
+
 -- Filtros/orden frecuentes adicionales (descomentar según uso real):
 -- CREATE INDEX idx_cptbl_posicion   ON cp_tbl_mov_completo_29_05_26 (posicion);
 -- CREATE INDEX idx_cptbl_numemp     ON cp_tbl_mov_completo_29_05_26 (num_empleado);

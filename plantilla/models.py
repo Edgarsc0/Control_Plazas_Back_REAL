@@ -1,4 +1,5 @@
 from django.db import models
+from django.db.models.functions import Trim
 
 
 class PlantillaVacantesPorNivel(models.Model):
@@ -883,6 +884,14 @@ class EmpleadosCompletosSig(EmpleadosCompletosSigBase):
     class Meta:
         managed = True
         db_table = "EMPLEADOS_COMPLETOS_SIG"
+        indexes = [
+            models.Index(fields=["nivel"], name="idx_emp_nivel"),
+            models.Index(fields=["estado_nomina"], name="idx_emp_estnom"),
+            # Índices de expresión: las views filtran con Trim(col); un índice
+            # plano no se usaría, uno funcional sobre TRIM(col) sí.
+            models.Index(Trim("nivel"), name="idx_emp_t_nivel"),
+            models.Index(Trim("estado_nomina"), name="idx_emp_t_estnom"),
+        ]
 
 
 class EmpleadosCompletosSigHistorico(EmpleadosCompletosSigBase):
@@ -897,6 +906,12 @@ class BajasSig(BajasSigBase):
     class Meta:
         managed = True
         db_table = "BAJAS_SIG"
+        indexes = [
+            models.Index(fields=["posicion"], name="idx_baj_posicion"),
+            models.Index(fields=["fecha_efectiva"], name="idx_baj_fefec"),
+            models.Index(Trim("motivo_descr"), name="idx_baj_t_motdes"),
+            models.Index(Trim("accion_descr"), name="idx_baj_t_accdes"),
+        ]
 
 
 class BajasSigHistorico(BajasSigBase):
@@ -913,6 +928,9 @@ class MovPos(MovPosBase):
         db_table = "MOV_POS"
         indexes = [
             models.Index(fields=["f_efva", "fecha_captura"], name="idx_movpos_fefva_fcap"),
+            models.Index(Trim("estado_psn"), name="idx_mp_t_estpsn"),
+            models.Index(Trim("motivo"), name="idx_mp_t_motivo"),
+            models.Index(Trim("unidad_adva"), name="idx_mp_t_unidadv"),
         ]
 
 
