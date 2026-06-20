@@ -13,7 +13,7 @@ load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = "django-insecure-cft@qf5e6762e-(&nsu&(hqn543(d"
+SECRET_KEY = os.getenv("SECRET_KEY", "django-insecure-cft@qf5e6762e-(&nsu&(hqn543(d")
 
 DEBUG = os.getenv("DEBUG", "False").strip().lower() == "true"
 
@@ -46,6 +46,7 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
+    "django.middleware.gzip.GZipMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -81,6 +82,10 @@ DATABASES = {
         "PASSWORD": os.getenv("DB_PASSWORD"),
         "HOST": os.getenv("DB_HOST", "localhost"),
         "PORT": os.getenv("DB_PORT", "3306"),
+        # Conexiones persistentes: reusa la conexión MySQL entre requests en vez
+        # de abrir/cerrar (handshake) en cada uno.
+        "CONN_MAX_AGE": 60,
+        "CONN_HEALTH_CHECKS": True,
         "OPTIONS": {
             "init_command": "SET sql_mode='STRICT_TRANS_TABLES'",
             "connect_timeout": 10,
@@ -95,12 +100,31 @@ DATABASES = {
         "PASSWORD": os.getenv("DB_CONTROL_GESTION_PASSWORD"),
         "HOST": os.getenv("DB_CONTROL_GESTION_HOST", "localhost"),
         "PORT": os.getenv("DB_CONTROL_GESTION_PORT", "3306"),
+        "CONN_MAX_AGE": 60,
+        "CONN_HEALTH_CHECKS": True,
         "OPTIONS": {
             "init_command": "SET sql_mode='STRICT_TRANS_TABLES'",
             "connect_timeout": 10,
             "read_timeout": 600,
             "write_timeout": 600,
         },
+    },
+}
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "simple": {"format": "{levelname} {asctime} {name} {message}", "style": "{"},
+    },
+    "handlers": {
+        "console": {"class": "logging.StreamHandler", "formatter": "simple"},
+    },
+    "root": {"handlers": ["console"], "level": "INFO"},
+    "loggers": {
+        # Evita el ruido de SQL incluso si DEBUG se activa puntualmente.
+        "django.db.backends": {"level": "WARNING", "handlers": ["console"], "propagate": False},
+        "django.request": {"level": "WARNING", "handlers": ["console"], "propagate": False},
     },
 }
 
