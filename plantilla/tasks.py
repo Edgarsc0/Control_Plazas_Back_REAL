@@ -17,9 +17,11 @@ Configuración relevante en settings.py:
 import csv
 import logging
 import os
+import re
 import subprocess
 import time
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 csv.field_size_limit(sys.maxsize)
@@ -187,6 +189,51 @@ def _corregir_csv(csv_path: str, script_path: str, bitacora=None) -> str:
     except Exception as e:
         _append_log(bitacora, f"Error al ejecutar corrector heurístico: {e}", is_error=True)
         return csv_path
+
+
+def _capturar_indices_secundarios(table):
+    """Captura la DDL de los índices secundarios (no PRIMARY) de la tabla desde
+    SHOW CREATE TABLE. Drift-proof: recrea exactamente lo que existe, incluidos
+    los índices funcionales (TRIM)."""
+    with connection.cursor() as cursor:
+        cursor.execute(f"SHOW CREATE TABLE `{table}`")
+        ddl = cursor.fetchone()[1]
+    indices = []
+    for line in ddl.split("\n"):
+        line = line.strip().rstrip(",")
+        if line.startswith("PRIMARY KEY"):
+            continue
+        m = re.match(r"^(UNIQUE )?KEY `([^`]+)` (.+)$", line)
+        if m:
+            unique = "UNIQUE " if m.group(1) else ""
+            name = m.group(2)
+            cols = m.group(3)
+            indices.append(
+                (name, f"CREATE {unique}INDEX `{name}` ON `{table}` {cols}")
+            )
+    return indices
+
+
+@contextmanager
+def _staging_sin_indices(table, bitacora=None):
+    """Quita los índices secundarios de una tabla antes de una carga masiva y los
+    recrea al terminar (en ``finally``). Insertar sin índices y construir el
+    índice de una pasada es más rápido que mantenerlo fila por fila. El DDL va
+    fuera de cualquier transacción (MySQL auto-commitea el DDL)."""
+    indices = _capturar_indices_secundarios(table)
+    if indices:
+        with connection.cursor() as cursor:
+            for name, _ in indices:
+                cursor.execute(f"ALTER TABLE `{table}` DROP INDEX `{name}`")
+        _append_log(bitacora, f"{table}: {len(indices)} índices quitados para la carga.")
+    try:
+        yield
+    finally:
+        if indices:
+            with connection.cursor() as cursor:
+                for _, ddl in indices:
+                    cursor.execute(ddl)
+            _append_log(bitacora, f"{table}: {len(indices)} índices recreados.")
 
 
 def _truncar_tabla(model_class, bitacora=None):
@@ -389,7 +436,9 @@ def _importar_csv_empleados_completos(csv_path: str, guardar_historico: bool = F
                 )
             )
 
-    with transaction.atomic():
+    with _staging_sin_indices(
+        EmpleadosCompletosSigStaging._meta.db_table, bitacora
+    ), transaction.atomic():
         _truncar_tabla(EmpleadosCompletosSigStaging, bitacora)
         EmpleadosCompletosSigStaging.objects.bulk_create(registros, batch_size=1000)
         if guardar_historico:
@@ -463,7 +512,9 @@ def _importar_csv_bajas(csv_path: str, guardar_historico: bool = False, bitacora
                 )
             )
 
-    with transaction.atomic():
+    with _staging_sin_indices(
+        BajasSigStaging._meta.db_table, bitacora
+    ), transaction.atomic():
         _truncar_tabla(BajasSigStaging, bitacora)
         BajasSigStaging.objects.bulk_create(registros, batch_size=1000)
         if guardar_historico:
@@ -569,7 +620,9 @@ def _importar_csv_posiciones(csv_path: str, guardar_historico: bool = False, bit
                 )
             )
 
-    with transaction.atomic():
+    with _staging_sin_indices(
+        MovPosStaging._meta.db_table, bitacora
+    ), transaction.atomic():
         _truncar_tabla(MovPosStaging, bitacora)
         MovPosStaging.objects.bulk_create(registros, batch_size=1000)
         if guardar_historico:
@@ -707,7 +760,9 @@ def _importar_csv_historial_posicion(csv_path: str, guardar_historico: bool = Fa
             if guardar_historico:
                 registros_historico.append(CpTblMovCompleto290526Historico(**kwargs))
 
-    with transaction.atomic():
+    with _staging_sin_indices(
+        CpTblMovCompleto290526Staging._meta.db_table, bitacora
+    ), transaction.atomic():
         _truncar_tabla(CpTblMovCompleto290526Staging, bitacora)
         
         with connection.cursor() as cursor:
