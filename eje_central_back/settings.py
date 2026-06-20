@@ -170,8 +170,10 @@ REST_FRAMEWORK = {
         "eje_central_back.renderers.ORJSONRenderer",
         "rest_framework.renderers.BrowsableAPIRenderer",
     ],
+    # Seguro por defecto: requiere autenticación salvo que la view declare
+    # AllowAny explícitamente (p. ej. los endpoints de login).
     "DEFAULT_PERMISSION_CLASSES": [
-        "rest_framework.permissions.AllowAny",
+        "rest_framework.permissions.IsAuthenticated",
     ],
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "rest_framework.authentication.SessionAuthentication",
