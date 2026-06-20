@@ -32,6 +32,91 @@ class GroupConcat(Aggregate):
     template = "%(function)s(DISTINCT %(expressions)s SEPARATOR 0x1f)"
     output_field = CharField()
 
+
+# Parámetros de control que NO son columnas filtrables (paginación, orden, etc.).
+FILTER_SKIP_PARAMS = frozenset(
+    {
+        "distinct_field",
+        "distinct_search",
+        "page",
+        "page_size",
+        "search",
+        "is_latest",
+        "no_pagination",
+        "sort_by",
+        "sort_order",
+        "oficio",
+        "nivel",
+        "advanced_filters",
+    }
+)
+
+
+def apply_text_search(queryset, query, fields):
+    """Filtro de búsqueda libre: OR de ``icontains`` sobre ``fields``."""
+    query = (query or "").strip()
+    if not query:
+        return queryset
+    q = Q()
+    for field in fields:
+        q |= Q(**{f"{field}__icontains": query})
+    return queryset.filter(q)
+
+
+def apply_dynamic_column_filters(queryset, request, model, skip_params=FILTER_SKIP_PARAMS):
+    """Aplica los filtros dinámicos de columna del frontend.
+
+    Soporta ``?campo=val``, selección múltiple (``val1,val2`` -> ``__in``),
+    sufijos explícitos (``__istartswith``/``__iexact``/...) y negación
+    (``exclude__campo=val``). Las columnas de texto se filtran sobre
+    ``Trim(campo)`` (anotando ``trimmed_<campo>``), que es lo que aprovechan los
+    índices funcionales. Lógica única compartida por MovPosDetalleView y
+    MovimientosPersonalListView (antes estaba duplicada).
+    """
+    valid_fields = {f.name for f in model._meta.get_fields()}
+    text_fields = {
+        f.name
+        for f in model._meta.get_fields()
+        if f.get_internal_type() in ("CharField", "TextField")
+    }
+    skip = set(skip_params)
+
+    for param, val in request.query_params.items():
+        if param in skip:
+            continue
+        is_exclude = param.startswith("exclude__")
+        actual_param = param[9:] if is_exclude else param
+        base_field = actual_param.split("__")[0]
+        if base_field not in valid_fields or not val:
+            continue
+
+        is_text = base_field in text_fields
+        target_field = f"trimmed_{base_field}" if is_text else base_field
+        if is_text and target_field not in queryset.query.annotations:
+            queryset = queryset.annotate(**{target_field: Trim(base_field)})
+
+        if "__" in actual_param:
+            suffix = actual_param.split("__", 1)[1]
+            actual_param_target = f"{target_field}__{suffix}"
+        else:
+            suffix = None
+            actual_param_target = target_field
+
+        val_list = [v.strip() for v in val.split(",") if v.strip()]
+        apply = queryset.exclude if is_exclude else queryset.filter
+
+        if suffix == "in" or (not suffix and len(val_list) > 1):
+            queryset = apply(**{f"{target_field}__in": val_list})
+        elif suffix:
+            value = val_list[0] if len(val_list) == 1 else val_list
+            queryset = apply(**{actual_param_target: value})
+        elif is_text:
+            queryset = apply(**{f"{target_field}__icontains": val_list[0]})
+        else:
+            queryset = apply(**{target_field: val_list[0]})
+
+    return queryset
+
 LATEST_MOVPOS_RAW_SQL = """
     SELECT id FROM (
         SELECT id, ROW_NUMBER() OVER (
@@ -1155,17 +1240,19 @@ class MovPosDetalleView(APIView):
             queryset = queryset.filter(id__in=sub_ids)
 
         # Search query
-        search_query = request.query_params.get("search", "").strip()
-        if search_query:
-            queryset = queryset.filter(
-                Q(no_pos_actual__icontains=search_query)
-                | Q(motivo__icontains=search_query)
-                | Q(unidad_de_negocio__icontains=search_query)
-                | Q(unidad_adva__icontains=search_query)
-                | Q(puesto_ptal__icontains=search_query)
-                | Q(descr__icontains=search_query)
-                | Q(nombre_puesto__icontains=search_query)
-            )
+        queryset = apply_text_search(
+            queryset,
+            request.query_params.get("search", ""),
+            [
+                "no_pos_actual",
+                "motivo",
+                "unidad_de_negocio",
+                "unidad_adva",
+                "puesto_ptal",
+                "descr",
+                "nombre_puesto",
+            ],
+        )
 
         # Dynamic Column Filters
         valid_fields = [f.name for f in MovPos._meta.get_fields()]
@@ -1175,81 +1262,7 @@ class MovPosDetalleView(APIView):
             if f.get_internal_type() in ["CharField", "TextField"]
         ]
 
-        for param, val in request.query_params.items():
-            if param in [
-                "distinct_field",
-                "distinct_search",
-                "page",
-                "page_size",
-                "search",
-                "is_latest",
-                "no_pagination",
-                "sort_by",
-                "sort_order",
-                "oficio",
-                "nivel",
-                "advanced_filters",
-            ]:
-                continue
-            is_exclude = False
-            actual_param = param
-            if param.startswith("exclude__"):
-                is_exclude = True
-                actual_param = param[9:]
-
-            base_field = actual_param.split("__")[0]
-
-            if base_field in valid_fields and val:
-                is_text = base_field in text_fields
-                target_field = f"trimmed_{base_field}" if is_text else base_field
-                if is_text and target_field not in queryset.query.annotations:
-                    queryset = queryset.annotate(**{target_field: Trim(base_field)})
-
-                # Detect lookup suffix if any
-                if "__" in actual_param:
-                    suffix = actual_param.split("__", 1)[1]
-                    actual_param_target = f"{target_field}__{suffix}"
-                else:
-                    suffix = None
-                    actual_param_target = target_field
-
-                val_list = [v.strip() for v in val.split(",") if v.strip()]
-                if suffix == "in" or (not suffix and len(val_list) > 1):
-                    lookup = f"{target_field}__in"
-                    if is_exclude:
-                        queryset = queryset.exclude(**{lookup: val_list})
-                    else:
-                        queryset = queryset.filter(**{lookup: val_list})
-                elif suffix:
-                    if is_exclude:
-                        queryset = queryset.exclude(
-                            **{
-                                actual_param_target: val_list[0]
-                                if len(val_list) == 1
-                                else val_list
-                            }
-                        )
-                    else:
-                        queryset = queryset.filter(
-                            **{
-                                actual_param_target: val_list[0]
-                                if len(val_list) == 1
-                                else val_list
-                            }
-                        )
-                else:
-                    if is_text:
-                        lookup = f"{target_field}__icontains"
-                        if is_exclude:
-                            queryset = queryset.exclude(**{lookup: val_list[0]})
-                        else:
-                            queryset = queryset.filter(**{lookup: val_list[0]})
-                    else:
-                        lookup = target_field
-                        if is_exclude:
-                            queryset = queryset.exclude(**{lookup: val_list[0]})
-                        else:
-                            queryset = queryset.filter(**{lookup: val_list[0]})
+        queryset = apply_dynamic_column_filters(queryset, request, MovPos)
 
         # "ocupacion" is a computed column (not a real model field), so the
         # generic Dynamic Column Filters loop above silently skips it.
@@ -2468,18 +2481,20 @@ class MovimientosPersonalListView(APIView):
         distinct_field = request.query_params.get("distinct_field", "").strip()
 
         # Search query
-        search_query = request.query_params.get("search", "").strip()
-        if search_query:
-            queryset = queryset.filter(
-                Q(posicion__icontains=search_query)
-                | Q(num_empleado__icontains=search_query)
-                | Q(nombre__icontains=search_query)
-                | Q(ap_pat__icontains=search_query)
-                | Q(ap_mat__icontains=search_query)
-                | Q(accion_nombre__icontains=search_query)
-                | Q(motivo_nombre__icontains=search_query)
-                | Q(un_admin__icontains=search_query)
-            )
+        queryset = apply_text_search(
+            queryset,
+            request.query_params.get("search", ""),
+            [
+                "posicion",
+                "num_empleado",
+                "nombre",
+                "ap_pat",
+                "ap_mat",
+                "accion_nombre",
+                "motivo_nombre",
+                "un_admin",
+            ],
+        )
 
         # Dynamic Column Filters
         valid_fields = [f.name for f in CpTblMovCompleto290526._meta.get_fields()]
@@ -2490,69 +2505,7 @@ class MovimientosPersonalListView(APIView):
         ]
         from django.db.models.functions import Trim
 
-        for param, val in request.query_params.items():
-            if param == "distinct_field":
-                continue
-            is_exclude = False
-            actual_param = param
-            if param.startswith("exclude__"):
-                is_exclude = True
-                actual_param = param[9:]
-
-            base_field = actual_param.split("__")[0]
-
-            if base_field in valid_fields and val:
-                is_text = base_field in text_fields
-                target_field = f"trimmed_{base_field}" if is_text else base_field
-                if is_text and target_field not in queryset.query.annotations:
-                    queryset = queryset.annotate(**{target_field: Trim(base_field)})
-
-                # Detect lookup suffix if any
-                if "__" in actual_param:
-                    suffix = actual_param.split("__", 1)[1]
-                    actual_param_target = f"{target_field}__{suffix}"
-                else:
-                    suffix = None
-                    actual_param_target = target_field
-
-                val_list = [v.strip() for v in val.split(",") if v.strip()]
-                if suffix == "in" or (not suffix and len(val_list) > 1):
-                    lookup = f"{target_field}__in"
-                    if is_exclude:
-                        queryset = queryset.exclude(**{lookup: val_list})
-                    else:
-                        queryset = queryset.filter(**{lookup: val_list})
-                elif suffix:
-                    # Specific suffix (e.g. __istartswith, __iexact, etc.)
-                    if is_exclude:
-                        queryset = queryset.exclude(
-                            **{
-                                actual_param_target: val_list[0]
-                                if len(val_list) == 1
-                                else val_list
-                            }
-                        )
-                    else:
-                        queryset = queryset.filter(
-                            **{
-                                actual_param_target: val_list[0]
-                                if len(val_list) == 1
-                                else val_list
-                            }
-                        )
-                else:
-                    if is_text:
-                        lookup = f"{target_field}__icontains"
-                        if is_exclude:
-                            queryset = queryset.exclude(**{lookup: val_list[0]})
-                        else:
-                            queryset = queryset.filter(**{lookup: val_list[0]})
-                    else:
-                        lookup = target_field
-                        if is_exclude:
-                            queryset = queryset.exclude(**{lookup: val_list[0]})
-                        else:
-                            queryset = queryset.filter(**{lookup: val_list[0]})
+        queryset = apply_dynamic_column_filters(queryset, request, CpTblMovCompleto290526)
 
         # If distinct_field requested, return distinct values directly
         if distinct_field in valid_fields:
