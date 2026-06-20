@@ -817,31 +817,57 @@ class Plantilla1800PlazasListView(APIView):
         if not isinstance(data, list):
             data = [data]
 
-        actualizados = 0
         errores = []
 
+        # Campos reales del modelo (no persistir atributos que no son columnas).
+        valid_fields = {f.name for f in Plantilla1800Plazas._meta.get_fields()}
+
+        # Normaliza los ids a int (la PK es entera) y reporta los inválidos.
+        ids = []
         for item in data:
-            id_registro = item.get("id")
-            if not id_registro:
+            rid = item.get("id")
+            if rid in (None, ""):
                 errores.append({"error": "ID no proporcionado", "item": item})
                 continue
-
             try:
-                registro = Plantilla1800Plazas.objects.get(id=id_registro)
-                for field, value in item.items():
-                    if field != "id" and hasattr(registro, field):
-                        setattr(registro, field, value)
-                registro.save()
-                actualizados += 1
-            except Plantilla1800Plazas.DoesNotExist:
+                ids.append(int(rid))
+            except (TypeError, ValueError):
                 errores.append(
-                    {
-                        "error": f"Registro con ID {id_registro} no existe",
-                        "id": id_registro,
-                    }
+                    {"error": f"Registro con ID {rid} no existe", "id": rid}
                 )
-            except Exception as e:
-                errores.append({"error": str(e), "id": id_registro})
+
+        # 1 sola query para traer todos los registros (antes: 1 get por item).
+        registros = Plantilla1800Plazas.objects.in_bulk(ids)
+
+        a_actualizar = []
+        campos = set()
+        for item in data:
+            rid = item.get("id")
+            if rid in (None, ""):
+                continue
+            try:
+                key = int(rid)
+            except (TypeError, ValueError):
+                continue
+            registro = registros.get(key)
+            if registro is None:
+                errores.append(
+                    {"error": f"Registro con ID {rid} no existe", "id": rid}
+                )
+                continue
+            for field, value in item.items():
+                if field != "id" and field in valid_fields:
+                    setattr(registro, field, value)
+                    campos.add(field)
+            a_actualizar.append(registro)
+
+        # 1 sola query (en lotes) para todas las actualizaciones
+        # (antes: 1 save por item).
+        if a_actualizar and campos:
+            Plantilla1800Plazas.objects.bulk_update(
+                a_actualizar, list(campos), batch_size=500
+            )
+        actualizados = len(a_actualizar)
 
         cache.delete(self.CACHE_KEY)
         return Response(
