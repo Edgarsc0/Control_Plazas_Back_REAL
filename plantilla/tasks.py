@@ -830,6 +830,38 @@ def _swap_blue_green_tables(bitacora=None):
     _truncar_tabla(CpTblMovCompleto290526Staging, bitacora)
 
 
+def _llenar_nombre_puesto(bitacora):
+    """
+    Ejecuta el Stored Procedure sp_llenar_nombre_puesto, el cual llena
+    la columna `Nombre Puesto` de MOV_POS haciendo match contra el
+    catálogo CAT_PTO_FUNC (por `Cd Puesto` = `Cd Pto Funcional`).
+    """
+    _append_log(bitacora, "Llenando Nombre Puesto en MOV_POS desde catálogo CAT_PTO_FUNC...")
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("CALL sp_llenar_nombre_puesto();")
+            _append_log(bitacora, "Nombre Puesto actualizado exitosamente.")
+    except Exception as e:
+        _append_log(bitacora, f"Error llenando Nombre Puesto: {str(e)}")
+        logger.error(f"Error en _llenar_nombre_puesto: {str(e)}", exc_info=True)
+
+
+def _corregir_smb_smn_empleados(bitacora):
+    """
+    Ejecuta el Stored Procedure sp_corregir_smb_smn_empleados, el cual
+    corrige SMB y SMN de EMPLEADOS_COMPLETOS_SIG con base en el catálogo
+    rc_cat_cod_presupuestal (match por Código Presupuestal, Nivel y Escala).
+    """
+    _append_log(bitacora, "Corrigiendo SMB y SMN en EMPLEADOS_COMPLETOS_SIG desde catálogo rc_cat_cod_presupuestal...")
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("CALL sp_corregir_smb_smn_empleados();")
+            _append_log(bitacora, "SMB y SMN corregidos exitosamente.")
+    except Exception as e:
+        _append_log(bitacora, f"Error corrigiendo SMB y SMN: {str(e)}")
+        logger.error(f"Error en _corregir_smb_smn_empleados: {str(e)}", exc_info=True)
+
+
 def _calcular_y_actualizar_vacancias(bitacora):
     """
     Ejecuta el Stored Procedure sp_obtener_todas_vacancias, el cual 
@@ -946,10 +978,16 @@ def importar_zafiro(self):
         # Realizar el intercambio atómico (Blue-Green Swap)
         _swap_blue_green_tables(bitacora)
 
-        # ── 5. Calcular y Actualizar Fechas de Vacancia ────────────────────
+        # ── 5. Llenar Nombre Puesto en MOV_POS desde CAT_PTO_FUNC ──────────
+        _llenar_nombre_puesto(bitacora)
+
+        # ── 6. Corregir SMB y SMN en EMPLEADOS_COMPLETOS_SIG desde catálogo ──
+        _corregir_smb_smn_empleados(bitacora)
+
+        # ── 7. Calcular y Actualizar Fechas de Vacancia ─────────────────────
         _calcular_y_actualizar_vacancias(bitacora)
 
-        # ── 6. Generar/Actualizar Cuadro de Vacancia ───────────────────────
+        # ── 8. Generar/Actualizar Cuadro de Vacancia ───────────────────────
         _append_log(bitacora, "Generando/Actualizando Cuadro de Vacancia Diario...")
         try:
             from django.core.management import call_command
@@ -971,7 +1009,11 @@ def importar_zafiro(self):
 
         # Publicar evento de actualización exitosa a Redis para tiempo real (SSE)
         try:
-            r.publish('zafiro_updates', bitacora.fecha_ejecucion.isoformat())
+            from datetime import timedelta
+            fecha_fin = bitacora.fecha_ejecucion
+            if bitacora.duracion_segundos:
+                fecha_fin += timedelta(seconds=bitacora.duracion_segundos)
+            r.publish('zafiro_updates', fecha_fin.isoformat())
         except Exception as e:
             logger.error("Error al publicar evento de actualización en Redis: %s", e)
 

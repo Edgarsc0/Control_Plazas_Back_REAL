@@ -1,6 +1,7 @@
 import json
 
 from django.conf import settings
+from django.core import exceptions
 from django.db.models import (
     Aggregate,
     Case,
@@ -32,6 +33,11 @@ class GroupConcat(Aggregate):
     template = "%(function)s(DISTINCT %(expressions)s SEPARATOR 0x1f)"
     output_field = CharField()
 
+
+# Sentinel que el frontend manda en vez de "" para seleccionar "(Vacío)" en un
+# filtro de columna: una cadena vacía real en la URL se descarta antes de
+# llegar aquí (buildQuery del front, y el chequeo `not val` de abajo).
+EMPTY_VALUE_TOKEN = "__EMPTY__"
 
 # Parámetros de control que NO son columnas filtrables (paginación, orden, etc.).
 FILTER_SKIP_PARAMS = frozenset(
@@ -102,11 +108,23 @@ def apply_dynamic_column_filters(queryset, request, model, skip_params=FILTER_SK
             suffix = None
             actual_param_target = target_field
 
-        val_list = [v.strip() for v in val.split(",") if v.strip()]
+        val_list = [
+            "" if v.strip() == EMPTY_VALUE_TOKEN else v.strip()
+            for v in val.split(",")
+            if v.strip()
+        ]
         apply = queryset.exclude if is_exclude else queryset.filter
 
         if suffix == "in" or (not suffix and len(val_list) > 1):
-            queryset = apply(**{f"{target_field}__in": val_list})
+            if "" in val_list:
+                # "" en trimmed_<campo> no matchea filas con NULL real en
+                # MySQL (Trim(NULL) es NULL); hay que cubrir ambos casos.
+                q = Q(**{f"{target_field}__in": val_list}) | Q(
+                    **{f"{target_field}__isnull": True}
+                )
+                queryset = queryset.exclude(q) if is_exclude else queryset.filter(q)
+            else:
+                queryset = apply(**{f"{target_field}__in": val_list})
         elif suffix:
             value = val_list[0] if len(val_list) == 1 else val_list
             queryset = apply(**{actual_param_target: value})
@@ -116,6 +134,151 @@ def apply_dynamic_column_filters(queryset, request, model, skip_params=FILTER_SK
             queryset = apply(**{target_field: val_list[0]})
 
     return queryset
+
+
+def apply_advanced_filters(queryset, request, model, computed_resolver=None):
+    """Aplica las condiciones del modal "Filtros Avanzados" (``?advanced_filters=``).
+
+    JSON array de: ``{ column, condition, compareType, compareColumn, value, logic }``.
+    ``logic`` en el item i combina (AND/OR) con el Q acumulado de los items 0..i-1.
+    ``computed_resolver(column, condition, value) -> Q | None`` permite que el
+    caller resuelva columnas calculadas que no son campos reales del modelo
+    (p. ej. "ocupacion"/"total_movimientos" en MovPos). Lógica única compartida
+    por MovPosDetalleView y MovimientosPersonalListView (antes solo vivía,
+    inline, en MovPosDetalleView).
+    """
+    advanced_filters_raw = request.query_params.get("advanced_filters", "").strip()
+    if not advanced_filters_raw:
+        return queryset
+
+    try:
+        advanced_conditions = json.loads(advanced_filters_raw)
+    except (ValueError, TypeError):
+        return queryset
+
+    if not isinstance(advanced_conditions, list):
+        return queryset
+    advanced_conditions = advanced_conditions[:20]  # sanity cap
+
+    valid_fields = {f.name for f in model._meta.get_fields()}
+    text_fields = {
+        f.name
+        for f in model._meta.get_fields()
+        if f.get_internal_type() in ("CharField", "TextField")
+    }
+
+    date_lookup_by_condition = {
+        "before": "lt",
+        "after": "gt",
+        "before_or_equal": "lte",
+        "after_or_equal": "gte",
+        "equals": None,
+        "not_equals": None,
+    }
+    text_lookup_by_condition = {
+        "contains": ("icontains", False),
+        "not_contains": ("icontains", True),
+        "starts_with": ("istartswith", False),
+        "not_starts_with": ("istartswith", True),
+        "ends_with": ("iendswith", False),
+        "not_ends_with": ("iendswith", True),
+        "equals": ("iexact", False),
+        "not_equals": ("iexact", True),
+    }
+
+    def resolve_target_field(field_name):
+        nonlocal queryset
+        if field_name in text_fields:
+            target = f"trimmed_{field_name}"
+            if target not in queryset.query.annotations:
+                queryset = queryset.annotate(**{target: Trim(field_name)})
+            return target
+        return field_name
+
+    def build_condition_q(cond):
+        if not isinstance(cond, dict):
+            return None
+        column = cond.get("column")
+
+        if column not in valid_fields:
+            if computed_resolver is None:
+                return None
+            if cond.get("compareType", "valor") == "campo":
+                return None  # comparing a computed column to another field isn't supported
+            value = cond.get("value", "")
+            if value is None or str(value).strip() == "":
+                return None
+            return computed_resolver(
+                column, cond.get("condition", "contains"), str(value).strip()
+            )
+
+        condition = cond.get("condition", "contains")
+        compare_type = cond.get("compareType", "valor")
+        target_field = resolve_target_field(column)
+        is_text = column in text_fields
+
+        if compare_type == "campo":
+            compare_column = cond.get("compareColumn")
+            if compare_column not in valid_fields:
+                return None
+            target_compare_field = resolve_target_field(compare_column)
+            f_expr = F(target_compare_field)
+
+            if condition == "equals":
+                return Q(**{target_field: f_expr})
+            if condition == "not_equals":
+                return ~Q(**{target_field: f_expr})
+            if condition == "before":
+                return Q(**{f"{target_field}__lt": f_expr})
+            if condition == "after":
+                return Q(**{f"{target_field}__gt": f_expr})
+            if condition == "before_or_equal":
+                return Q(**{f"{target_field}__lte": f_expr})
+            if condition == "after_or_equal":
+                return Q(**{f"{target_field}__gte": f_expr})
+            return None
+
+        # compare_type == 'valor'
+        value = cond.get("value", "")
+        if value is None or str(value).strip() == "":
+            return None
+        value = str(value).strip()
+
+        if condition in ("before", "after", "before_or_equal", "after_or_equal"):
+            lookup = date_lookup_by_condition.get(condition)
+            if not lookup:
+                return None
+            return Q(**{f"{target_field}__{lookup}": value})
+
+        if is_text and condition in text_lookup_by_condition:
+            lookup, negate = text_lookup_by_condition[condition]
+            q = Q(**{f"{target_field}__{lookup}": value})
+            return ~q if negate else q
+
+        if condition == "equals":
+            return Q(**{target_field: value})
+        if condition == "not_equals":
+            return ~Q(**{target_field: value})
+
+        return None
+
+    combined_q = None
+    for cond in advanced_conditions:
+        q = build_condition_q(cond)
+        if q is None:
+            continue
+        if combined_q is None:
+            combined_q = q
+        elif (cond.get("logic") or "AND").upper() == "OR":
+            combined_q = combined_q | q
+        else:
+            combined_q = combined_q & q
+
+    if combined_q is not None:
+        queryset = queryset.filter(combined_q)
+
+    return queryset
+
 
 LATEST_MOVPOS_RAW_SQL = """
     SELECT id FROM (
@@ -1422,9 +1585,12 @@ class MovPosDetalleView(APIView):
                         **{f"{target_distinct_field}__icontains": distinct_search}
                     )
                 else:
-                    queryset = queryset.filter(
-                        **{target_distinct_field: distinct_search}
-                    )
+                    try:
+                        queryset = queryset.filter(
+                            **{target_distinct_field: distinct_search}
+                        )
+                    except (ValueError, exceptions.ValidationError):
+                        queryset = queryset.none()
 
             distinct_qs = (
                 queryset.values(target_distinct_field)
@@ -1441,209 +1607,85 @@ class MovPosDetalleView(APIView):
             return Response(results)
 
         # Advanced filters (built from the "Filtros Avanzados" modal).
-        # JSON array of: { column, condition, compareType, compareColumn, value, logic }
-        # logic on item i combines (AND/OR) with the running Q from items 0..i-1.
-        advanced_filters_raw = request.query_params.get("advanced_filters", "").strip()
-        if advanced_filters_raw:
-            try:
-                advanced_conditions = json.loads(advanced_filters_raw)
-            except (ValueError, TypeError):
-                advanced_conditions = []
+        # "ocupacion" and "total_movimientos" are computed columns (not real
+        # model fields), so apply_advanced_filters() needs this resolver to
+        # handle them; everything else is generic (see apply_advanced_filters).
+        def mov_pos_computed_resolver(column, condition, value):
+            def get_posiciones_ocupadas():
+                cache_key_ocupadas = "mov_pos_ocupadas_set"
+                posiciones_ocupadas = cache.get(cache_key_ocupadas)
+                if posiciones_ocupadas is None:
+                    with connection.cursor() as cursor:
+                        cursor.execute(OCUPADAS_RAW_SQL)
+                        posiciones_ocupadas = set(
+                            [row[0] for row in cursor.fetchall() if row[0]]
+                        )
+                    cache.set(cache_key_ocupadas, posiciones_ocupadas, 600)
+                return posiciones_ocupadas
 
-            if isinstance(advanced_conditions, list):
-                advanced_conditions = advanced_conditions[:20]  # sanity cap
+            def text_condition_matches(haystack, condition, needle):
+                s = str(haystack).lower()
+                n = str(needle).lower()
+                if condition == "contains":
+                    return n in s
+                if condition == "not_contains":
+                    return n not in s
+                if condition == "starts_with":
+                    return s.startswith(n)
+                if condition == "not_starts_with":
+                    return not s.startswith(n)
+                if condition == "ends_with":
+                    return s.endswith(n)
+                if condition == "not_ends_with":
+                    return not s.endswith(n)
+                if condition == "equals":
+                    return s == n
+                if condition == "not_equals":
+                    return s != n
+                return False
 
-                date_lookup_by_condition = {
-                    "before": "lt",
-                    "after": "gt",
-                    "equals": None,
-                    "not_equals": None,
+            if column == "ocupacion":
+                posiciones_ocupadas = get_posiciones_ocupadas()
+                candidates = ["Ocupada", "Vacante"]
+                selected = {
+                    c for c in candidates if text_condition_matches(c, condition, value)
                 }
-                text_lookup_by_condition = {
-                    "contains": ("icontains", False),
-                    "not_contains": ("icontains", True),
-                    "starts_with": ("istartswith", False),
-                    "not_starts_with": ("istartswith", True),
-                    "ends_with": ("iendswith", False),
-                    "not_ends_with": ("iendswith", True),
-                    "equals": ("iexact", False),
-                    "not_equals": ("iexact", True),
-                }
 
-                def resolve_target_field(field_name):
-                    """Returns the field name to filter/sort on, annotating Trim() for text fields."""
-                    if field_name in text_fields:
-                        target = f"trimmed_{field_name}"
-                        nonlocal queryset
-                        if target not in queryset.query.annotations:
-                            queryset = queryset.annotate(**{target: Trim(field_name)})
-                        return target
-                    return field_name
+                want_ocupada = "Ocupada" in selected
+                want_vacante = "Vacante" in selected
+                if want_ocupada and want_vacante:
+                    return Q(no_pos_actual__isnull=False) | Q(no_pos_actual__isnull=True)
+                if want_ocupada:
+                    return Q(no_pos_actual__in=list(posiciones_ocupadas))
+                if want_vacante:
+                    return ~Q(no_pos_actual__in=list(posiciones_ocupadas))
+                return Q(pk__in=[])
 
-                # "ocupacion" and "total_movimientos" are computed columns (not real
-                # model fields), so they're invisible to valid_fields/text_fields and
-                # would otherwise be silently dropped by build_condition_q below.
-                COMPUTED_COLUMNS = {"ocupacion", "total_movimientos"}
+            if column == "total_movimientos":
+                pos_list = list(
+                    queryset.values_list("no_pos_actual", flat=True).distinct()
+                )
+                if not pos_list:
+                    return Q(pk__in=[])
+                full_counts = dict(
+                    MovPos.objects.filter(no_pos_actual__in=pos_list)
+                    .values("no_pos_actual")
+                    .annotate(c=Count("id"))
+                    .values_list("no_pos_actual", "c")
+                )
+                match_pos = [
+                    p for p, c in full_counts.items()
+                    if text_condition_matches(c, condition, value)
+                ]
+                if not match_pos:
+                    return Q(pk__in=[])
+                return Q(no_pos_actual__in=match_pos)
 
-                def get_posiciones_ocupadas():
-                    cache_key_ocupadas = "mov_pos_ocupadas_set"
-                    posiciones_ocupadas = cache.get(cache_key_ocupadas)
-                    if posiciones_ocupadas is None:
-                        with connection.cursor() as cursor:
-                            cursor.execute(OCUPADAS_RAW_SQL)
-                            posiciones_ocupadas = set(
-                                [row[0] for row in cursor.fetchall() if row[0]]
-                            )
-                        cache.set(cache_key_ocupadas, posiciones_ocupadas, 600)
-                    return posiciones_ocupadas
+            return None
 
-                def text_condition_matches(haystack, condition, needle):
-                    s = str(haystack).lower()
-                    n = str(needle).lower()
-                    if condition == "contains":
-                        return n in s
-                    if condition == "not_contains":
-                        return n not in s
-                    if condition == "starts_with":
-                        return s.startswith(n)
-                    if condition == "not_starts_with":
-                        return not s.startswith(n)
-                    if condition == "ends_with":
-                        return s.endswith(n)
-                    if condition == "not_ends_with":
-                        return not s.endswith(n)
-                    if condition == "equals":
-                        return s == n
-                    if condition == "not_equals":
-                        return s != n
-                    return False
-
-                def build_computed_condition_q(column, condition, value):
-                    nonlocal queryset
-                    if column == "ocupacion":
-                        posiciones_ocupadas = get_posiciones_ocupadas()
-                        candidates = ["Ocupada", "Vacante"]
-                        selected = {
-                            c
-                            for c in candidates
-                            if text_condition_matches(c, condition, value)
-                        }
-
-                        want_ocupada = "Ocupada" in selected
-                        want_vacante = "Vacante" in selected
-                        if want_ocupada and want_vacante:
-                            return Q(no_pos_actual__isnull=False) | Q(
-                                no_pos_actual__isnull=True
-                            )
-                        if want_ocupada:
-                            return Q(no_pos_actual__in=list(posiciones_ocupadas))
-                        if want_vacante:
-                            return ~Q(no_pos_actual__in=list(posiciones_ocupadas))
-                        return Q(pk__in=[])
-
-                    if column == "total_movimientos":
-                        pos_list = list(
-                            queryset.values_list("no_pos_actual", flat=True).distinct()
-                        )
-                        if not pos_list:
-                            return Q(pk__in=[])
-                        full_counts = dict(
-                            MovPos.objects.filter(no_pos_actual__in=pos_list)
-                            .values("no_pos_actual")
-                            .annotate(c=Count("id"))
-                            .values_list("no_pos_actual", "c")
-                        )
-                        match_pos = [
-                            p
-                            for p, c in full_counts.items()
-                            if text_condition_matches(c, condition, value)
-                        ]
-                        if not match_pos:
-                            return Q(pk__in=[])
-                        return Q(no_pos_actual__in=match_pos)
-
-                    return None
-
-                def build_condition_q(cond):
-                    if not isinstance(cond, dict):
-                        return None
-                    column = cond.get("column")
-
-                    if column in COMPUTED_COLUMNS:
-                        if cond.get("compareType", "valor") == "campo":
-                            return None  # comparing a computed column to another field isn't supported
-                        value = cond.get("value", "")
-                        if value is None or str(value).strip() == "":
-                            return None
-                        return build_computed_condition_q(
-                            column,
-                            cond.get("condition", "contains"),
-                            str(value).strip(),
-                        )
-
-                    if column not in valid_fields:
-                        return None
-
-                    condition = cond.get("condition", "contains")
-                    compare_type = cond.get("compareType", "valor")
-                    target_field = resolve_target_field(column)
-                    is_text = column in text_fields
-
-                    if compare_type == "campo":
-                        compare_column = cond.get("compareColumn")
-                        if compare_column not in valid_fields:
-                            return None
-                        target_compare_field = resolve_target_field(compare_column)
-                        f_expr = F(target_compare_field)
-
-                        if condition == "equals":
-                            return Q(**{target_field: f_expr})
-                        if condition == "not_equals":
-                            return ~Q(**{target_field: f_expr})
-                        if condition == "before":
-                            return Q(**{f"{target_field}__lt": f_expr})
-                        if condition == "after":
-                            return Q(**{f"{target_field}__gt": f_expr})
-                        return None
-
-                    # compare_type == 'valor'
-                    value = cond.get("value", "")
-                    if value is None or str(value).strip() == "":
-                        return None
-                    value = str(value).strip()
-
-                    if condition in ("before", "after"):
-                        lookup = date_lookup_by_condition.get(condition)
-                        if not lookup:
-                            return None
-                        return Q(**{f"{target_field}__{lookup}": value})
-
-                    if is_text and condition in text_lookup_by_condition:
-                        lookup, negate = text_lookup_by_condition[condition]
-                        q = Q(**{f"{target_field}__{lookup}": value})
-                        return ~q if negate else q
-
-                    if condition == "equals":
-                        return Q(**{target_field: value})
-                    if condition == "not_equals":
-                        return ~Q(**{target_field: value})
-
-                    return None
-
-                combined_q = None
-                for cond in advanced_conditions:
-                    q = build_condition_q(cond)
-                    if q is None:
-                        continue
-                    if combined_q is None:
-                        combined_q = q
-                    elif (cond.get("logic") or "AND").upper() == "OR":
-                        combined_q = combined_q | q
-                    else:
-                        combined_q = combined_q & q
-
-                if combined_q is not None:
-                    queryset = queryset.filter(combined_q)
+        queryset = apply_advanced_filters(
+            queryset, request, MovPos, computed_resolver=mov_pos_computed_resolver
+        )
 
         # Sorting
         sort_by_param = request.query_params.get("sort_by", "").strip()
@@ -1953,9 +1995,14 @@ class UltimaActualizacionZafiroView(APIView):
             last_success = ZafiroBitacora.objects.all().first()
 
         if last_success:
+            from datetime import timedelta
+            fecha_fin = last_success.fecha_ejecucion
+            if last_success.duracion_segundos:
+                fecha_fin += timedelta(seconds=last_success.duracion_segundos)
+
             return Response(
                 {
-                    "fecha": last_success.fecha_ejecucion.isoformat(),
+                    "fecha": fecha_fin.isoformat(),
                     "status": last_success.status,
                 },
                 status=status.HTTP_200_OK,
@@ -2031,6 +2078,11 @@ class ZafiroSSEView(View):
         )
         response["Cache-Control"] = "no-cache"
         response["X-Accel-Buffering"] = "no"
+        # GZipMiddleware bufferea internamente (zlib sin flush por chunk) y
+        # retiene todos los mensajes hasta que la conexión se cierra,
+        # rompiendo el streaming en tiempo real. Content-Encoding ya seteado
+        # hace que GZipMiddleware.process_response la omita.
+        response["Content-Encoding"] = "identity"
         return response
 
 
@@ -2526,9 +2578,12 @@ class MovimientosPersonalListView(APIView):
                         **{f"{target_distinct_field}__icontains": distinct_search}
                     )
                 else:
-                    queryset = queryset.filter(
-                        **{target_distinct_field: distinct_search}
-                    )
+                    try:
+                        queryset = queryset.filter(
+                            **{target_distinct_field: distinct_search}
+                        )
+                    except (ValueError, exceptions.ValidationError):
+                        queryset = queryset.none()
 
             distinct_qs = (
                 queryset.values(target_distinct_field)
@@ -2543,6 +2598,10 @@ class MovimientosPersonalListView(APIView):
                     {"value": val if val is not None else "", "count": item["count"]}
                 )
             return Response(results)
+
+        # Advanced filters (built from the "Filtros Avanzados" modal). No
+        # computed columns here (unlike MovPosDetalleView), so no resolver needed.
+        queryset = apply_advanced_filters(queryset, request, CpTblMovCompleto290526)
 
         # Sorting
         sort_by_param = request.query_params.get("sort_by", "").strip()
@@ -2701,6 +2760,11 @@ class DesgloseJerarquicoView(APIView):
     def get(self, request, *args, **kwargs):
         from django.db import connection
 
+        cache_key = "desglose_jerarquico"
+        cached_data = cache.get(cache_key)
+        if cached_data is not None:
+            return Response(cached_data, status=status.HTTP_200_OK)
+
         query = """
         SELECT
             e.NJ,
@@ -2745,6 +2809,7 @@ class DesgloseJerarquicoView(APIView):
                 columns = [col[0] for col in cursor.description]
                 results = [dict(zip(columns, row)) for row in cursor.fetchall()]
 
+            cache.set(cache_key, results, 1200)
             return Response(results, status=status.HTTP_200_OK)
         except Exception as e:
             return Response(
