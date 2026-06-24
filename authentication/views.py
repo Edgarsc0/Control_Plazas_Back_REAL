@@ -19,6 +19,7 @@ class WhitelistViewSet(viewsets.ModelViewSet):
 
 class CheckEmailView(views.APIView):
     permission_classes = [AllowAny]  # login: debe ser público
+    authentication_classes = []  # evita exigir CSRF si el navegador trae una sessionid vieja
 
     def post(self, request):
         email = request.data.get("email")
@@ -26,6 +27,7 @@ class CheckEmailView(views.APIView):
             return Response(
                 {"error": "Email es requerido"}, status=status.HTTP_400_BAD_REQUEST
             )
+        email = email.strip()
 
         try:
             entry = Whitelist.objects.get(email=email, activo=True)
@@ -68,6 +70,7 @@ class CheckEmailView(views.APIView):
 
 class VerifyCodeView(views.APIView):
     permission_classes = [AllowAny]  # login: debe ser público
+    authentication_classes = []  # evita exigir CSRF si el navegador trae una sessionid vieja
 
     def post(self, request):
         email = request.data.get("email")
@@ -78,6 +81,8 @@ class VerifyCodeView(views.APIView):
                 {"error": "Email y código son requeridos"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        email = email.strip()
+        code = code.strip()
 
         try:
             vc = VerificationCode.objects.filter(
