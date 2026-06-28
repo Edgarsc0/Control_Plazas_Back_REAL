@@ -280,6 +280,54 @@ def apply_advanced_filters(queryset, request, model, computed_resolver=None):
     return queryset
 
 
+MOV_POS_COLUMN_LABELS = {
+    "no_pos_actual": "No. Posición",
+    "total_movimientos": "Histórico",
+    "ocupacion": "Ocupación",
+    "fecha_vacancia": "Fecha de Vacancia",
+    "estado_psn": "Estado (A/I)",
+    "f_efva": "Fecha Efectiva",
+    "cd_motivo": "Cod. Motivo",
+    "motivo": "Motivo",
+    "cd_un": "Cod. UN",
+    "unidad_de_negocio": "Unidad Negocio",
+    "unidad_adva": "Unidad Adva",
+    "cd_departamento": "Cod. Depto",
+    "cd_puesto": "Cod. Puesto",
+    "puesto_ptal": "Puesto Ptal",
+    "estado_ptal": "Estado Ptal",
+    "fecha_est": "Fecha Est",
+    "maximo": "Máximo",
+    "depnd_drt": "Depnd Drt",
+    "depnd_indrt": "Depnd Indrt",
+    "ubicacion": "Ubicación",
+    "nvl_direc": "Nvl Direc",
+    "plan_sal": "Plan Sal",
+    "grado": "Grado",
+    "esc": "Esc",
+    "partida_ptal": "Partida Ptal",
+    "gp_pago": "Gp Pago",
+    "prog_beneficios": "Prog Beneficios",
+    "fecha_captura": "Fecha Captura",
+    "fh_ult_actz": "F/H Últ Actz",
+    "por": "Por",
+    "hr_estd_semn": "Hr Estd/Semn",
+    "descr": "Descr",
+    "gp_trabajo": "Gp Trabajo",
+    "org_code": "Org Code",
+    "grupo_cd_sal": "Grupo Cd Sal",
+    "formal_desc": "Formal Desc",
+    "pto_compt": "Pto Compt",
+    "posn_clv": "Posn Clv",
+    "presupuesto": "Presupuesto",
+    "nombre_puesto": "Nombre Puesto",
+}
+
+MOV_POS_MONO_COLUMNS = {
+    "no_pos_actual", "cd_un", "cd_departamento", "cd_puesto",
+    "maximo", "grado", "esc", "partida_ptal",
+}
+
 LATEST_MOVPOS_RAW_SQL = """
     SELECT id FROM (
         SELECT id, ROW_NUMBER() OVER (
@@ -1845,6 +1893,295 @@ class MovPosHistoriaView(APIView):
             )
 
 
+class MovPosExportExcelView(APIView):
+    """Genera y descarga directamente el Excel de Movimientos de Posiciones
+    con los filtros activos en el frontend. Evita que el cliente descargue
+    todos los datos en JSON y ejecute ExcelJS localmente."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        from django.db import connection as db_connection
+        from openpyxl import Workbook
+        from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+        from openpyxl.utils import get_column_letter
+
+        # ── 1. Columnas visibles ────────────────────────────────────────────
+        visible_raw = request.query_params.get("visible_columns", "").strip()
+        if visible_raw:
+            visible_keys = [k.strip() for k in visible_raw.split(",") if k.strip()]
+        else:
+            visible_keys = list(MOV_POS_COLUMN_LABELS.keys())
+
+        # ── 2. Construir queryset con los mismos filtros que MovPosDetalleView ──
+        queryset = MovPos.objects.all()
+
+        oficio = request.query_params.get("oficio")
+        nivel = request.query_params.get("nivel")
+        if oficio or nivel:
+            posiciones_qs = Plantilla1800Plazas.objects.all()
+            if oficio:
+                if oficio == "(vacío)":
+                    posiciones_qs = posiciones_qs.filter(
+                        Q(of_de_solicitud__isnull=True) | Q(of_de_solicitud="")
+                    )
+                else:
+                    posiciones_qs = posiciones_qs.filter(of_de_solicitud=oficio)
+            if nivel:
+                posiciones_qs = posiciones_qs.filter(nivel=nivel)
+            queryset = queryset.filter(
+                no_pos_actual__in=posiciones_qs.values("posición")
+            )
+
+        is_latest = request.query_params.get("is_latest", "true").lower() != "false"
+        if is_latest:
+            cache_key_latest = "latest_movpos_sub_ids"
+            sub_ids = cache.get(cache_key_latest)
+            if sub_ids is None:
+                with db_connection.cursor() as cursor:
+                    cursor.execute(LATEST_MOVPOS_RAW_SQL)
+                    sub_ids = [row[0] for row in cursor.fetchall() if row[0]]
+                cache.set(cache_key_latest, sub_ids, 600)
+            queryset = queryset.filter(id__in=sub_ids)
+
+        queryset = apply_text_search(
+            queryset,
+            request.query_params.get("search", ""),
+            ["no_pos_actual", "motivo", "unidad_de_negocio", "unidad_adva",
+             "puesto_ptal", "descr", "nombre_puesto"],
+        )
+
+        queryset = apply_dynamic_column_filters(queryset, request, MovPos)
+
+        # ocupacion computed column
+        ocupacion_param_key = None
+        for k in request.query_params.keys():
+            base = k[9:] if k.startswith("exclude__") else k
+            if base == "ocupacion" or base.startswith("ocupacion__"):
+                ocupacion_param_key = k
+                break
+
+        cache_key_ocupadas = "mov_pos_ocupadas_set"
+
+        def _get_posiciones_ocupadas():
+            pos_ocup = cache.get(cache_key_ocupadas)
+            if pos_ocup is None:
+                with db_connection.cursor() as cursor:
+                    cursor.execute(OCUPADAS_RAW_SQL)
+                    pos_ocup = set(row[0] for row in cursor.fetchall() if row[0])
+                cache.set(cache_key_ocupadas, pos_ocup, 600)
+            return pos_ocup
+
+        if ocupacion_param_key:
+            posiciones_ocupadas = _get_posiciones_ocupadas()
+            ocupacion_raw = request.query_params.get(ocupacion_param_key, "")
+            is_exclude = ocupacion_param_key.startswith("exclude__")
+            suffix = (
+                ocupacion_param_key.split("__", 1)[1]
+                if "__" in (ocupacion_param_key[9:] if is_exclude else ocupacion_param_key)
+                else "in"
+            )
+            if suffix == "in":
+                selected_vals = set(v.strip() for v in ocupacion_raw.split(",") if v.strip())
+            else:
+                needle = ocupacion_raw.strip().lower()
+                candidates = ["Ocupada", "Vacante"]
+                if suffix in ("icontains",):
+                    selected_vals = {c for c in candidates if needle in c.lower()}
+                elif suffix in ("istartswith",):
+                    selected_vals = {c for c in candidates if c.lower().startswith(needle)}
+                elif suffix in ("iendswith",):
+                    selected_vals = {c for c in candidates if c.lower().endswith(needle)}
+                elif suffix in ("iexact",):
+                    selected_vals = {c for c in candidates if c.lower() == needle}
+                else:
+                    selected_vals = set(candidates)
+            if is_exclude:
+                selected_vals = {"Ocupada", "Vacante"} - selected_vals
+            want_ocupada = "Ocupada" in selected_vals
+            want_vacante = "Vacante" in selected_vals
+            if want_ocupada and not want_vacante:
+                queryset = queryset.filter(no_pos_actual__in=list(posiciones_ocupadas))
+            elif want_vacante and not want_ocupada:
+                queryset = queryset.exclude(no_pos_actual__in=list(posiciones_ocupadas))
+            elif not want_ocupada and not want_vacante:
+                queryset = queryset.none()
+
+        total_mov_raw = (
+            request.query_params.get("total_movimientos__in")
+            or request.query_params.get("total_movimientos")
+        )
+        if total_mov_raw:
+            selected_counts = set()
+            for v in total_mov_raw.split(","):
+                v = v.strip()
+                if v:
+                    try:
+                        selected_counts.add(int(v))
+                    except ValueError:
+                        pass
+            if selected_counts:
+                pos_list = list(queryset.values_list("no_pos_actual", flat=True).distinct())
+                full_counts = dict(
+                    MovPos.objects.filter(no_pos_actual__in=pos_list)
+                    .values("no_pos_actual")
+                    .annotate(c=Count("id"))
+                    .values_list("no_pos_actual", "c")
+                )
+                match_pos = [p for p, c in full_counts.items() if c in selected_counts]
+                queryset = queryset.filter(no_pos_actual__in=match_pos)
+            else:
+                queryset = queryset.none()
+
+        # Advanced filters
+        def _computed_resolver(column, condition, value):
+            def _text_match(haystack, cond, needle):
+                s, n = str(haystack).lower(), str(needle).lower()
+                if cond == "contains": return n in s
+                if cond == "not_contains": return n not in s
+                if cond == "starts_with": return s.startswith(n)
+                if cond == "not_starts_with": return not s.startswith(n)
+                if cond == "ends_with": return s.endswith(n)
+                if cond == "not_ends_with": return not s.endswith(n)
+                if cond == "equals": return s == n
+                if cond == "not_equals": return s != n
+                return False
+
+            if column == "ocupacion":
+                pos_ocup = _get_posiciones_ocupadas()
+                selected = {c for c in ["Ocupada", "Vacante"] if _text_match(c, condition, value)}
+                want_o = "Ocupada" in selected
+                want_v = "Vacante" in selected
+                if want_o and want_v:
+                    return Q(no_pos_actual__isnull=False) | Q(no_pos_actual__isnull=True)
+                if want_o:
+                    return Q(no_pos_actual__in=list(pos_ocup))
+                if want_v:
+                    return ~Q(no_pos_actual__in=list(pos_ocup))
+                return Q(pk__in=[])
+            if column == "total_movimientos":
+                pos_list = list(queryset.values_list("no_pos_actual", flat=True).distinct())
+                if not pos_list:
+                    return Q(pk__in=[])
+                full_counts = dict(
+                    MovPos.objects.filter(no_pos_actual__in=pos_list)
+                    .values("no_pos_actual")
+                    .annotate(c=Count("id"))
+                    .values_list("no_pos_actual", "c")
+                )
+                match_pos = [p for p, c in full_counts.items() if _text_match(c, condition, value)]
+                return Q(no_pos_actual__in=match_pos) if match_pos else Q(pk__in=[])
+            return None
+
+        queryset = apply_advanced_filters(queryset, request, MovPos, computed_resolver=_computed_resolver)
+
+        # Sorting
+        valid_fields = [f.name for f in MovPos._meta.get_fields()]
+        text_fields_set = {
+            f.name for f in MovPos._meta.get_fields()
+            if f.get_internal_type() in ("CharField", "TextField")
+        }
+        sort_by_param = request.query_params.get("sort_by", "").strip()
+        sort_order = request.query_params.get("sort_order", "desc").strip().lower()
+        if sort_by_param:
+            sort_fields = [f.strip() for f in sort_by_param.split(",")]
+            order_by_args = []
+            for field in sort_fields:
+                if field in valid_fields:
+                    is_text = field in text_fields_set
+                    target_sort_field = f"trimmed_{field}" if is_text else field
+                    if is_text and target_sort_field not in queryset.query.annotations:
+                        queryset = queryset.annotate(**{target_sort_field: Trim(field)})
+                    order_by_args.append(f"-{target_sort_field}" if sort_order == "desc" else target_sort_field)
+            if order_by_args:
+                queryset = queryset.order_by(*order_by_args)
+            else:
+                queryset = queryset.order_by("-f_efva", "-fecha_captura", "no_pos_actual")
+        else:
+            queryset = queryset.order_by("-f_efva", "-fecha_captura", "no_pos_actual")
+
+        # ── 3. Materializar datos ───────────────────────────────────────────
+        resultados = list(queryset.values())
+        counts = dict(MovPos.objects.values_list("no_pos_actual").annotate(c=Count("id")))
+        posiciones_ocupadas = _get_posiciones_ocupadas()
+        for r in resultados:
+            pos = r.get("no_pos_actual")
+            r["total_movimientos"] = counts.get(pos, 1)
+            r["ocupacion"] = "Ocupada" if pos in posiciones_ocupadas else "Vacante"
+            r["fecha_vacancia"] = "" if pos in posiciones_ocupadas else r.get("fecha_vacancia", "")
+
+        # ── 4. Generar Excel ────────────────────────────────────────────────
+        try:
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Movimientos_Posiciones"
+
+            header_fill = PatternFill(start_color="FF2B4C7E", end_color="FF2B4C7E", fill_type="solid")
+            zebra_fill = PatternFill(start_color="FFF4F7FA", end_color="FFF4F7FA", fill_type="solid")
+            header_font = Font(name="Segoe UI", size=10, bold=True, color="FFFFFFFF")
+            data_font = Font(name="Segoe UI", size=9)
+            gold_side = Side(style="thin", color="FFBC955C")
+            gold_border = Border(left=gold_side, right=gold_side, top=gold_side, bottom=gold_side)
+            align_center = Alignment(horizontal="center", vertical="center")
+            align_left = Alignment(horizontal="left", vertical="center")
+
+            # Header row
+            for col_idx, key in enumerate(visible_keys, start=1):
+                label = MOV_POS_COLUMN_LABELS.get(key, key)
+                cell = ws.cell(row=1, column=col_idx, value=label)
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.border = gold_border
+                cell.alignment = align_center
+            ws.row_dimensions[1].height = 24
+
+            # Data rows
+            for row_idx, row_data in enumerate(resultados, start=2):
+                is_zebra = row_idx % 2 == 0
+                for col_idx, key in enumerate(visible_keys, start=1):
+                    val = row_data.get(key)
+                    if val is None:
+                        val = ""
+                    elif not isinstance(val, (int, float, bool)):
+                        val = str(val)
+                    cell = ws.cell(row=row_idx, column=col_idx, value=val)
+                    cell.font = data_font
+                    cell.border = gold_border
+                    cell.alignment = align_center if key in MOV_POS_MONO_COLUMNS else align_left
+                    if is_zebra:
+                        cell.fill = zebra_fill
+                ws.row_dimensions[row_idx].height = 20
+
+            # Auto-fit column widths
+            for col_idx, key in enumerate(visible_keys, start=1):
+                col_letter = get_column_letter(col_idx)
+                header_len = len(MOV_POS_COLUMN_LABELS.get(key, key))
+                max_len = max(
+                    (len(str(r.get(key, "") or "")) for r in resultados),
+                    default=0,
+                )
+                ws.column_dimensions[col_letter].width = min(max(max_len, header_len) + 4, 60)
+
+            output = io.BytesIO()
+            wb.save(output)
+            output.seek(0)
+
+            response = HttpResponse(
+                output.read(),
+                content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+            response["Content-Disposition"] = 'attachment; filename="Movimientos_Posiciones.xlsx"'
+            return response
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return Response(
+                {"error": "Error generando Excel", "detail": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
 class CadenaMandoView(APIView):
     """
     Vista para buscar la cadena de mando jerárquica (Bottom-Up) en EMPLEADOS_COMPLETOS_SIG.
@@ -2643,6 +2980,94 @@ class MovimientosPersonalListView(APIView):
 
         serializer = CpTblMovCompleto290526Serializer(queryset, many=True)
         return Response(serializer.data)
+
+
+class OrganigramaDeptoView(APIView):
+    """
+    Catálogo departamento→descripcion_larga de ORGANIGRAMA_ANAM.
+    Respuesta: [{"departamento": "00100000000", "descripcion_larga": "..."}, ...]
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from django.db import connection
+        sql = """
+            SELECT departamento, descripcion_larga
+            FROM ORGANIGRAMA_ANAM
+            ORDER BY departamento
+        """
+        with connection.cursor() as cursor:
+            cursor.execute(sql)
+            rows = cursor.fetchall()
+        return Response([
+            {"departamento": r[0], "descripcion_larga": r[1]}
+            for r in rows
+        ])
+
+
+class MovimientosPersonalHistorialView(APIView):
+    """
+    Devuelve el historial completo (sin filtro de año) de los empleados indicados,
+    ordenado por num_empleado, fecha_efectiva, sec ASC.
+    Consulta directa a cp_tbl_mov_completo_29_05_26 via raw SQL.
+
+    Parámetro: ?num_empleado__in=123,456,789
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from django.db import connection
+
+        raw_param = request.query_params.get("num_empleado__in", "").strip()
+        if not raw_param:
+            return Response([])
+
+        emp_ids = [e.strip() for e in raw_param.split(",") if e.strip()]
+        if not emp_ids:
+            return Response([])
+
+        placeholders = ", ".join(["%s"] * len(emp_ids))
+        sql = f"""
+            SELECT
+                id, posicion, num_empleado,
+                nombre, ap_pat, ap_mat,
+                accion, accion_nombre,
+                motivo, motivo_nombre,
+                fecha_efectiva, sec, fecha_captura,
+                est_hr, estado_pago, partida_presup,
+                un, un_admin,
+                id_depto, depen_direc,
+                plan_sal, grado, escala,
+                puesto_ptal, nivel_tabular,
+                gp_pago, prog_benef, sal_base,
+                cd_puesto, ubicacion, id_estbl,
+                salida_prevista, fecha_ult_actz, por,
+                ult_inicio, fecha_inicial, gp_trabajo,
+                grupo_cd_sal, antiguo_empr,
+                rfc, curp, id_persona,
+                desc_larga_p, nv_jerarquico, desc_larga_un,
+                sexo, fecha_entrada, fecha_posicion
+            FROM cp_tbl_mov_completo_29_05_26
+            WHERE num_empleado IN ({placeholders})
+            ORDER BY num_empleado ASC, fecha_efectiva ASC, sec ASC
+        """
+
+        with connection.cursor() as cursor:
+            cursor.execute(sql, emp_ids)
+            cols = [d[0] for d in cursor.description]
+            rows = cursor.fetchall()
+
+        results = []
+        for row in rows:
+            record = {}
+            for i, col in enumerate(cols):
+                val = row[i]
+                if hasattr(val, "isoformat"):
+                    val = val.isoformat()
+                record[col] = val
+            results.append(record)
+
+        return Response(results)
 
 
 class MovimientosPersonalStatsView(APIView):

@@ -14,6 +14,7 @@ from .views import (
     EmpleadosEstatusPorNivelUaView,
     EmpleadosDistribucionGeograficaView,
     MovPosDetalleView,
+    MovPosExportExcelView,
     MovPosHistoriaView,
     CadenaMandoView,
     ZafiroBitacoraView,
@@ -29,6 +30,8 @@ from .views import (
     TorreCaballitoEmpleadosView,
     MovimientosPersonalListView,
     MovimientosPersonalStatsView,
+    MovimientosPersonalHistorialView,
+    OrganigramaDeptoView,
     CuadroVacanciaView,
     DesgloseJerarquicoView,
 )
@@ -43,6 +46,16 @@ urlpatterns = [
         "movimientos-personal/stats/",
         MovimientosPersonalStatsView.as_view(),
         name="movimientos-personal-stats",
+    ),
+    path(
+        "movimientos-personal/historial/",
+        MovimientosPersonalHistorialView.as_view(),
+        name="movimientos-personal-historial",
+    ),
+    path(
+        "organigrama-deptos/",
+        OrganigramaDeptoView.as_view(),
+        name="organigrama-deptos",
     ),
     path(
         "torre-caballito/",
@@ -138,6 +151,11 @@ urlpatterns = [
         "empleados_distribucion_geografica/",
         EmpleadosDistribucionGeograficaView.as_view(),
         name="empleados_distribucion_geografica",
+    ),
+    path(
+        "mov_pos_detalle/export_excel/",
+        MovPosExportExcelView.as_view(),
+        name="mov_pos_export_excel",
     ),
     path(
         "mov_pos_detalle/",

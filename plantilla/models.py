@@ -1003,7 +1003,8 @@ class ZafiroBitacora(models.Model):
 
 
 class CpTblMovCompleto290526Base(models.Model):
-    posicion = models.CharField(max_length=50, primary_key=True)
+    id = models.AutoField(primary_key=True)
+    posicion = models.CharField(max_length=50, blank=True, null=True)
     num_empleado = models.CharField(max_length=20, blank=True, null=True)
     columna_c = models.CharField(
         db_column="columna_C", max_length=100, blank=True, null=True

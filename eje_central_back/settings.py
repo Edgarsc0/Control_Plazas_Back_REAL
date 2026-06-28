@@ -8,7 +8,6 @@ from pathlib import Path
 from celery.schedules import crontab
 from dotenv import load_dotenv
 
-
 load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -123,8 +122,16 @@ LOGGING = {
     "root": {"handlers": ["console"], "level": "INFO"},
     "loggers": {
         # Evita el ruido de SQL incluso si DEBUG se activa puntualmente.
-        "django.db.backends": {"level": "WARNING", "handlers": ["console"], "propagate": False},
-        "django.request": {"level": "WARNING", "handlers": ["console"], "propagate": False},
+        "django.db.backends": {
+            "level": "WARNING",
+            "handlers": ["console"],
+            "propagate": False,
+        },
+        "django.request": {
+            "level": "WARNING",
+            "handlers": ["console"],
+            "propagate": False,
+        },
     },
 }
 
@@ -160,6 +167,7 @@ DATABASE_ROUTERS = ["control_gestion.router.ControlGestionRouter"]
 # CORS configuration
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
+    "http://localhost:3137",
     "http://127.0.0.1:3000",
     "http://192.168.1.76:3000",
     "http://89.116.51.124:3030",
@@ -226,7 +234,7 @@ ZAFIRO_SCRIPT_PATH = os.getenv(
 CELERY_BEAT_SCHEDULE = {
     "zafiro-cada-30-minutos": {
         "task": "plantilla.tasks.importar_zafiro",
-        "schedule": crontab(minute='*/30'),
+        "schedule": crontab(minute="*/30"),
         "options": {"queue": "celery"},
     },
 }
@@ -238,5 +246,3 @@ CACHES = {
         "LOCATION": os.getenv("CELERY_BROKER_URL", "redis://127.0.0.1:6379/0"),
     }
 }
-
-
