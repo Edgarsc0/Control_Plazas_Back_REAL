@@ -8,6 +8,7 @@ from .serializers import (
     ConstantesSistemaSerializer,
     ConceptosPresupuestalSerializer,
 )
+from django.db import connection
 from django.db.models import Q
 
 
@@ -19,6 +20,61 @@ class ValuacionPresupuestariaPorNivelViewSet(viewsets.ModelViewSet):
 class CatalogoPlazasViewSet(viewsets.ModelViewSet):
     queryset = CatalogoPlazas.objects.all()
     serializer_class = CatalogoPlazasSerializer
+
+    @action(detail=False, methods=['get'])
+    def eventuales_ocupadas(self, request):
+        query = """
+            SELECT e.`Nivel`, COUNT(*) AS cantidad
+            FROM EMPLEADOS_COMPLETOS_SIG e
+            INNER JOIN MOV_POS m
+                ON e.`Posición` = m.`Nº Pos Actual`
+            INNER JOIN (
+                SELECT id FROM (
+                    SELECT id, ROW_NUMBER() OVER (
+                        PARTITION BY `Nº Pos Actual`
+                        ORDER BY `F Efva` DESC, `Fecha Captura` DESC, `F/H Últ Actz` DESC, id DESC
+                    ) AS rn
+                    FROM MOV_POS
+                ) ranked WHERE rn = 1
+            ) latest ON m.id = latest.id
+            WHERE m.`Estado Psn` = 'A'
+              AND e.Partida = '12201'
+              AND e.`Estado Nómina` <> ' '
+            GROUP BY e.`Nivel`
+            ORDER BY e.`Nivel`
+        """
+        with connection.cursor() as cursor:
+            cursor.execute(query)
+            rows = cursor.fetchall()
+        return Response([{"nivel": row[0], "cantidad": row[1]} for row in rows])
+
+    @action(detail=False, methods=['get'])
+    def permanentes_ocupadas(self, request):
+        query = """
+            SELECT e.`Nivel`, COUNT(*) AS cantidad
+            FROM EMPLEADOS_COMPLETOS_SIG e
+            INNER JOIN MOV_POS m
+                ON e.`Posición` = m.`Nº Pos Actual`
+            INNER JOIN (
+                SELECT id FROM (
+                    SELECT id, ROW_NUMBER() OVER (
+                        PARTITION BY `Nº Pos Actual`
+                        ORDER BY `F Efva` DESC, `Fecha Captura` DESC, `F/H Últ Actz` DESC, id DESC
+                    ) AS rn
+                    FROM MOV_POS
+                ) ranked WHERE rn = 1
+            ) latest ON m.id = latest.id
+            WHERE m.`Estado Psn` = 'A'
+              AND e.Partida = '11301'
+              AND e.`Estado Nómina` <> ' '
+              AND e.`Posición` NOT LIKE '103L%'
+            GROUP BY e.`Nivel`
+            ORDER BY e.`Nivel`
+        """
+        with connection.cursor() as cursor:
+            cursor.execute(query)
+            rows = cursor.fetchall()
+        return Response([{"nivel": row[0], "cantidad": row[1]} for row in rows])
 
     @action(detail=False, methods=['post'])
     def calcular(self, request):
