@@ -16,6 +16,7 @@ from .views import (
     MovPosDetalleView,
     MovPosExportExcelView,
     MovPosHistoriaView,
+    MovPosVacanciaDetalleView,
     CadenaMandoView,
     ZafiroBitacoraView,
     UltimaActualizacionZafiroView,
@@ -166,6 +167,11 @@ urlpatterns = [
         "mov_pos_historia/",
         MovPosHistoriaView.as_view(),
         name="mov_pos_historia",
+    ),
+    path(
+        "mov_pos_vacancia_detalle/",
+        MovPosVacanciaDetalleView.as_view(),
+        name="mov_pos_vacancia_detalle",
     ),
     path(
         "cadena_mando/",

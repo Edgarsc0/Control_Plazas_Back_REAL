@@ -321,6 +321,7 @@ MOV_POS_COLUMN_LABELS = {
     "posn_clv": "Posn Clv",
     "presupuesto": "Presupuesto",
     "nombre_puesto": "Nombre Puesto",
+    "categoria_vacancia": "Categoría Vacancia",
 }
 
 MOV_POS_MONO_COLUMNS = {
@@ -1891,6 +1892,113 @@ class MovPosHistoriaView(APIView):
             return Response(
                 {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+
+class MovPosVacanciaDetalleView(APIView):
+    """
+    Devuelve el detalle dinámico (por categoría de vacancia A/B/C) del
+    registro decisivo que originó la fecha de vacancia de una posición.
+
+    - Categoría A (baja): el registro decisivo vive en
+      cp_tbl_mov_completo_29_05_26 y describe al empleado que causó la baja,
+      el motivo, fecha efectiva y fecha de captura de esa baja.
+    - Categoría B (cambio de posición): mismo origen de datos; la posición
+      origen es la posición sobre la que se consulta y la posición destino
+      es `posicion` del registro decisivo.
+    - Categoría C (nunca ocupada): el registro decisivo vive en el propio
+      MOV_POS y es el primer movimiento histórico de esa plaza.
+
+    Parámetro: ?id=<id de MOV_POS> (el id del renglón de MOV_POS sobre el
+    que se muestra la fecha de vacancia, NO el idRegistroDesicivo).
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        from .models import CpTblMovCompleto290526
+
+        mov_id = request.query_params.get("id")
+        if not mov_id:
+            return Response(
+                {"error": "Parámetro 'id' es requerido."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            mov_row = MovPos.objects.get(id=mov_id)
+        except (MovPos.DoesNotExist, ValueError):
+            return Response(
+                {"error": "Registro de MOV_POS no encontrado."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        categoria = (mov_row.categoria_vacancia or "").strip().upper()
+        id_decisivo = mov_row.id_registro_desicivo
+
+        base = {
+            "categoria_vacancia": categoria,
+            "no_pos_actual": mov_row.no_pos_actual,
+            "fecha_vacancia": mov_row.fecha_vacancia,
+        }
+
+        if not categoria or not id_decisivo:
+            return Response(
+                {**base, "error": "No hay registro decisivo asociado a esta vacancia."}
+            )
+
+        if categoria in ("A", "B"):
+            try:
+                registro = CpTblMovCompleto290526.objects.get(id=id_decisivo)
+            except CpTblMovCompleto290526.DoesNotExist:
+                return Response(
+                    {
+                        **base,
+                        "error": "Registro decisivo no encontrado en cp_tbl_mov_completo_29_05_26.",
+                    }
+                )
+
+            empleado_nombre = " ".join(
+                p for p in [registro.nombre, registro.ap_pat, registro.ap_mat] if p
+            ).strip()
+
+            detalle = {
+                **base,
+                "empleado": {
+                    "num_empleado": registro.num_empleado,
+                    "nombre_completo": empleado_nombre,
+                },
+                "accion": registro.accion,
+                "accion_nombre": registro.accion_nombre,
+                "motivo": registro.motivo,
+                "motivo_nombre": registro.motivo_nombre,
+                "fecha_efectiva": registro.fecha_efectiva,
+                "fecha_captura": registro.fecha_captura,
+            }
+
+            if categoria == "B":
+                detalle["posicion_origen"] = mov_row.no_pos_actual
+                detalle["posicion_destino"] = registro.posicion
+
+            return Response(detalle)
+
+        if categoria == "C":
+            try:
+                registro = MovPos.objects.get(id=id_decisivo)
+            except MovPos.DoesNotExist:
+                return Response(
+                    {**base, "error": "Registro decisivo no encontrado en MOV_POS."}
+                )
+
+            detalle = {
+                **base,
+                "fecha_efectiva": registro.f_efva,
+                "fecha_captura": registro.fecha_captura,
+            }
+            return Response(detalle)
+
+        return Response(
+            {**base, "error": f"Categoría de vacancia desconocida: {categoria}"}
+        )
 
 
 class MovPosExportExcelView(APIView):

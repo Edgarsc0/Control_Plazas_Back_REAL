@@ -985,6 +985,26 @@ def _corregir_smb_smn_empleados(bitacora):
         logger.error(f"Error en _corregir_smb_smn_empleados: {str(e)}", exc_info=True)
 
 
+def _llenar_niveles_vacios_pos_activas(bitacora):
+    """
+    Ejecuta el Stored Procedure sp_llenar_niveles_vacios_pos_activas, el cual
+    llena la columna `Nivel` de EMPLEADOS_COMPLETOS_SIG para empleados con
+    posición activa y Nivel NULL, haciendo match contra rc_cat_cod_presupuestal
+    por Código Presupuestal y Escala.
+    """
+    _append_log(
+        bitacora,
+        "Llenando Niveles vacíos en EMPLEADOS_COMPLETOS_SIG desde catálogo rc_cat_cod_presupuestal...",
+    )
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("CALL sp_llenar_niveles_vacios_pos_activas();")
+            _append_log(bitacora, "Niveles vacíos actualizados exitosamente.")
+    except Exception as e:
+        _append_log(bitacora, f"Error llenando Niveles vacíos: {str(e)}", is_error=True)
+        logger.error(f"Error en _llenar_niveles_vacios_pos_activas: {str(e)}", exc_info=True)
+
+
 def _calcular_y_actualizar_vacancias(bitacora):
     """
     Ejecuta el Stored Procedure sp_obtener_todas_vacancias, el cual
@@ -1143,7 +1163,10 @@ def importar_zafiro(self):
         # ── 6. Corregir SMB y SMN en EMPLEADOS_COMPLETOS_SIG desde catálogo ──
         _corregir_smb_smn_empleados(bitacora)
 
-        # ── 7. Calcular y Actualizar Fechas de Vacancia ─────────────────────
+        # ── 7. Llenar Niveles vacíos en EMPLEADOS_COMPLETOS_SIG ────────────
+        _llenar_niveles_vacios_pos_activas(bitacora)
+
+        # ── 8. Calcular y Actualizar Fechas de Vacancia ─────────────────────
         _calcular_y_actualizar_vacancias(bitacora)
 
         # ── 8. Generar/Actualizar Cuadro de Vacancia ───────────────────────

@@ -849,6 +849,12 @@ class MovPosBase(models.Model):
     nombre_puesto = models.CharField(
         db_column="Nombre Puesto", max_length=255, blank=True, null=True
     )
+    categoria_vacancia = models.CharField(
+        db_column="CATEGORIA_VACANCIA", max_length=255, blank=True, null=True
+    )
+    id_registro_desicivo = models.BigIntegerField(
+        db_column="idRegistroDesicivo", blank=True, null=True
+    )
 
     class Meta:
         abstract = True
