@@ -855,6 +855,12 @@ class MovPosBase(models.Model):
     id_registro_desicivo = models.BigIntegerField(
         db_column="idRegistroDesicivo", blank=True, null=True
     )
+    tuvo_insubsistencia = models.CharField(
+        db_column="TUVO_INSUBSISTENCIA", max_length=1, blank=True, null=True, default="N"
+    )
+    id_insubsistencia_detectada = models.BigIntegerField(
+        db_column="idInsubsistenciaDetectada", blank=True, null=True
+    )
 
     class Meta:
         abstract = True

@@ -322,6 +322,7 @@ MOV_POS_COLUMN_LABELS = {
     "presupuesto": "Presupuesto",
     "nombre_puesto": "Nombre Puesto",
     "categoria_vacancia": "Categoría Vacancia",
+    "tuvo_insubsistencia": "Tuvo Insubsistencia",
 }
 
 MOV_POS_MONO_COLUMNS = {
@@ -340,21 +341,10 @@ LATEST_MOVPOS_RAW_SQL = """
 """
 
 OCUPADAS_RAW_SQL = """
-    SELECT                                                                                                                                                           
-        e.`Posición`
+    SELECT DISTINCT e.`Posición`
     FROM EMPLEADOS_COMPLETOS_SIG e
-    INNER JOIN MOV_POS m 
-        ON e.`Posición` = m.`Nº Pos Actual`
-    INNER JOIN (
-        SELECT id FROM (
-            SELECT id, ROW_NUMBER() OVER (
-                PARTITION BY `Nº Pos Actual`
-                ORDER BY `F Efva` DESC, `Fecha Captura` DESC, `F/H Últ Actz` DESC, id DESC
-            ) as rn
-            FROM MOV_POS
-        ) ranked WHERE rn = 1
-    ) latest ON m.id = latest.id
-    WHERE m.`Estado Psn` = 'A' AND `Estado Nómina` <> ' ' AND `Estado Nómina` IS NOT NULL;
+    WHERE (e.`Id Empleado` IS NOT NULL AND TRIM(e.`Id Empleado`) <> '')
+       OR (e.`Nombres` IS NOT NULL AND TRIM(e.`Nombres`) <> '');
 """
 
 from django.core.cache import cache
@@ -384,6 +374,44 @@ def obtener_posiciones_activas():
 
     cache.set(cache_key, result, 1200)
     return result
+
+
+def populate_movpos_occupant_details(resultados, posiciones_ocupadas):
+    if not resultados:
+        return
+    pos_list = [r.get("no_pos_actual") for r in resultados if r.get("no_pos_actual")]
+    occupants = {}
+    if pos_list:
+        with connection.cursor() as cursor:
+            format_strings = ','.join(['%s'] * len(pos_list))
+            query = f"""
+                SELECT `Posición`, `Id Empleado`, `Nombres`
+                FROM EMPLEADOS_COMPLETOS_SIG
+                WHERE `Posición` IN ({format_strings})
+            """
+            cursor.execute(query, pos_list)
+            for row in cursor.fetchall():
+                pos_code = row[0]
+                id_emp = row[1]
+                name = row[2]
+                id_emp_str = str(id_emp).strip() if id_emp is not None else ""
+                name_str = str(name).strip() if name is not None else ""
+                if id_emp_str or name_str:
+                    occupants[pos_code] = {
+                        "id_empleado": id_emp_str,
+                        "nombres": name_str
+                    }
+
+    for r in resultados:
+        pos = r.get("no_pos_actual")
+        is_occupied = pos in posiciones_ocupadas
+        occ = occupants.get(pos)
+        if is_occupied and occ:
+            r["ocupante_id"] = occ["id_empleado"]
+            r["ocupante_nombre"] = occ["nombres"]
+        else:
+            r["ocupante_id"] = ""
+            r["ocupante_nombre"] = ""
 
 
 # Create your views here.
@@ -1784,6 +1812,7 @@ class MovPosDetalleView(APIView):
                     )
                 cache.set(cache_key_ocupadas, posiciones_ocupadas, 600)
 
+            populate_movpos_occupant_details(resultados, posiciones_ocupadas)
             for r in resultados:
                 pos = r.get("no_pos_actual")
                 r["total_movimientos"] = counts.get(pos, 1)
@@ -1830,6 +1859,7 @@ class MovPosDetalleView(APIView):
                     )
                 cache.set(cache_key_ocupadas, posiciones_ocupadas, 600)
 
+            populate_movpos_occupant_details(resultados, posiciones_ocupadas)
             for r in resultados:
                 pos = r.get("no_pos_actual")
                 r["total_movimientos"] = counts.get(pos, 1)
@@ -1857,6 +1887,7 @@ class MovPosDetalleView(APIView):
                 )
             cache.set(cache_key_ocupadas, posiciones_ocupadas, 600)
 
+        populate_movpos_occupant_details(resultados, posiciones_ocupadas)
         for r in resultados:
             pos = r.get("no_pos_actual")
             r["total_movimientos"] = counts.get(pos, 1)
@@ -1935,10 +1966,39 @@ class MovPosVacanciaDetalleView(APIView):
         categoria = (mov_row.categoria_vacancia or "").strip().upper()
         id_decisivo = mov_row.id_registro_desicivo
 
+        tuvo_insubsistencia = (mov_row.tuvo_insubsistencia or "").strip().upper()
+        insubsistencia = None
+        if tuvo_insubsistencia == "S" and mov_row.id_insubsistencia_detectada:
+            try:
+                reg_ins = CpTblMovCompleto290526.objects.get(
+                    id=mov_row.id_insubsistencia_detectada
+                )
+                insubsistencia = {
+                    "empleado": {
+                        "num_empleado": reg_ins.num_empleado,
+                        "nombre_completo": " ".join(
+                            p for p in [reg_ins.nombre, reg_ins.ap_pat, reg_ins.ap_mat] if p
+                        ).strip(),
+                    },
+                    "posicion": reg_ins.posicion,
+                    "motivo": reg_ins.motivo,
+                    "motivo_nombre": reg_ins.motivo_nombre,
+                    "accion": reg_ins.accion,
+                    "accion_nombre": reg_ins.accion_nombre,
+                    "fecha_efectiva": reg_ins.fecha_efectiva,
+                    "fecha_captura": reg_ins.fecha_captura,
+                }
+            except CpTblMovCompleto290526.DoesNotExist:
+                insubsistencia = {
+                    "error": "Registro de insubsistencia no encontrado en cp_tbl_mov_completo_29_05_26."
+                }
+
         base = {
             "categoria_vacancia": categoria,
             "no_pos_actual": mov_row.no_pos_actual,
             "fecha_vacancia": mov_row.fecha_vacancia,
+            "tuvo_insubsistencia": tuvo_insubsistencia,
+            "insubsistencia": insubsistencia,
         }
 
         if not categoria or not id_decisivo:
