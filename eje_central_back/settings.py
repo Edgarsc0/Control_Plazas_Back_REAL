@@ -6,17 +6,27 @@ import os
 from pathlib import Path
 
 from celery.schedules import crontab
+from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 
 load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = os.getenv("SECRET_KEY", "django-insecure-cft@qf5e6762e-(&nsu&(hqn543(d")
+try:
+    SECRET_KEY = os.environ["SECRET_KEY"]
+except KeyError:
+    raise ImproperlyConfigured(
+        "La variable de entorno SECRET_KEY es obligatoria (no hay fallback inseguro)."
+    )
 
 DEBUG = os.getenv("DEBUG", "False").strip().lower() == "true"
 
-ALLOWED_HOSTS = ["*"]
+ALLOWED_HOSTS = [
+    h.strip()
+    for h in os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
+    if h.strip()
+]
 
 # Application definition
 
@@ -178,11 +188,14 @@ CSRF_TRUSTED_ORIGINS = [
 ]
 
 # Django REST Framework configuration
+_RENDERER_CLASSES = ["eje_central_back.renderers.ORJSONRenderer"]
+if DEBUG:
+    # Solo en desarrollo: la API navegable HTML de DRF no debe exponerse en
+    # producción (superficie extra + render lento de payloads grandes).
+    _RENDERER_CLASSES.append("rest_framework.renderers.BrowsableAPIRenderer")
+
 REST_FRAMEWORK = {
-    "DEFAULT_RENDERER_CLASSES": [
-        "eje_central_back.renderers.ORJSONRenderer",
-        "rest_framework.renderers.BrowsableAPIRenderer",
-    ],
+    "DEFAULT_RENDERER_CLASSES": _RENDERER_CLASSES,
     # Seguro por defecto: requiere autenticación salvo que la view declare
     # AllowAny explícitamente (p. ej. los endpoints de login).
     "DEFAULT_PERMISSION_CLASSES": [

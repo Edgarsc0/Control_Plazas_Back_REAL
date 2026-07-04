@@ -1,4 +1,5 @@
 import json
+import logging
 
 from django.conf import settings
 from django.core import exceptions
@@ -21,6 +22,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import CuadroVacancia, EmpleadosCompletosSig, MovPos, Plantilla1800Plazas
+
+logger = logging.getLogger(__name__)
 
 
 class GroupConcat(Aggregate):
@@ -330,15 +333,10 @@ MOV_POS_MONO_COLUMNS = {
     "maximo", "grado", "esc", "partida_ptal",
 }
 
-LATEST_MOVPOS_RAW_SQL = """
-    SELECT id FROM (
-        SELECT id, ROW_NUMBER() OVER (
-            PARTITION BY `Nº Pos Actual` 
-            ORDER BY `F Efva` DESC, `Fecha Captura` DESC, `F/H Últ Actz` DESC, id DESC
-        ) as rn
-        FROM MOV_POS
-    ) ranked WHERE rn = 1
-"""
+# Antes recalculaba ROW_NUMBER() OVER sobre toda MOV_POS en cada request
+# (~300ms, ver AUDITORIA_BUGS_BACK.md BE2). MOV_POS_LATEST la materializa la
+# tarea de importación de ZAFIRO una sola vez por import.
+LATEST_MOVPOS_RAW_SQL = "SELECT id FROM MOV_POS_LATEST"
 
 OCUPADAS_RAW_SQL = """
     SELECT DISTINCT e.`Posición`
@@ -362,13 +360,7 @@ def obtener_posiciones_activas():
 
     with connection.cursor() as cursor:
         cursor.execute("""
-            SELECT `Nº Pos Actual` FROM (
-                SELECT `Nº Pos Actual`, `Estado Psn`, ROW_NUMBER() OVER (
-                    PARTITION BY `Nº Pos Actual` 
-                    ORDER BY `F Efva` DESC, `Fecha Captura` DESC, `F/H Últ Actz` DESC, id DESC
-                ) as rn
-                FROM MOV_POS
-            ) ranked WHERE rn = 1 AND `Estado Psn` = 'A'
+            SELECT `Nº Pos Actual` FROM MOV_POS_LATEST WHERE `Estado Psn` = 'A'
         """)
         result = [row[0] for row in cursor.fetchall() if row[0]]
 
@@ -542,13 +534,10 @@ class ExportExcelView(APIView):
 
             return response
 
-        except Exception as e:
-            # Loguear el error en la consola del servidor para diagnóstico
-            import traceback
-
-            traceback.print_exc()
+        except Exception:
+            logger.exception("Fallo crítico al generar Excel")
             return Response(
-                {"error": "Fallo crítico al generar Excel", "detail": str(e)},
+                {"error": "Fallo crítico al generar Excel"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
@@ -632,9 +621,10 @@ class PlantillaVacantesPorNivelResumenView(APIView):
         try:
             datos = self.obtener_resumen_dinamico()
             return Response(datos, status=status.HTTP_200_OK)
-        except Exception as e:
+        except Exception:
+            logger.exception("Error inesperado en {}".format(request.path))
             return Response(
-                {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                {"error": "Error interno del servidor"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
 
@@ -692,9 +682,10 @@ class EmpleadosCompletosEstatusNominaResumenView(APIView):
 
             cache.set(cache_key, resumen, 1200)
             return Response(resumen, status=status.HTTP_200_OK)
-        except Exception as e:
+        except Exception:
+            logger.exception("Error inesperado en {}".format(request.path))
             return Response(
-                {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                {"error": "Error interno del servidor"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
 
@@ -734,9 +725,10 @@ class EmpleadosCompletosActivosDetalleView(APIView):
 
                 cache.set(cache_key, resultados, 300)
                 return Response(resultados, status=status.HTTP_200_OK)
-            except Exception as e:
+            except Exception:
+                logger.exception("Error inesperado en {}".format(request.path))
                 return Response(
-                    {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                    {"error": "Error interno del servidor"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
                 )
 
         cache_key = "empleados_completos_activos_detalle"
@@ -758,9 +750,10 @@ class EmpleadosCompletosActivosDetalleView(APIView):
 
             cache.set(cache_key, resultados, 1200)
             return Response(resultados, status=status.HTTP_200_OK)
-        except Exception as e:
+        except Exception:
+            logger.exception("Error inesperado en {}".format(request.path))
             return Response(
-                {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                {"error": "Error interno del servidor"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
 
@@ -820,9 +813,10 @@ class EmpleadosPorNivelYEstatusView(APIView):
                 },
                 status=status.HTTP_200_OK,
             )
-        except Exception as e:
+        except Exception:
+            logger.exception("Error inesperado en {}".format(request.path))
             return Response(
-                {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                {"error": "Error interno del servidor"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
 
@@ -1024,12 +1018,10 @@ class OcupacionPorOficiosResumenView(APIView):
         try:
             datos = self.obtener_resumen_dinamico()
             return Response(datos, status=status.HTTP_200_OK)
-        except Exception as e:
+        except Exception:
+            logger.exception("Error al generar el resumen de ocupación por oficios")
             return Response(
-                {
-                    "error": str(e),
-                    "detail": "Error al generar el resumen de ocupación por oficios",
-                },
+                {"error": "Error al generar el resumen de ocupación por oficios"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
@@ -1259,9 +1251,10 @@ class EmpleadosEstatusPorNivelUaView(APIView):
             res_data = {"por_nivel": por_nivel, "por_ua": por_ua}
             cache.set(cache_key, res_data, 1200)
             return Response(res_data, status=status.HTTP_200_OK)
-        except Exception as e:
+        except Exception:
+            logger.exception("Error inesperado en {}".format(request.path))
             return Response(
-                {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                {"error": "Error interno del servidor"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
 
@@ -1354,9 +1347,10 @@ class EmpleadosDistribucionGeograficaView(APIView):
 
             cache.set(cache_key, resultados, 1200)
             return Response(resultados, status=status.HTTP_200_OK)
-        except Exception as e:
+        except Exception:
+            logger.exception("Error inesperado en {}".format(request.path))
             return Response(
-                {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                {"error": "Error interno del servidor"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
 
@@ -1367,21 +1361,12 @@ def get_mov_pos_stats():
         from django.db import connection
 
         query = """
-            SELECT 
-                COUNT(*) as total_movimientos,
-                COUNT(DISTINCT `Nº Pos Actual`) as todas_posiciones,
-                SUM(CASE WHEN rn = 1 AND `Estado Psn` = 'A' THEN 1 ELSE 0 END) as posiciones_activas,
-                SUM(CASE WHEN rn = 1 AND `Estado Psn` = 'I' THEN 1 ELSE 0 END) as posiciones_inactivas
-            FROM (
-                SELECT 
-                    `Estado Psn`,
-                    `Nº Pos Actual`,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY `Nº Pos Actual` 
-                        ORDER BY `F Efva` DESC, `Fecha Captura` DESC, `F/H Últ Actz` DESC, id DESC
-                    ) as rn
-                FROM MOV_POS
-            ) ranked;
+            SELECT
+                (SELECT COUNT(*) FROM MOV_POS) as total_movimientos,
+                COUNT(*) as todas_posiciones,
+                SUM(CASE WHEN `Estado Psn` = 'A' THEN 1 ELSE 0 END) as posiciones_activas,
+                SUM(CASE WHEN `Estado Psn` = 'I' THEN 1 ELSE 0 END) as posiciones_inactivas
+            FROM MOV_POS_LATEST;
         """
         try:
             with connection.cursor() as cursor:
@@ -1919,9 +1904,10 @@ class MovPosHistoriaView(APIView):
             resultados = list(queryset.values())
 
             return Response(resultados, status=status.HTTP_200_OK)
-        except Exception as e:
+        except Exception:
+            logger.exception("Error inesperado en {}".format(request.path))
             return Response(
-                {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                {"error": "Error interno del servidor"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
 
@@ -2341,11 +2327,10 @@ class MovPosExportExcelView(APIView):
             response["Content-Disposition"] = 'attachment; filename="Movimientos_Posiciones.xlsx"'
             return response
 
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
+        except Exception:
+            logger.exception("Error generando Excel de movimientos de posiciones")
             return Response(
-                {"error": "Error generando Excel", "detail": str(e)},
+                {"error": "Error generando Excel"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
@@ -2436,9 +2421,10 @@ class CadenaMandoView(APIView):
                     },
                     status=status.HTTP_200_OK,
                 )
-        except Exception as e:
+        except Exception:
+            logger.exception("Error inesperado en {}".format(request.path))
             return Response(
-                {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                {"error": "Error interno del servidor"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
 
@@ -2631,9 +2617,10 @@ class BajasSigListView(APIView):
                 )
                 cache.set(cache_key, bajas, 300)
                 return Response(bajas, status=status.HTTP_200_OK)
-            except Exception as e:
+            except Exception:
+                logger.exception("Error inesperado en {}".format(request.path))
                 return Response(
-                    {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                    {"error": "Error interno del servidor"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
                 )
 
         cache_key = "bajas_sig_list"
@@ -2746,10 +2733,9 @@ class ExportarEstatusExcelView(APIView):
         try:
             # Ejecutar la generación de forma síncrona
             generar_excel_estatus_task.__wrapped__(uas_param, levels_param, group_by)
-        except Exception as e:
-            return HttpResponse(
-                f"Error generando el reporte de Excel: {str(e)}", status=500
-            )
+        except Exception:
+            logger.exception("Error generando el reporte de Excel de estatus")
+            return HttpResponse("Error generando el reporte de Excel", status=500)
 
         # Recuperar el archivo generado desde la caché
         file_data = cache.get(cache_key_excel)
@@ -2822,18 +2808,11 @@ class TorreCaballito3DView(APIView):
                 e.`Unidad Administrativa`,
                 COUNT(*) as Total
             FROM EMPLEADOS_COMPLETOS_SIG e
-            INNER JOIN (
-                SELECT `Nº Pos Actual` FROM (
-                    SELECT `Nº Pos Actual`, `Estado Psn`, ROW_NUMBER() OVER (
-                        PARTITION BY `Nº Pos Actual` 
-                        ORDER BY `F Efva` DESC, `Fecha Captura` DESC, `F/H Últ Actz` DESC, id DESC
-                    ) as rn
-                    FROM MOV_POS
-                ) ranked WHERE rn = 1 AND `Estado Psn` = 'A'
-            ) activas ON e.`Posición` = activas.`Nº Pos Actual`
-            WHERE e.`Descripción ubicación` IS NOT NULL 
+            INNER JOIN MOV_POS_LATEST activas
+                ON e.`Posición` = activas.`Nº Pos Actual` AND activas.`Estado Psn` = 'A'
+            WHERE e.`Descripción ubicación` IS NOT NULL
               AND (
-                  e.`Descripción ubicación` LIKE '%Caballito Reforma 10 P%' 
+                  e.`Descripción ubicación` LIKE '%Caballito Reforma 10 P%'
                   OR e.`Descripción ubicación` LIKE '%Torre Caballito Reforma 10 P%'
               )
             GROUP BY e.`Descripción ubicación`, e.`Unidad Administrativa`
@@ -2882,15 +2861,8 @@ class TorreCaballitoEmpleadosView(APIView):
                     e.`Descripción ubicación`,
                     e.`Estado Nómina`
                 FROM EMPLEADOS_COMPLETOS_SIG e
-                INNER JOIN (
-                    SELECT `Nº Pos Actual` FROM (
-                        SELECT `Nº Pos Actual`, `Estado Psn`, ROW_NUMBER() OVER (
-                            PARTITION BY `Nº Pos Actual` 
-                            ORDER BY `F Efva` DESC, `Fecha Captura` DESC, `F/H Últ Actz` DESC, id DESC
-                        ) as rn
-                        FROM MOV_POS
-                    ) ranked WHERE rn = 1 AND `Estado Psn` = 'A'
-                ) activas ON e.`Posición` = activas.`Nº Pos Actual`
+                INNER JOIN MOV_POS_LATEST activas
+                    ON e.`Posición` = activas.`Nº Pos Actual` AND activas.`Estado Psn` = 'A'
                 WHERE e.`Descripción ubicación` = %s 
                   AND e.`Unidad Administrativa` = %s
                 ORDER BY e.`Nombres`;
@@ -2906,15 +2878,8 @@ class TorreCaballitoEmpleadosView(APIView):
                     e.`Descripción ubicación`,
                     e.`Estado Nómina`
                 FROM EMPLEADOS_COMPLETOS_SIG e
-                INNER JOIN (
-                    SELECT `Nº Pos Actual` FROM (
-                        SELECT `Nº Pos Actual`, `Estado Psn`, ROW_NUMBER() OVER (
-                            PARTITION BY `Nº Pos Actual` 
-                            ORDER BY `F Efva` DESC, `Fecha Captura` DESC, `F/H Últ Actz` DESC, id DESC
-                        ) as rn
-                        FROM MOV_POS
-                    ) ranked WHERE rn = 1 AND `Estado Psn` = 'A'
-                ) activas ON e.`Posición` = activas.`Nº Pos Actual`
+                INNER JOIN MOV_POS_LATEST activas
+                    ON e.`Posición` = activas.`Nº Pos Actual` AND activas.`Estado Psn` = 'A'
                 WHERE e.`Descripción ubicación` = %s 
                 ORDER BY e.`Nombres`;
             """
@@ -2974,15 +2939,8 @@ class TorreCaballitoSearchView(APIView):
                 e.`Unidad Administrativa`,
                 e.`Descripción ubicación`
             FROM EMPLEADOS_COMPLETOS_SIG e
-            INNER JOIN (
-                SELECT `Nº Pos Actual` FROM (
-                    SELECT `Nº Pos Actual`, `Estado Psn`, ROW_NUMBER() OVER (
-                        PARTITION BY `Nº Pos Actual`
-                        ORDER BY `F Efva` DESC, `Fecha Captura` DESC, `F/H Últ Actz` DESC, id DESC
-                    ) as rn
-                    FROM MOV_POS
-                ) ranked WHERE rn = 1 AND `Estado Psn` = 'A'
-            ) activas ON e.`Posición` = activas.`Nº Pos Actual`
+            INNER JOIN MOV_POS_LATEST activas
+                ON e.`Posición` = activas.`Nº Pos Actual` AND activas.`Estado Psn` = 'A'
             WHERE e.`Descripción ubicación` IS NOT NULL
               AND (
                   e.`Descripción ubicación` LIKE '%%Caballito Reforma 10 P%%'
@@ -3179,18 +3137,28 @@ class MovimientosPersonalHistorialView(APIView):
     ordenado por num_empleado, fecha_efectiva, sec ASC.
     Consulta directa a cp_tbl_mov_completo_29_05_26 via raw SQL.
 
-    Parámetro: ?num_empleado__in=123,456,789
+    Usar POST con body {"num_empleado": [123, 456, 789]} para listas grandes
+    (evita el límite de longitud de URL de un GET). Se mantiene ?num_empleado__in=
+    por compatibilidad con clientes existentes.
     """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        raw_param = request.query_params.get("num_empleado__in", "").strip()
+        emp_ids = [e.strip() for e in raw_param.split(",") if e.strip()]
+        return self._historial(emp_ids)
+
+    def post(self, request):
+        emp_ids = request.data.get("num_empleado", [])
+        if isinstance(emp_ids, str):
+            emp_ids = [e.strip() for e in emp_ids.split(",") if e.strip()]
+        else:
+            emp_ids = [str(e).strip() for e in emp_ids if str(e).strip()]
+        return self._historial(emp_ids)
+
+    def _historial(self, emp_ids):
         from django.db import connection
 
-        raw_param = request.query_params.get("num_empleado__in", "").strip()
-        if not raw_param:
-            return Response([])
-
-        emp_ids = [e.strip() for e in raw_param.split(",") if e.strip()]
         if not emp_ids:
             return Response([])
 
@@ -3341,9 +3309,10 @@ class CuadroVacanciaView(APIView):
         try:
             resultados = CuadroVacancia.objects.all().order_by("-fecha").values()
             return Response(list(resultados), status=status.HTTP_200_OK)
-        except Exception as e:
+        except Exception:
+            logger.exception("Error inesperado en {}".format(request.path))
             return Response(
-                {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                {"error": "Error interno del servidor"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
 
@@ -3376,17 +3345,9 @@ class DesgloseJerarquicoView(APIView):
             e.`Entidad Federativa`,
             e.`nombreNJ`
         FROM EMPLEADOS_COMPLETOS_SIG e
-        INNER JOIN MOV_POS m 
+        INNER JOIN MOV_POS m
             ON e.`Posición` = m.`Nº Pos Actual`
-        INNER JOIN (
-            SELECT id FROM (
-                SELECT id, ROW_NUMBER() OVER (
-                    PARTITION BY `Nº Pos Actual`
-                    ORDER BY `F Efva` DESC, `Fecha Captura` DESC, `F/H Últ Actz` DESC, id DESC
-                ) as rn
-                FROM MOV_POS
-            ) ranked WHERE rn = 1
-        ) latest ON m.id = latest.id
+        INNER JOIN MOV_POS_LATEST latest ON m.id = latest.id
         LEFT JOIN ua_unidadadministrativa u
             ON TRIM(e.`Cd UA`) = TRIM(u.codigo)
         WHERE m.`Estado Psn` = 'A'
@@ -3404,7 +3365,8 @@ class DesgloseJerarquicoView(APIView):
 
             cache.set(cache_key, results, 1200)
             return Response(results, status=status.HTTP_200_OK)
-        except Exception as e:
+        except Exception:
+            logger.exception("Error inesperado en {}".format(request.path))
             return Response(
-                {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                {"error": "Error interno del servidor"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )

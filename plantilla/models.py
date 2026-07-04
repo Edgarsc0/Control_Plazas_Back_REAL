@@ -946,6 +946,28 @@ class MovPos(MovPosBase):
         ]
 
 
+class MovPosLatest(models.Model):
+    """
+    Una fila por `Nº Pos Actual` con el registro más reciente de MOV_POS
+    (mismo criterio que la window function ROW_NUMBER() OVER que antes se
+    recalculaba en cada request en 6+ endpoints, ver AUDITORIA_BUGS_BACK.md
+    BE2). La tarea de importación de ZAFIRO la reconstruye una vez al
+    final de cada swap Blue-Green; los endpoints solo hacen lookup indexado.
+    """
+
+    no_pos_actual = models.CharField(
+        db_column="Nº Pos Actual", max_length=255, primary_key=True
+    )
+    mov_pos_id = models.BigIntegerField(db_column="id")
+    estado_psn = models.CharField(
+        db_column="Estado Psn", max_length=255, blank=True, null=True, db_index=True
+    )
+
+    class Meta:
+        managed = True
+        db_table = "MOV_POS_LATEST"
+
+
 class MovPosHistorico(MovPosBase):
     fecha_descarga = models.DateTimeField(auto_now_add=True)
 

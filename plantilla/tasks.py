@@ -948,6 +948,31 @@ def _swap_blue_green_tables(bitacora=None):
     _truncar_tabla(CpTblMovCompleto290526Staging, bitacora)
 
 
+def _materializar_mov_pos_latest(bitacora=None):
+    """
+    Reconstruye MOV_POS_LATEST: una fila por `Nº Pos Actual` con el registro
+    más reciente de MOV_POS. Antes esta window function (ROW_NUMBER() OVER)
+    se recalculaba en cada request en 6+ endpoints (~300ms c/u, ver
+    AUDITORIA_BUGS_BACK.md BE2); ahora se paga una sola vez aquí, por import.
+    """
+    _append_log(bitacora, "Materializando MOV_POS_LATEST...")
+    with connection.cursor() as cursor:
+        cursor.execute("TRUNCATE TABLE MOV_POS_LATEST")
+        cursor.execute("""
+            INSERT INTO MOV_POS_LATEST (`Nº Pos Actual`, id, `Estado Psn`)
+            SELECT `Nº Pos Actual`, id, `Estado Psn`
+            FROM (
+                SELECT `Nº Pos Actual`, id, `Estado Psn`, ROW_NUMBER() OVER (
+                    PARTITION BY `Nº Pos Actual`
+                    ORDER BY `F Efva` DESC, `Fecha Captura` DESC, `F/H Últ Actz` DESC, id DESC
+                ) as rn
+                FROM MOV_POS
+            ) ranked
+            WHERE rn = 1
+        """)
+    _append_log(bitacora, "MOV_POS_LATEST reconstruido.")
+
+
 def _llenar_nombre_puesto(bitacora):
     """
     Ejecuta el Stored Procedure sp_llenar_nombre_puesto, el cual llena
@@ -1157,6 +1182,10 @@ def importar_zafiro(self):
         # Realizar el intercambio atómico (Blue-Green Swap)
         _swap_blue_green_tables(bitacora)
 
+        # Reconstruir tabla resumen MOV_POS_LATEST (evita recalcular la
+        # window function de "posiciones activas más recientes" por request)
+        _materializar_mov_pos_latest(bitacora)
+
         # ── 5. Llenar Nombre Puesto en MOV_POS desde CAT_PTO_FUNC ──────────
         _llenar_nombre_puesto(bitacora)
 
@@ -1219,18 +1248,21 @@ def importar_zafiro(self):
                 "empleados_estatus_por_nivel_ua",
                 "empleados_distribucion_geografica",
                 "mov_pos_detalle",
+                "mov_pos_card_stats",
+                "mov_pos_ocupadas_set",
+                "desglose_jerarquico",
                 "bajas_sig_list",
                 "bajas_motivos_pie",
                 "bajas_historico",
-                "movimientos_personal_stats",
             ]
             cache.delete_many(cache_keys)
 
-            # Invalidar todos los archivos Excel cacheados de estatus (con patrón en Redis)
-            for key in r.scan_iter("*excel_estatus_file_*"):
-                r.delete(key)
+            # Invalidar por patrón las claves hasheadas por parámetros de request
+            for pattern in ("*mov_stats_*", "*bajas_sig_list_*", "*empleados_completos_activos_detalle_*", "*excel_estatus_file_*"):
+                for key in r.scan_iter(pattern):
+                    r.delete(key)
         except Exception:
-            pass
+            logger.exception("Error al invalidar caché tras importación de ZAFIRO")
 
         _append_log(
             bitacora,
