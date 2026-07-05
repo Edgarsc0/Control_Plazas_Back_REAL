@@ -3370,3 +3370,63 @@ class DesgloseJerarquicoView(APIView):
             return Response(
                 {"error": "Error interno del servidor"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+
+class DesgloseJerarquicoOcupadosView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        from django.db import connection
+
+        cache_key = "desglose_jerarquico_ocupados"
+        cached_data = cache.get(cache_key)
+        if cached_data is not None:
+            return Response(cached_data, status=status.HTTP_200_OK)
+
+        query = """
+        SELECT
+            e.NJ,
+            e.`Nombre Puesto Funcional`,
+            e.`Nivel`,
+            e.`Posición`,
+            e.`Unidad de Negocio`,
+            e.`Cd UA`,
+            COALESCE(u.nombre, e.`Cd UA`) AS `nombre_ua`,
+            e.`Cd UN`,
+            e.`Código Presupuestal`,
+            e.`Escala`,
+            e.`Partida`,
+            e.`TIPO DE CONTRATACIÓN`,
+            e.`Sindicato`,
+            e.`Entidad Federativa`,
+            e.`nombreNJ`,
+            e.`Id Empleado`,
+            e.`Nombres`,
+            e.`RFC`,
+            e.`CURP`
+        FROM EMPLEADOS_COMPLETOS_SIG e
+        INNER JOIN MOV_POS m
+            ON e.`Posición` = m.`Nº Pos Actual`
+        INNER JOIN MOV_POS_LATEST latest ON m.id = latest.id
+        LEFT JOIN ua_unidadadministrativa u
+            ON TRIM(e.`Cd UA`) = TRIM(u.codigo)
+        WHERE m.`Estado Psn` = 'A'
+          AND e.`Estado Nómina` <> ' '
+          AND m.`Nº Pos Actual` NOT LIKE '103L%%'
+          AND m.`Nº Pos Actual` NOT LIKE '1039%%'
+          AND m.`Partida Ptal` <> '11401';
+        """
+
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(query)
+                columns = [col[0] for col in cursor.description]
+                results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+            cache.set(cache_key, results, 1200)
+            return Response(results, status=status.HTTP_200_OK)
+        except Exception:
+            logger.exception("Error inesperado en {}".format(request.path))
+            return Response(
+                {"error": "Error interno del servidor"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )

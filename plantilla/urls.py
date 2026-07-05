@@ -35,6 +35,7 @@ from .views import (
     OrganigramaDeptoView,
     CuadroVacanciaView,
     DesgloseJerarquicoView,
+    DesgloseJerarquicoOcupadosView,
 )
 
 urlpatterns = [
@@ -207,5 +208,10 @@ urlpatterns = [
         "desglose_jerarquico/",
         DesgloseJerarquicoView.as_view(),
         name="desglose_jerarquico",
+    ),
+    path(
+        "desglose_jerarquico_ocupados/",
+        DesgloseJerarquicoOcupadosView.as_view(),
+        name="desglose_jerarquico_ocupados",
     ),
 ]
