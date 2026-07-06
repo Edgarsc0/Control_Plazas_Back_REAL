@@ -3110,15 +3110,15 @@ class MovimientosPersonalListView(APIView):
 
 class OrganigramaDeptoView(APIView):
     """
-    Catálogo departamento→descripcion_larga de ORGANIGRAMA_ANAM.
-    Respuesta: [{"departamento": "00100000000", "descripcion_larga": "..."}, ...]
+    Catálogo departamento→descripcion_larga/nivel_direccion de ORGANIGRAMA_ANAM.
+    Respuesta: [{"departamento": "00100000000", "descripcion_larga": "...", "nivel_direccion": "..."}, ...]
     """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         from django.db import connection
         sql = """
-            SELECT departamento, descripcion_larga
+            SELECT departamento, descripcion_larga, nivel_direccion
             FROM ORGANIGRAMA_ANAM
             ORDER BY departamento
         """
@@ -3126,7 +3126,7 @@ class OrganigramaDeptoView(APIView):
             cursor.execute(sql)
             rows = cursor.fetchall()
         return Response([
-            {"departamento": r[0], "descripcion_larga": r[1]}
+            {"departamento": r[0], "descripcion_larga": r[1], "nivel_direccion": r[2]}
             for r in rows
         ])
 
