@@ -28,6 +28,9 @@ ALLOWED_HOSTS = [
     if h.strip()
 ]
 
+# Ruta al repo del frontend, usada para detectar su último commit (ver eje_central_back/views_system.py)
+FRONTEND_REPO_PATH = os.getenv("FRONTEND_REPO_PATH", str(BASE_DIR.parent / "eje_central_front"))
+
 # Application definition
 
 INSTALLED_APPS = [
