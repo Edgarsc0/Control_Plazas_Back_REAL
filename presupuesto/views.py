@@ -10,6 +10,74 @@ from .serializers import (
 )
 from django.db import connection
 from django.db.models import Q
+import re
+
+_NIVEL_LETRA_RE = re.compile(r'^[A-Za-z]')
+
+
+def _build_catalogo_index():
+    """Índices para resolver ambigüedad de `nivel` contra catalogo_plazas.
+
+    - `por_nivel`: nivel -> [CatalogoPlazas]. Los niveles letra+número (P12, D209...)
+      son únicos en todo el catálogo, sin importar el codigo.
+    - `por_codigo_nivel`: (codigo, nivel) -> [CatalogoPlazas]. Los niveles numéricos
+      puros (2..11) se repiten entre distintos codigos (uno por cada puesto), así
+      que ahí sí hace falta el codigo para desambiguar.
+    """
+    por_nivel, por_codigo_nivel = {}, {}
+    for plaza in CatalogoPlazas.objects.all():
+        por_nivel.setdefault(plaza.nivel, []).append(plaza)
+        por_codigo_nivel.setdefault((plaza.codigo, plaza.nivel), []).append(plaza)
+    return por_nivel, por_codigo_nivel
+
+
+def _resolver_catalogo(indices, codigo_presupuestal, escala, nivel):
+    """Resuelve la fila única de catalogo_plazas para (Código Presupuestal, Escala, Nivel) de nómina.
+
+    Regla de negocio: niveles letra+número son únicos por nivel solo; niveles
+    numéricos puros necesitan 1) match directo por codigo+nivel, 2) si no hay,
+    sustituir los primeros 2 caracteres del código presupuestal por "EV" y
+    reintentar, 3) si hay más de un candidato, desempatar por zona == escala.
+    """
+    por_nivel, por_codigo_nivel = indices
+    codigo_presupuestal = (codigo_presupuestal or '').strip()
+    nivel = (nivel or '').strip()
+
+    if _NIVEL_LETRA_RE.match(nivel):
+        candidatos = por_nivel.get(nivel, [])
+        return candidatos[0] if len(candidatos) == 1 else None
+
+    candidatos = por_codigo_nivel.get((codigo_presupuestal, nivel), [])
+    if not candidatos:
+        codigo_ev = 'EV' + codigo_presupuestal[2:]
+        candidatos = por_codigo_nivel.get((codigo_ev, nivel), [])
+    if len(candidatos) > 1:
+        candidatos = [c for c in candidatos if str(c.zona) == str(escala).strip()]
+    return candidatos[0] if len(candidatos) == 1 else None
+
+
+def _resolver_ocupadas(rows):
+    index = _build_catalogo_index()
+    plazas, sin_match = [], []
+    for codigo_presupuestal, escala, nivel, cantidad in rows:
+        plaza = _resolver_catalogo(index, codigo_presupuestal, escala, nivel)
+        if plaza:
+            plazas.append({
+                "catalogo_id": plaza.id,
+                "codigo": plaza.codigo,
+                "nivel": plaza.nivel,
+                "zona": plaza.zona,
+                "denominacion": plaza.denominacion,
+                "cantidad": cantidad,
+            })
+        else:
+            sin_match.append({
+                "codigo_presupuestal": codigo_presupuestal,
+                "escala": escala,
+                "nivel": nivel,
+                "cantidad": cantidad,
+            })
+    return plazas, sin_match
 
 
 class ValuacionPresupuestariaPorNivelViewSet(viewsets.ModelViewSet):
@@ -24,72 +92,80 @@ class CatalogoPlazasViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def eventuales_ocupadas(self, request):
         query = """
-            SELECT e.`Nivel`, COUNT(*) AS cantidad
-            FROM EMPLEADOS_COMPLETOS_SIG e
-            INNER JOIN MOV_POS m
-                ON e.`Posición` = m.`Nº Pos Actual`
-            INNER JOIN (
-                SELECT id FROM (
-                    SELECT id, ROW_NUMBER() OVER (
-                        PARTITION BY `Nº Pos Actual`
-                        ORDER BY `F Efva` DESC, `Fecha Captura` DESC, `F/H Últ Actz` DESC, id DESC
-                    ) AS rn
-                    FROM MOV_POS
-                ) ranked WHERE rn = 1
-            ) latest ON m.id = latest.id
-            WHERE m.`Estado Psn` = 'A'
-              AND e.Partida = '12201'
-              AND e.`Estado Nómina` <> ' '
-            GROUP BY e.`Nivel`
-            ORDER BY e.`Nivel`
+            WITH base AS (
+                SELECT e.`Código Presupuestal`, e.`Escala`, e.`Nivel`
+                FROM EMPLEADOS_COMPLETOS_SIG e
+                INNER JOIN MOV_POS m
+                    ON e.`Posición` = m.`Nº Pos Actual`
+                INNER JOIN (
+                    SELECT id FROM (
+                        SELECT id, ROW_NUMBER() OVER (
+                            PARTITION BY `Nº Pos Actual`
+                            ORDER BY `F Efva` DESC, `Fecha Captura` DESC, `F/H Últ Actz` DESC, id DESC
+                        ) AS rn
+                        FROM MOV_POS
+                    ) ranked WHERE rn = 1
+                ) latest ON m.id = latest.id
+                WHERE m.`Estado Psn` = 'A'
+                  AND e.Partida = '12201'
+                  AND e.`Estado Nómina` <> ' '
+            )
+            SELECT `Código Presupuestal`, `Escala`, `Nivel`, COUNT(*) AS num_plazas
+            FROM base
+            GROUP BY `Código Presupuestal`, `Escala`, `Nivel`
         """
         with connection.cursor() as cursor:
             cursor.execute(query)
             rows = cursor.fetchall()
-        return Response([{"nivel": row[0], "cantidad": row[1]} for row in rows])
+        plazas, sin_match = _resolver_ocupadas(rows)
+        return Response({"plazas": plazas, "sin_match": sin_match})
 
     @action(detail=False, methods=['get'])
     def permanentes_ocupadas(self, request):
         query = """
-            SELECT e.`Nivel`, COUNT(*) AS cantidad
-            FROM EMPLEADOS_COMPLETOS_SIG e
-            INNER JOIN MOV_POS m
-                ON e.`Posición` = m.`Nº Pos Actual`
-            INNER JOIN (
-                SELECT id FROM (
-                    SELECT id, ROW_NUMBER() OVER (
-                        PARTITION BY `Nº Pos Actual`
-                        ORDER BY `F Efva` DESC, `Fecha Captura` DESC, `F/H Últ Actz` DESC, id DESC
-                    ) AS rn
-                    FROM MOV_POS
-                ) ranked WHERE rn = 1
-            ) latest ON m.id = latest.id
-            WHERE m.`Estado Psn` = 'A'
-              AND e.Partida = '11301'
-              AND e.`Estado Nómina` <> ' '
-              AND e.`Posición` NOT LIKE '103L%'
-            GROUP BY e.`Nivel`
-            ORDER BY e.`Nivel`
+            WITH base AS (
+                SELECT e.`Código Presupuestal`, e.`Escala`, e.`Nivel`
+                FROM EMPLEADOS_COMPLETOS_SIG e
+                INNER JOIN MOV_POS m
+                    ON e.`Posición` = m.`Nº Pos Actual`
+                INNER JOIN (
+                    SELECT id FROM (
+                        SELECT id, ROW_NUMBER() OVER (
+                            PARTITION BY `Nº Pos Actual`
+                            ORDER BY `F Efva` DESC, `Fecha Captura` DESC, `F/H Últ Actz` DESC, id DESC
+                        ) AS rn
+                        FROM MOV_POS
+                    ) ranked WHERE rn = 1
+                ) latest ON m.id = latest.id
+                WHERE m.`Estado Psn` = 'A'
+                  AND e.Partida = '11301'
+                  AND e.`Estado Nómina` <> ' '
+                  AND e.`Posición` NOT LIKE '103L%'
+            )
+            SELECT `Código Presupuestal`, `Escala`, `Nivel`, COUNT(*) AS num_plazas
+            FROM base
+            GROUP BY `Código Presupuestal`, `Escala`, `Nivel`
         """
         with connection.cursor() as cursor:
             cursor.execute(query)
             rows = cursor.fetchall()
-        return Response([{"nivel": row[0], "cantidad": row[1]} for row in rows])
+        plazas, sin_match = _resolver_ocupadas(rows)
+        return Response({"plazas": plazas, "sin_match": sin_match})
 
     @action(detail=False, methods=['post'])
     def calcular(self, request):
         meses = request.data.get('meses', 12)
-        plazas_input = request.data.get('plazas', []) # List of {nivel: string, plazas: number}
+        plazas_input = request.data.get('plazas', []) # List of {catalogo_id: number, plazas: number}
 
         if not plazas_input:
             return Response({"error": "No se enviaron plazas para calcular"}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Map levels to quantities
-        plazas_map = {item['nivel']: item['plazas'] for item in plazas_input}
-        niveles = list(plazas_map.keys())
+        # Map catalog ids to quantities
+        plazas_map = {item['catalogo_id']: item['plazas'] for item in plazas_input}
+        ids = list(plazas_map.keys())
 
         # Fetch relevant catalog entries
-        catalogo = CatalogoPlazas.objects.filter(nivel__in=niveles)
+        catalogo = CatalogoPlazas.objects.filter(id__in=ids)
         
         # Intermediate sums
         u305 = 0 # sueldo
@@ -111,7 +187,7 @@ class CatalogoPlazasViewSet(viewsets.ModelViewSet):
         tabla_2022 = []
 
         for plaza in catalogo:
-            p_qty = plazas_map.get(plaza.nivel, 0)
+            p_qty = plazas_map.get(plaza.id, 0)
             if p_qty <= 0:
                 continue
             
