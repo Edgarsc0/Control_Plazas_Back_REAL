@@ -33,6 +33,8 @@ from .views import (
     MovimientosPersonalStatsView,
     MovimientosPersonalHistorialView,
     OrganigramaDeptoView,
+    CatAccionesView,
+    CatAccionesMotivosView,
     CuadroVacanciaView,
     DesgloseJerarquicoView,
     DesgloseJerarquicoOcupadosView,
@@ -58,6 +60,16 @@ urlpatterns = [
         "organigrama-deptos/",
         OrganigramaDeptoView.as_view(),
         name="organigrama-deptos",
+    ),
+    path(
+        "cat-acciones/",
+        CatAccionesView.as_view(),
+        name="cat-acciones",
+    ),
+    path(
+        "cat-acciones-motivos/",
+        CatAccionesMotivosView.as_view(),
+        name="cat-acciones-motivos",
     ),
     path(
         "torre-caballito/",

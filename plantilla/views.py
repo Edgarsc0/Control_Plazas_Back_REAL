@@ -3131,6 +3131,50 @@ class OrganigramaDeptoView(APIView):
         ])
 
 
+class CatAccionesView(APIView):
+    """
+    Catálogo action→action_description/descripcion de cat_acciones.
+    Respuesta: [{"action": "HIR", "action_description": "Contratación", "descripcion": "..."}, ...]
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from django.db import connection
+        sql = """
+            SELECT action, action_description, descripcion
+            FROM cat_acciones
+        """
+        with connection.cursor() as cursor:
+            cursor.execute(sql)
+            rows = cursor.fetchall()
+        return Response([
+            {"action": r[0], "action_description": r[1], "descripcion": r[2]}
+            for r in rows
+        ])
+
+
+class CatAccionesMotivosView(APIView):
+    """
+    Catálogo descripcion→cd_motivo/descripcion_larga de cat_acciones_motivos.
+    Respuesta: [{"cd_motivo": "STC", "descripcion": "Act Datos Servicio Social", "descripcion_larga": "..."}, ...]
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from django.db import connection
+        sql = """
+            SELECT cd_motivo, descripcion, descripcion_larga
+            FROM cat_acciones_motivos
+        """
+        with connection.cursor() as cursor:
+            cursor.execute(sql)
+            rows = cursor.fetchall()
+        return Response([
+            {"cd_motivo": r[0], "descripcion": r[1], "descripcion_larga": r[2]}
+            for r in rows
+        ])
+
+
 class MovimientosPersonalHistorialView(APIView):
     """
     Devuelve el historial completo (sin filtro de año) de los empleados indicados,
