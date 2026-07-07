@@ -883,6 +883,8 @@ class CatPtoFunc(models.Model):
     cd_norm = models.CharField(
         db_column="CdNorm", max_length=255, blank=True, null=True
     )
+    modificado_por = models.CharField(max_length=255, blank=True, null=True)
+    fecha_modificacion = models.DateTimeField(blank=True, null=True, auto_now=True)
 
     class Meta:
         managed = True
@@ -890,6 +892,128 @@ class CatPtoFunc(models.Model):
 
     def __str__(self):
         return f"{self.cd_pto_funcional} - {self.nombre_puesto_funcional}"
+
+
+class CatAcciones(models.Model):
+    """
+    Catálogo action -> action_description/descripcion. Adoptada vía
+    SeparateDatabaseAndState (la tabla ya existía en producción, poblada
+    por el pipeline ZAFIRO). CRUD con auditoría en CatAccionesViewSet.
+    """
+
+    action = models.CharField(primary_key=True, max_length=50)
+    action_description = models.CharField(max_length=255, blank=True, null=True)
+    effective_status = models.CharField(max_length=50, blank=True, null=True)
+    descripcion = models.TextField(blank=True, null=True)
+    modificado_por = models.CharField(max_length=255, blank=True, null=True)
+    fecha_modificacion = models.DateTimeField(blank=True, null=True, auto_now=True)
+
+    class Meta:
+        managed = True
+        db_table = "cat_acciones"
+
+    def __str__(self):
+        return f"{self.action} - {self.action_description}"
+
+
+class CatAccionesMotivos(models.Model):
+    """
+    Catálogo accion+cd_motivo -> descripcion/descripcion_larga. Adoptada vía
+    SeparateDatabaseAndState (tabla ya existente en producción).
+    """
+
+    id = models.AutoField(primary_key=True)
+    accion = models.CharField(max_length=10)
+    cd_motivo = models.CharField(max_length=10)
+    descripcion = models.CharField(max_length=255)
+    estado_efectivo = models.CharField(max_length=20)
+    descripcion_larga = models.TextField(blank=True, null=True)
+    modificado_por = models.CharField(max_length=255, blank=True, null=True)
+    fecha_modificacion = models.DateTimeField(blank=True, null=True, auto_now=True)
+
+    class Meta:
+        managed = True
+        db_table = "cat_acciones_motivos"
+
+    def __str__(self):
+        return f"{self.accion} - {self.cd_motivo}"
+
+
+class RcCatCodPresupuestal(models.Model):
+    """
+    Catálogo de niveles/escalas presupuestales (SMB/SMN por código+escala).
+    Pk compuesta real en BD (codigo_presupuestal, escala); adoptada vía
+    SeparateDatabaseAndState. Usada por los SPs de post-proceso de ZAFIRO
+    (`sp_corregir_smb_smn_empleados`, `sp_llenar_niveles_vacios_pos_activas`).
+    """
+
+    pk = models.CompositePrimaryKey("codigo_presupuestal", "escala")
+    codigo_presupuestal = models.CharField(max_length=55)
+    escala = models.SmallIntegerField()
+    nivel = models.CharField(max_length=55, blank=True, null=True)
+    smb = models.DecimalField(max_digits=55, decimal_places=2, blank=True, null=True)
+    smn = models.DecimalField(max_digits=55, decimal_places=2, blank=True, null=True)
+    nivel_jerarquico = models.CharField(max_length=55, blank=True, null=True)
+    modificado_por = models.CharField(max_length=255, blank=True, null=True)
+    fecha_modificacion = models.DateTimeField(blank=True, null=True, auto_now=True)
+
+    class Meta:
+        managed = True
+        db_table = "rc_cat_cod_presupuestal"
+
+    def __str__(self):
+        return f"{self.codigo_presupuestal} - {self.escala}"
+
+
+# Enum de negocio (NJ, Descripción). Nivel 3 tiene 2 descripciones válidas
+# ("Director" / "Titular de Aduana"), por eso la descripción -no el nivel- es
+# la clave única del enum: `nivel_jerarquico` se deriva de ella en save().
+NIVELES_JERARQUICOS = (
+    (0, "Titular de la Agencia Nacional de Aduanas de México"),
+    (1, "Director General"),
+    (2, "Director Central"),
+    (3, "Director"),
+    (3, "Titular de Aduana"),
+    (4, "Subdirector"),
+    (5, "Jefe de Departamento"),
+    (6, "Enlace"),
+    (7, "Operativo de Confianza"),
+    (8, "Operativo de Base"),
+)
+NIVEL_JERARQUICO_POR_DESCRIPCION = {descripcion: nivel for nivel, descripcion in NIVELES_JERARQUICOS}
+DESCRIPCION_NJ_CHOICES = [(descripcion, f"{nivel} — {descripcion}") for nivel, descripcion in NIVELES_JERARQUICOS]
+
+
+class CatNivelJerarquicoPlaza(models.Model):
+    """
+    Nivel jerárquico (enum NJ + descripción) asignado manualmente por plaza.
+    Se siembra desde MOV_POS (plaza + Nvl Direc de referencia) vía la acción
+    `sync-plazas`; el nivel jerárquico se asigna después en bloque desde el
+    frontend (`bulk-assign`) y no viene de ninguna fuente automática.
+    """
+
+    plaza = models.CharField(max_length=255, primary_key=True)
+    nivel_jerarquico = models.SmallIntegerField(blank=True, null=True, editable=False)
+    descripcion_nivel_jerarquico = models.CharField(
+        max_length=255, blank=True, null=True, choices=DESCRIPCION_NJ_CHOICES
+    )
+    nvl_direc_origen = models.CharField(
+        max_length=255, blank=True, null=True,
+        help_text="Referencia informativa: valor de 'Nvl Direc' en MOV_POS al momento de sincronizar.",
+    )
+    modificado_por = models.CharField(max_length=255, blank=True, null=True)
+    fecha_modificacion = models.DateTimeField(blank=True, null=True, auto_now=True)
+
+    class Meta:
+        managed = True
+        db_table = "cat_nivel_jerarquico_plaza"
+
+    def save(self, *args, **kwargs):
+        self.nivel_jerarquico = NIVEL_JERARQUICO_POR_DESCRIPCION.get(self.descripcion_nivel_jerarquico)
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.plaza} - {self.descripcion_nivel_jerarquico or 'sin asignar'}"
 
 
 class EmpleadosCompletosSig(EmpleadosCompletosSigBase):

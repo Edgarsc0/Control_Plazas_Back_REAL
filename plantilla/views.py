@@ -14,14 +14,35 @@ from django.db.models import (
     Sum,
     When,
 )
+from django.db import transaction
 from django.db.models.functions import Trim
-from rest_framework import status
+from rest_framework import status, viewsets
+from rest_framework.decorators import action
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import CuadroVacancia, EmpleadosCompletosSig, MovPos, Plantilla1800Plazas
+from .models import (
+    CatAcciones,
+    CatAccionesMotivos,
+    CatNivelJerarquicoPlaza,
+    CatPtoFunc,
+    CuadroVacancia,
+    DESCRIPCION_NJ_CHOICES,
+    EmpleadosCompletosSig,
+    MovPos,
+    MovPosLatest,
+    Plantilla1800Plazas,
+    RcCatCodPresupuestal,
+)
+from .serializers import (
+    CatAccionesMotivosSerializer,
+    CatAccionesSerializer,
+    CatNivelJerarquicoPlazaSerializer,
+    CatPtoFuncSerializer,
+    RcCatCodPresupuestalSerializer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -332,6 +353,275 @@ MOV_POS_MONO_COLUMNS = {
     "no_pos_actual", "cd_un", "cd_departamento", "cd_puesto",
     "maximo", "grado", "esc", "partida_ptal",
 }
+
+# Columnas sintéticas del export de "Vacantes": desglosan el mismo registro
+# decisivo que MovPosVacanciaDetalleView resuelve para el modal "Detalle de
+# Vacancia", pero resuelto por lote para todas las filas del export.
+VACANCIA_DETALLE_COLUMN_LABELS = {
+    "vac_empleado_relacionado": "Empleado Relacionado",
+    "vac_num_empleado": "Número de Empleado",
+    "vac_accion": "Acción",
+    "vac_motivo": "Motivo de la Vacancia",
+    "vac_posicion_destino": "Posición Destino",
+    "vac_fecha_efectiva_mov": "Fecha Efectiva del Movimiento",
+    "vac_fecha_captura_mov": "Fecha de Captura del Movimiento",
+    "vac_insub_persona": "Insubsistencia - Persona",
+    "vac_insub_num_empleado": "Insubsistencia - Número de Empleado",
+    "vac_insub_motivo": "Insubsistencia - Motivo",
+    "vac_insub_fecha_efectiva": "Insubsistencia - Fecha Efectiva",
+    "vac_insub_fecha_captura": "Insubsistencia - Fecha de Captura",
+}
+
+# Claves insertadas justo después de "categoria_vacancia" (detalle de la baja
+# o el traslado que originó la vacancia).
+VACANCIA_DETALLE_CATEGORIA_KEYS = [
+    "vac_empleado_relacionado", "vac_num_empleado", "vac_accion", "vac_motivo",
+    "vac_posicion_destino", "vac_fecha_efectiva_mov", "vac_fecha_captura_mov",
+]
+
+# Claves insertadas justo después de "tuvo_insubsistencia".
+VACANCIA_DETALLE_INSUBSISTENCIA_KEYS = [
+    "vac_insub_persona", "vac_insub_num_empleado", "vac_insub_motivo",
+    "vac_insub_fecha_efectiva", "vac_insub_fecha_captura",
+]
+
+
+def _enrich_rows_with_vacancia_detalle(resultados):
+    """Rellena en cada fila de MOV_POS (dicts de queryset.values()) las
+    columnas sintéticas de VACANCIA_DETALLE_COLUMN_LABELS, resolviendo por
+    lote (una sola query IN) los registros decisivos en
+    cp_tbl_mov_completo_29_05_26 en vez de repetir la lógica N+1 de
+    MovPosVacanciaDetalleView por cada fila."""
+    from .models import CpTblMovCompleto290526
+
+    decisivo_ids, insub_ids = set(), set()
+    for r in resultados:
+        if r.get("id_registro_desicivo"):
+            decisivo_ids.add(r["id_registro_desicivo"])
+        if (r.get("tuvo_insubsistencia") or "").strip().upper() == "S" and r.get("id_insubsistencia_detectada"):
+            insub_ids.add(r["id_insubsistencia_detectada"])
+
+    registros_by_id = {}
+    all_ids = decisivo_ids | insub_ids
+    if all_ids:
+        registros_by_id = {
+            reg.id: reg for reg in CpTblMovCompleto290526.objects.filter(id__in=all_ids)
+        }
+
+    def _nombre_completo(reg):
+        return " ".join(p for p in [reg.nombre, reg.ap_pat, reg.ap_mat] if p).strip()
+
+    for r in resultados:
+        for key in VACANCIA_DETALLE_COLUMN_LABELS:
+            r[key] = ""
+
+        categoria = (r.get("categoria_vacancia") or "").strip().upper()
+        id_decisivo = r.get("id_registro_desicivo")
+        if categoria in ("A", "B") and id_decisivo:
+            registro = registros_by_id.get(id_decisivo)
+            if registro:
+                r["vac_empleado_relacionado"] = _nombre_completo(registro)
+                r["vac_num_empleado"] = registro.num_empleado
+                r["vac_accion"] = registro.accion_nombre or registro.accion
+                r["vac_motivo"] = registro.motivo_nombre or registro.motivo
+                r["vac_fecha_efectiva_mov"] = registro.fecha_efectiva
+                r["vac_fecha_captura_mov"] = registro.fecha_captura
+                if categoria == "B":
+                    r["vac_posicion_destino"] = registro.posicion
+
+        if (r.get("tuvo_insubsistencia") or "").strip().upper() == "S":
+            id_insub = r.get("id_insubsistencia_detectada")
+            registro_ins = registros_by_id.get(id_insub) if id_insub else None
+            if registro_ins:
+                r["vac_insub_persona"] = _nombre_completo(registro_ins)
+                r["vac_insub_num_empleado"] = registro_ins.num_empleado
+                r["vac_insub_motivo"] = registro_ins.motivo_nombre or registro_ins.motivo
+                r["vac_insub_fecha_efectiva"] = registro_ins.fecha_efectiva
+                r["vac_insub_fecha_captura"] = registro_ins.fecha_captura
+
+
+# Descripción de cada categoría de vacancia, igual a CATEGORIA_VACANCIA_TOOLTIP
+# en MovimientosTab.jsx (modal "Detalle de Vacancia").
+VACANCIA_CATEGORIA_DESCRIPCIONES = {
+    "A": "Posición vacante porque empleado que la ocupaba causó baja",
+    "B": "Posición vacante porque empleado que la ocupaba cambió a otra posición, vacancia = fecha en que tomó esa nueva posición",
+    "C": "Posición vacante porque jamás tuvo ocupante, vacancia = fecha creación posición",
+}
+
+# Texto explicativo (2 renglones) mostrado en las filas 7-8 del export de
+# "Vacantes", arriba del header real (fila 9). Clave ausente = columna sin nota.
+VACANCIA_EXPORT_COLUMN_NOTES = {
+    "total_movimientos": ("Cantidad de movimientos", "que ha tenido la posición"),
+    "fecha_vacancia": ("Fecha de vacancia calculada por", "el Sistema de Control de Plazas (SCP)"),
+    "categoria_vacancia": ("Identificador de causa", "de vacancia asignado por el SCP"),
+    "vac_empleado_relacionado": ("Empleado que causó baja o fue trasladado", "a otra posición según aplique el caso (categoría de vacancia)"),
+    "vac_num_empleado": ("Número de empleado que causó baja o fue trasladado", "a otra posición según aplique el caso (categoría de vacancia)"),
+    "vac_accion": ("Acción del movimiento", "que provocó la baja o traslado"),
+    "vac_motivo": ("Motivo del movimiento que provocó", "la baja o traslado"),
+    "vac_posicion_destino": ("Posición Destino", "a la que fue trasladado el empleado"),
+    "vac_fecha_efectiva_mov": ("Fecha Efectiva del Movimiento", "reportado en las columnas de Acción y Motivo"),
+    "vac_fecha_captura_mov": ("Fecha de Captura del Movimiento", "reportado en las columnas de Acción y Motivo"),
+    "tuvo_insubsistencia": ("¿Tuvo Insubsistencia", "la posición?"),
+    "vac_insub_persona": ("Persona que causó", "la insubsistencia"),
+    "vac_insub_num_empleado": ("No. Empleado de la persona que causó", "la insubsistencia"),
+    "vac_insub_motivo": ("Motivo", "de la insubsistencia"),
+    "vac_insub_fecha_efectiva": ("Fecha efectiva", "de la insubsistencia"),
+    "vac_insub_fecha_captura": ("Fecha de captura", "de la insubsistencia"),
+}
+
+# Ancho mínimo de columna para que el texto largo de las notas explicativas
+# (filas 7-8) y la leyenda (filas 1-5) no se vea cortado.
+VACANCIA_EXPORT_MIN_COL_WIDTH = {
+    "total_movimientos": 22,
+    "fecha_vacancia": 24,
+    "categoria_vacancia": 24,
+    "vac_empleado_relacionado": 46,
+    "vac_num_empleado": 30,
+    "vac_accion": 20,
+    "vac_motivo": 30,
+    "vac_posicion_destino": 26,
+    "vac_fecha_efectiva_mov": 30,
+    "vac_fecha_captura_mov": 30,
+    "tuvo_insubsistencia": 20,
+    "vac_insub_persona": 38,
+    "vac_insub_num_empleado": 34,
+    "vac_insub_motivo": 26,
+    "vac_insub_fecha_efectiva": 28,
+    "vac_insub_fecha_captura": 28,
+}
+
+# La leyenda de categorías (E1:H5) vive en columnas fijas, sin relación con
+# `visible_keys`; se les da un ancho mínimo propio para que quepan sus textos.
+VACANCIA_LEGEND_MIN_COL_WIDTH = {"F": 60, "G": 22, "H": 40}
+
+# (keys en orden, título del grupo para la fila 6, color de fondo de las filas 7-8)
+VACANCIA_EXPORT_GROUPS = [
+    (["fecha_vacancia", "categoria_vacancia"], "INFORMACIÓN GENERAL DE LA VACANCIA", "FF2A6099"),
+    (VACANCIA_DETALLE_CATEGORIA_KEYS, "DETALLE DE LA VACANCIA", "FFBF0041"),
+    (["tuvo_insubsistencia"] + VACANCIA_DETALLE_INSUBSISTENCIA_KEYS, "DETALLE DE LA INSUBSISTENCIA", "FF800080"),
+]
+
+
+def _categoria_vacancia_stats(resultados):
+    """Cuenta, por cada fila ya exportada (solo vacantes), cuántas son de cada
+    categoría de vacancia y cuántas de esas tuvieron insubsistencia."""
+    stats = {c: {"total": 0, "insub": 0} for c in ("A", "B", "C")}
+    for r in resultados:
+        categoria = (r.get("categoria_vacancia") or "").strip().upper()
+        if categoria not in stats:
+            continue
+        stats[categoria]["total"] += 1
+        if (r.get("tuvo_insubsistencia") or "").strip().upper() == "S":
+            stats[categoria]["insub"] += 1
+    return stats
+
+
+def _write_vacancia_report_cover(ws, visible_keys, resultados):
+    """Escribe, solo para el export de solo-"Vacantes", la portada del reporte:
+    - Filas 1-5, columnas E-H: leyenda de categorías de vacancia + cantidad de
+      plazas y cantidad con insubsistencia por categoría, con fila de totales.
+    - Fila 6: encabezados de grupo (merge) sobre "información general",
+      "detalle de la vacancia" y "detalle de la insubsistencia".
+    - Filas 7-8: nota explicativa de 2 renglones por columna, coloreada según
+      el grupo al que pertenece.
+    Las filas 6-8 se ubican dinámicamente según la posición real de cada
+    columna en `visible_keys`, ya que el usuario puede ocultar columnas del
+    resto de la tabla (no. de posición, estado, etc.) desde la UI.
+    """
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+
+    thin = Side(style="thin")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    align_center = Alignment(horizontal="center", vertical="center")
+    font_label = Font(name="Segoe UI", size=10, bold=True, color="FFFFFFFF")
+    font_value = Font(name="Segoe UI", size=10, bold=False, color="FF000000")
+    font_bold_black = Font(name="Segoe UI", size=10, bold=True, color="FF000000")
+
+    legend_header_fill = PatternFill(start_color="FF2A6099", end_color="FF2A6099", fill_type="solid")
+    legend_cat_fill = PatternFill(start_color="FFB4C7DC", end_color="FFB4C7DC", fill_type="solid")
+    legend_total_fill = PatternFill(start_color="FFD9D9D9", end_color="FFD9D9D9", fill_type="solid")
+
+    def _cell(row, col, value, fill=None, font=None):
+        cell = ws.cell(row=row, column=col, value=value)
+        cell.border = border
+        cell.alignment = align_center
+        cell.font = font or font_value
+        if fill:
+            cell.fill = fill
+        return cell
+
+    # ── Leyenda de categorías (E1:H4) + fila de totales (E5:H5) ─────────────
+    stats = _categoria_vacancia_stats(resultados)
+    _cell(1, 5, "CATEGORIA DE LA VACANCIA", legend_header_fill, font_label)
+    _cell(1, 6, "Descripción", legend_header_fill, font_label)
+    _cell(1, 7, "Cantidad de Plazas", legend_header_fill, font_label)
+    _cell(1, 8, "Cantidad de Plazas que Tuvieron Insubsistencia", legend_header_fill, font_label)
+
+    for offset, categoria in enumerate(("A", "B", "C")):
+        row = 2 + offset
+        _cell(row, 5, categoria, legend_cat_fill, font_bold_black)
+        _cell(row, 6, VACANCIA_CATEGORIA_DESCRIPCIONES[categoria])
+        _cell(row, 7, stats[categoria]["total"])
+        _cell(row, 8, stats[categoria]["insub"])
+
+    total_plazas = sum(s["total"] for s in stats.values())
+    total_insub = sum(s["insub"] for s in stats.values())
+    _cell(5, 5, "TOTAL", legend_total_fill, font_bold_black)
+    ws.merge_cells(start_row=5, start_column=5, end_row=5, end_column=6)
+    _cell(5, 6, None, legend_total_fill, font_bold_black)
+    _cell(5, 7, total_plazas, legend_total_fill, font_bold_black)
+    _cell(5, 8, total_insub, legend_total_fill, font_bold_black)
+
+    # ── Fila 6 (grupos) y filas 7-8 (notas explicativas) ────────────────────
+    col_index = {key: idx for idx, key in enumerate(visible_keys, start=1)}
+    group_fill_by_key = {}
+    for keys, group_title, color in VACANCIA_EXPORT_GROUPS:
+        cols = sorted(col_index[k] for k in keys if k in col_index)
+        if not cols:
+            continue
+        group_fill = PatternFill(start_color=color, end_color=color, fill_type="solid")
+        for k in keys:
+            group_fill_by_key[k] = group_fill
+        start_col, end_col = cols[0], cols[-1]
+        black_fill = PatternFill(start_color="FF000000", end_color="FF000000", fill_type="solid")
+        _cell(6, start_col, group_title, black_fill, font_label)
+        if end_col > start_col:
+            ws.merge_cells(start_row=6, start_column=start_col, end_row=6, end_column=end_col)
+
+    yellow_fill = PatternFill(start_color="FFFFFF38", end_color="FFFFFF38", fill_type="solid")
+    for key, (line1, line2) in VACANCIA_EXPORT_COLUMN_NOTES.items():
+        col = col_index.get(key)
+        if not col:
+            continue
+        fill = group_fill_by_key.get(key)
+        # Columnas sin grupo (fondo amarillo, ej. "Histórico") usan texto negro;
+        # el blanco quedaba invisible sobre amarillo.
+        note_font = font_label if fill else font_bold_black
+        fill = fill or yellow_fill
+        _cell(7, col, line1, fill, note_font)
+        _cell(8, col, line2, fill, note_font)
+
+    # ── Título + fecha/hora de descarga (A1:D2) ─────────────────────────────
+    from django.utils import timezone
+
+    meses_es = [
+        "enero", "febrero", "marzo", "abril", "mayo", "junio",
+        "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
+    ]
+    ahora = timezone.localtime(timezone.now())
+    fecha_str = f"{ahora.day:02d} de {meses_es[ahora.month - 1]} de {ahora.year}, {ahora.strftime('%I:%M %p')}"
+
+    title_fill = PatternFill(start_color="FF2B4C7E", end_color="FF2B4C7E", fill_type="solid")
+
+    def _merge_box(row, value):
+        _cell(row, 1, value, title_fill, font_label)
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=4)
+        for col in range(2, 5):
+            _cell(row, col, None, title_fill, font_label)
+
+    _merge_box(1, "Reporte generado por el Sistema de Control de Plazas (SCP)")
+    _merge_box(2, f"Fecha y hora de descarga: {fecha_str}")
+
 
 # Antes recalculaba ROW_NUMBER() OVER sobre toda MOV_POS en cada request
 # (~300ms, ver AUDITORIA_BUGS_BACK.md BE2). MOV_POS_LATEST la materializa la
@@ -2126,6 +2416,7 @@ class MovPosExportExcelView(APIView):
                 cache.set(cache_key_ocupadas, pos_ocup, 600)
             return pos_ocup
 
+        is_vacantes_only = False
         if ocupacion_param_key:
             posiciones_ocupadas = _get_posiciones_ocupadas()
             ocupacion_raw = request.query_params.get(ocupacion_param_key, "")
@@ -2158,6 +2449,7 @@ class MovPosExportExcelView(APIView):
                 queryset = queryset.filter(no_pos_actual__in=list(posiciones_ocupadas))
             elif want_vacante and not want_ocupada:
                 queryset = queryset.exclude(no_pos_actual__in=list(posiciones_ocupadas))
+                is_vacantes_only = True
             elif not want_ocupada and not want_vacante:
                 queryset = queryset.none()
 
@@ -2264,6 +2556,27 @@ class MovPosExportExcelView(APIView):
             r["ocupacion"] = "Ocupada" if pos in posiciones_ocupadas else "Vacante"
             r["fecha_vacancia"] = "" if pos in posiciones_ocupadas else r.get("fecha_vacancia", "")
 
+        # Export de solo "Vacantes": desglosa el registro decisivo (baja o
+        # traslado) y la insubsistencia de cada posición vacante en columnas
+        # extra, insertadas junto a "Categoría Vacancia" y "Tuvo Insubsistencia"
+        # aunque el usuario las haya ocultado en la UI de la tabla.
+        if is_vacantes_only:
+            _enrich_rows_with_vacancia_detalle(resultados)
+
+            for anchor_key in ("fecha_vacancia", "categoria_vacancia", "tuvo_insubsistencia"):
+                if anchor_key not in visible_keys:
+                    visible_keys.append(anchor_key)
+
+            def _insert_after(keys, anchor, new_keys):
+                new_keys = [k for k in new_keys if k not in keys]
+                if not new_keys:
+                    return keys
+                idx = keys.index(anchor) + 1
+                return keys[:idx] + new_keys + keys[idx:]
+
+            visible_keys = _insert_after(visible_keys, "categoria_vacancia", VACANCIA_DETALLE_CATEGORIA_KEYS)
+            visible_keys = _insert_after(visible_keys, "tuvo_insubsistencia", VACANCIA_DETALLE_INSUBSISTENCIA_KEYS)
+
         # ── 4. Generar Excel ────────────────────────────────────────────────
         try:
             wb = Workbook()
@@ -2279,19 +2592,26 @@ class MovPosExportExcelView(APIView):
             align_center = Alignment(horizontal="center", vertical="center")
             align_left = Alignment(horizontal="left", vertical="center")
 
+            # Export de solo "Vacantes": portada con leyenda de categorías +
+            # conteos y grupos de columnas explicados, encima del header real.
+            if is_vacantes_only:
+                _write_vacancia_report_cover(ws, visible_keys, resultados)
+            header_row = 9 if is_vacantes_only else 1
+            data_start_row = header_row + 1
+
             # Header row
             for col_idx, key in enumerate(visible_keys, start=1):
-                label = MOV_POS_COLUMN_LABELS.get(key, key)
-                cell = ws.cell(row=1, column=col_idx, value=label)
+                label = MOV_POS_COLUMN_LABELS.get(key) or VACANCIA_DETALLE_COLUMN_LABELS.get(key, key)
+                cell = ws.cell(row=header_row, column=col_idx, value=label)
                 cell.fill = header_fill
                 cell.font = header_font
                 cell.border = gold_border
                 cell.alignment = align_center
-            ws.row_dimensions[1].height = 24
+            ws.row_dimensions[header_row].height = 24
 
             # Data rows
-            for row_idx, row_data in enumerate(resultados, start=2):
-                is_zebra = row_idx % 2 == 0
+            for row_idx, row_data in enumerate(resultados, start=data_start_row):
+                is_zebra = (row_idx - data_start_row) % 2 == 1
                 for col_idx, key in enumerate(visible_keys, start=1):
                     val = row_data.get(key)
                     if val is None:
@@ -2306,15 +2626,27 @@ class MovPosExportExcelView(APIView):
                         cell.fill = zebra_fill
                 ws.row_dimensions[row_idx].height = 20
 
-            # Auto-fit column widths
+            # Auto-fit column widths (con piso extra para las columnas de
+            # detalle de vacancia/insubsistencia, que en el export de Vacantes
+            # también cargan el texto largo de la portada en las filas 1-8)
             for col_idx, key in enumerate(visible_keys, start=1):
                 col_letter = get_column_letter(col_idx)
-                header_len = len(MOV_POS_COLUMN_LABELS.get(key, key))
+                header_len = len(MOV_POS_COLUMN_LABELS.get(key) or VACANCIA_DETALLE_COLUMN_LABELS.get(key, key))
                 max_len = max(
                     (len(str(r.get(key, "") or "")) for r in resultados),
                     default=0,
                 )
-                ws.column_dimensions[col_letter].width = min(max(max_len, header_len) + 4, 60)
+                width = min(max(max_len, header_len) + 4, 60)
+                if is_vacantes_only:
+                    width = max(width, VACANCIA_EXPORT_MIN_COL_WIDTH.get(key, 0))
+                ws.column_dimensions[col_letter].width = width
+
+            if is_vacantes_only:
+                for col_letter in ("F", "G", "H"):
+                    ws.column_dimensions[col_letter].width = max(
+                        ws.column_dimensions[col_letter].width or 0,
+                        VACANCIA_LEGEND_MIN_COL_WIDTH.get(col_letter, 0),
+                    )
 
             output = io.BytesIO()
             wb.save(output)
@@ -3131,48 +3463,149 @@ class OrganigramaDeptoView(APIView):
         ])
 
 
-class CatAccionesView(APIView):
+class AuditedViewSetMixin:
     """
-    Catálogo action→action_description/descripcion de cat_acciones.
-    Respuesta: [{"action": "HIR", "action_description": "Contratación", "descripcion": "..."}, ...]
+    Llena `modificado_por` con el usuario autenticado en cada create/update.
+    `fecha_modificacion` se autollena vía `auto_now=True` en el modelo.
     """
-    permission_classes = [IsAuthenticated]
 
-    def get(self, request):
-        from django.db import connection
-        sql = """
-            SELECT action, action_description, descripcion
-            FROM cat_acciones
-        """
-        with connection.cursor() as cursor:
-            cursor.execute(sql)
-            rows = cursor.fetchall()
+    def perform_create(self, serializer):
+        serializer.save(modificado_por=self.request.user.username)
+
+    def perform_update(self, serializer):
+        serializer.save(modificado_por=self.request.user.username)
+
+
+class CatAccionesViewSet(AuditedViewSetMixin, viewsets.ModelViewSet):
+    """
+    CRUD del catálogo cat_acciones (action→action_description/descripcion).
+    El listado (GET) mantiene la misma forma que el APIView previo; los
+    consumidores existentes (`useAccionesMotivosCatalog.js`) leen los campos
+    por nombre y no se ven afectados por los campos extra (effective_status,
+    modificado_por, fecha_modificacion).
+    """
+    queryset = CatAcciones.objects.all()
+    serializer_class = CatAccionesSerializer
+
+
+class CatAccionesMotivosViewSet(AuditedViewSetMixin, viewsets.ModelViewSet):
+    """
+    CRUD del catálogo cat_acciones_motivos (accion+cd_motivo→descripcion).
+    """
+    queryset = CatAccionesMotivos.objects.all()
+    serializer_class = CatAccionesMotivosSerializer
+
+
+class CatPtoFuncViewSet(AuditedViewSetMixin, viewsets.ModelViewSet):
+    """
+    CRUD del catálogo CAT_PTO_FUNC (Cd Pto Funcional → Nombre Puesto
+    Funcional), usado por el SP `sp_llenar_nombre_puesto` tras cada
+    importación de ZAFIRO.
+    """
+    queryset = CatPtoFunc.objects.all()
+    serializer_class = CatPtoFuncSerializer
+
+
+class RcCatCodPresupuestalViewSet(AuditedViewSetMixin, viewsets.ModelViewSet):
+    """
+    CRUD del catálogo rc_cat_cod_presupuestal (SMB/SMN/nivel jerárquico por
+    código presupuestal + escala), usado por los SPs
+    `sp_corregir_smb_smn_empleados` y `sp_llenar_niveles_vacios_pos_activas`.
+
+    Pk compuesta (codigo_presupuestal, escala): las rutas de detalle llevan
+    ambos valores como segmentos de URL en vez de un solo `pk`.
+    """
+    queryset = RcCatCodPresupuestal.objects.all()
+    serializer_class = RcCatCodPresupuestalSerializer
+
+    def get_object(self):
+        from django.shortcuts import get_object_or_404
+        obj = get_object_or_404(
+            self.get_queryset(),
+            codigo_presupuestal=self.kwargs["codigo_presupuestal"],
+            escala=self.kwargs["escala"],
+        )
+        self.check_object_permissions(self.request, obj)
+        return obj
+
+
+class CatNivelJerarquicoPlazaViewSet(AuditedViewSetMixin, viewsets.ModelViewSet):
+    """
+    CRUD + acciones en bloque del catálogo cat_nivel_jerarquico_plaza.
+
+    - `sync-plazas`: siembra/actualiza filas desde MOV_POS (plazas activas,
+      última captura por `Nº Pos Actual`), sin tocar el nivel jerárquico ya
+      asignado.
+    - `bulk-assign`: asigna una misma descripción de nivel jerárquico (enum)
+      a varias plazas seleccionadas desde el frontend.
+    """
+    queryset = CatNivelJerarquicoPlaza.objects.all()
+    serializer_class = CatNivelJerarquicoPlazaSerializer
+    lookup_value_regex = "[^/]+"
+
+    def get_object(self):
+        from django.shortcuts import get_object_or_404
+        obj = get_object_or_404(self.get_queryset(), plaza=self.kwargs["pk"])
+        self.check_object_permissions(self.request, obj)
+        return obj
+
+    @action(detail=False, methods=["get"])
+    def niveles(self, request):
+        """Catálogo estático (NJ, descripción) para poblar el select del frontend."""
         return Response([
-            {"action": r[0], "action_description": r[1], "descripcion": r[2]}
-            for r in rows
+            {"descripcion_nivel_jerarquico": value, "label": label}
+            for value, label in DESCRIPCION_NJ_CHOICES
         ])
 
+    @action(detail=False, methods=["post"], url_path="sync-plazas")
+    def sync_plazas(self, request):
+        latest_ids = MovPosLatest.objects.filter(estado_psn="A").values_list("mov_pos_id", flat=True)
+        activas = list(MovPos.objects.filter(id__in=latest_ids).exclude(
+            no_pos_actual__isnull=True
+        ).values_list("no_pos_actual", "nvl_direc"))
 
-class CatAccionesMotivosView(APIView):
-    """
-    Catálogo descripcion→cd_motivo/descripcion_larga de cat_acciones_motivos.
-    Respuesta: [{"cd_motivo": "STC", "descripcion": "Act Datos Servicio Social", "descripcion_larga": "..."}, ...]
-    """
-    permission_classes = [IsAuthenticated]
+        # bulk_create/bulk_update en vez de loop create()/update() fila por fila:
+        # con ~11k plazas activas el loop individual contra la BD remota tardaba
+        # minutos (un round-trip de red por fila); en bloque son 1-2 queries.
+        existentes = dict(CatNivelJerarquicoPlaza.objects.values_list("plaza", "nvl_direc_origen"))
+        nuevas = [
+            CatNivelJerarquicoPlaza(plaza=plaza, nvl_direc_origen=nvl_direc)
+            for plaza, nvl_direc in activas if plaza not in existentes
+        ]
+        por_actualizar = []
+        for plaza, nvl_direc in activas:
+            if plaza in existentes and existentes[plaza] != nvl_direc:
+                por_actualizar.append(CatNivelJerarquicoPlaza(plaza=plaza, nvl_direc_origen=nvl_direc))
 
-    def get(self, request):
-        from django.db import connection
-        sql = """
-            SELECT cd_motivo, descripcion, descripcion_larga
-            FROM cat_acciones_motivos
-        """
-        with connection.cursor() as cursor:
-            cursor.execute(sql)
-            rows = cursor.fetchall()
-        return Response([
-            {"cd_motivo": r[0], "descripcion": r[1], "descripcion_larga": r[2]}
-            for r in rows
-        ])
+        with transaction.atomic():
+            if nuevas:
+                CatNivelJerarquicoPlaza.objects.bulk_create(nuevas, batch_size=1000, ignore_conflicts=True)
+            if por_actualizar:
+                CatNivelJerarquicoPlaza.objects.bulk_update(por_actualizar, ["nvl_direc_origen"], batch_size=1000)
+
+        return Response({
+            "creadas": len(nuevas), "actualizadas": len(por_actualizar), "total_activas": len(activas),
+        })
+
+    @action(detail=False, methods=["post"], url_path="bulk-assign")
+    def bulk_assign(self, request):
+        plazas = request.data.get("plazas") or []
+        descripcion = request.data.get("descripcion_nivel_jerarquico")
+        if not plazas or not isinstance(plazas, list):
+            return Response({"detail": "Se requiere una lista no vacía de plazas."}, status=status.HTTP_400_BAD_REQUEST)
+        if descripcion not in dict(DESCRIPCION_NJ_CHOICES):
+            return Response({"detail": "descripcion_nivel_jerarquico inválido."}, status=status.HTTP_400_BAD_REQUEST)
+
+        usuario = request.user.username
+        actualizadas = 0
+        with transaction.atomic():
+            for plaza in plazas:
+                obj, _ = CatNivelJerarquicoPlaza.objects.get_or_create(plaza=plaza)
+                obj.descripcion_nivel_jerarquico = descripcion
+                obj.modificado_por = usuario
+                obj.save()
+                actualizadas += 1
+        return Response({"actualizadas": actualizadas})
 
 
 class MovimientosPersonalHistorialView(APIView):

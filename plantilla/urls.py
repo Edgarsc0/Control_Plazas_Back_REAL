@@ -33,8 +33,11 @@ from .views import (
     MovimientosPersonalStatsView,
     MovimientosPersonalHistorialView,
     OrganigramaDeptoView,
-    CatAccionesView,
-    CatAccionesMotivosView,
+    CatAccionesViewSet,
+    CatAccionesMotivosViewSet,
+    CatNivelJerarquicoPlazaViewSet,
+    CatPtoFuncViewSet,
+    RcCatCodPresupuestalViewSet,
     CuadroVacanciaView,
     DesgloseJerarquicoView,
     DesgloseJerarquicoOcupadosView,
@@ -63,13 +66,78 @@ urlpatterns = [
     ),
     path(
         "cat-acciones/",
-        CatAccionesView.as_view(),
+        CatAccionesViewSet.as_view({"get": "list", "post": "create"}),
         name="cat-acciones",
     ),
     path(
+        "cat-acciones/<str:pk>/",
+        CatAccionesViewSet.as_view(
+            {"put": "update", "patch": "partial_update", "delete": "destroy"}
+        ),
+        name="cat-acciones-detail",
+    ),
+    path(
         "cat-acciones-motivos/",
-        CatAccionesMotivosView.as_view(),
+        CatAccionesMotivosViewSet.as_view({"get": "list", "post": "create"}),
         name="cat-acciones-motivos",
+    ),
+    path(
+        "cat-acciones-motivos/<int:pk>/",
+        CatAccionesMotivosViewSet.as_view(
+            {"put": "update", "patch": "partial_update", "delete": "destroy"}
+        ),
+        name="cat-acciones-motivos-detail",
+    ),
+    path(
+        "cat-pto-func/",
+        CatPtoFuncViewSet.as_view({"get": "list", "post": "create"}),
+        name="cat-pto-func",
+    ),
+    path(
+        "cat-pto-func/<int:pk>/",
+        CatPtoFuncViewSet.as_view(
+            {"put": "update", "patch": "partial_update", "delete": "destroy"}
+        ),
+        name="cat-pto-func-detail",
+    ),
+    path(
+        "cat-cod-presupuestal/",
+        RcCatCodPresupuestalViewSet.as_view({"get": "list", "post": "create"}),
+        name="cat-cod-presupuestal",
+    ),
+    path(
+        "cat-cod-presupuestal/<str:codigo_presupuestal>/<int:escala>/",
+        RcCatCodPresupuestalViewSet.as_view(
+            {"put": "update", "patch": "partial_update", "delete": "destroy"}
+        ),
+        name="cat-cod-presupuestal-detail",
+    ),
+    path(
+        "cat-nivel-jerarquico-plaza/niveles/",
+        CatNivelJerarquicoPlazaViewSet.as_view({"get": "niveles"}),
+        name="cat-nivel-jerarquico-plaza-niveles",
+    ),
+    path(
+        "cat-nivel-jerarquico-plaza/sync-plazas/",
+        CatNivelJerarquicoPlazaViewSet.as_view({"post": "sync_plazas"}),
+        name="cat-nivel-jerarquico-plaza-sync",
+    ),
+    path(
+        "cat-nivel-jerarquico-plaza/bulk-assign/",
+        CatNivelJerarquicoPlazaViewSet.as_view({"post": "bulk_assign"}),
+        name="cat-nivel-jerarquico-plaza-bulk-assign",
+    ),
+    path(
+        "cat-nivel-jerarquico-plaza/",
+        CatNivelJerarquicoPlazaViewSet.as_view({"get": "list", "post": "create"}),
+        name="cat-nivel-jerarquico-plaza",
+    ),
+    path(
+        "cat-nivel-jerarquico-plaza/<str:pk>/",
+        CatNivelJerarquicoPlazaViewSet.as_view(
+            {"put": "update", "patch": "partial_update", "delete": "destroy"}
+        ),
+        name="cat-nivel-jerarquico-plaza-detail",
     ),
     path(
         "torre-caballito/",
