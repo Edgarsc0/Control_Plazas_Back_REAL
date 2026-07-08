@@ -1030,6 +1030,61 @@ def _llenar_niveles_vacios_pos_activas(bitacora):
         logger.error(f"Error en _llenar_niveles_vacios_pos_activas: {str(e)}", exc_info=True)
 
 
+def _sincronizar_plazas_nivel_jerarquico(bitacora):
+    """
+    Siembra/actualiza cat_nivel_jerarquico_plaza desde las posiciones activas
+    de MOV_POS (recién recargado por ZAFIRO): crea plazas nuevas y refresca
+    `nvl_direc_origen`, sin tocar `nivel_jerarquico` (asignación manual) ni
+    borrar plazas que hoy no estén activas.
+
+    Debe correr ANTES de `_reaplicar_prioridad_nivel_jerarquico`: así, si una
+    posición se dio de baja y se reactivó, el catálogo ya la trae de vuelta
+    (con su `nivel_jerarquico` previo intacto, porque la fila nunca se borró)
+    antes de que se cruce contra MOV_POS/EMPLEADOS_COMPLETOS_SIG.
+    """
+    from .nivel_jerarquico_sync import sincronizar_plazas_desde_mov_pos
+
+    _append_log(bitacora, "Sincronizando cat_nivel_jerarquico_plaza desde MOV_POS...")
+    try:
+        stats = sincronizar_plazas_desde_mov_pos()
+        _append_log(
+            bitacora,
+            f"Plazas sincronizadas: {stats['creadas']} creada(s), {stats['actualizadas']} actualizada(s) "
+            f"de {stats['total_activas']} posición(es) activa(s).",
+        )
+    except Exception as e:
+        _append_log(bitacora, f"Error sincronizando plazas de nivel jerárquico: {str(e)}", is_error=True)
+        logger.error("Error en _sincronizar_plazas_nivel_jerarquico: %s", e, exc_info=True)
+
+
+def _reaplicar_prioridad_nivel_jerarquico(bitacora):
+    """
+    Si hay una prioridad de nivel jerárquico configurada (checkbox en el
+    frontend, ver CatNivelJerarquicoPlazaViewSet.aplicar_prioridad), la
+    reaplica sobre las tablas recién recargadas por ZAFIRO: MOV_POS y
+    EMPLEADOS_COMPLETOS_SIG se truncan y recargan completas en cada import,
+    así que cualquier escritura manual anterior se pierde si no se reaplica
+    aquí.
+    """
+    from .models import NivelJerarquicoPrioridadConfig
+    from .nivel_jerarquico_sync import aplicar_prioridad_nivel_jerarquico
+
+    config = NivelJerarquicoPrioridadConfig.objects.first()
+    if not config or not config.fuente:
+        return
+    _append_log(bitacora, f"Reaplicando prioridad de nivel jerárquico ({config.fuente})...")
+    try:
+        stats = aplicar_prioridad_nivel_jerarquico(config.fuente)
+        _append_log(
+            bitacora,
+            f"Prioridad reaplicada: {stats['empleados_actualizados']} empleado(s) en "
+            f"EMPLEADOS_COMPLETOS_SIG, {stats['posiciones_actualizadas']} posición(es) en MOV_POS.",
+        )
+    except Exception as e:
+        _append_log(bitacora, f"Error reaplicando prioridad de nivel jerárquico: {str(e)}", is_error=True)
+        logger.error("Error en _reaplicar_prioridad_nivel_jerarquico: %s", e, exc_info=True)
+
+
 def _calcular_y_actualizar_vacancias(bitacora):
     """
     Ejecuta el Stored Procedure sp_obtener_todas_vacancias, el cual
@@ -1085,8 +1140,12 @@ def importar_zafiro(self):
       6. Post-proceso vía stored procedures: Nombre Puesto en MOV_POS,
          corrección de SMB/SMN en EMPLEADOS_COMPLETOS_SIG, y cálculo de
          fechas de vacancia.
-      7. Regenera el Cuadro de Vacancia Diario.
-      8. Publica evento en Redis para SSE e invalida cachés de
+      7. Sincroniza cat_nivel_jerarquico_plaza desde las posiciones activas
+         de MOV_POS (siembra/actualiza `nvl_direc_origen`, conserva el
+         `nivel_jerarquico` ya asignado) y reaplica la fuente de prioridad
+         de nivel jerárquico fijada (si hay una).
+      8. Regenera el Cuadro de Vacancia Diario.
+      9. Publica evento en Redis para SSE e invalida cachés de
          dashboard/plantilla/reportes Excel.
 
     Todo el progreso y errores se registran en vivo en un ZafiroBitacora.
@@ -1198,7 +1257,13 @@ def importar_zafiro(self):
         # ── 8. Calcular y Actualizar Fechas de Vacancia ─────────────────────
         _calcular_y_actualizar_vacancias(bitacora)
 
-        # ── 8. Generar/Actualizar Cuadro de Vacancia ───────────────────────
+        # ── 9. Sincronizar cat_nivel_jerarquico_plaza desde MOV_POS ────────
+        _sincronizar_plazas_nivel_jerarquico(bitacora)
+
+        # ── 10. Reaplicar prioridad de nivel jerárquico (si hay una fijada) ─
+        _reaplicar_prioridad_nivel_jerarquico(bitacora)
+
+        # ── 11. Generar/Actualizar Cuadro de Vacancia ──────────────────────
         _append_log(bitacora, "Generando/Actualizando Cuadro de Vacancia Diario...")
         try:
             from django.core.management import call_command

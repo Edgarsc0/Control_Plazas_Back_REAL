@@ -983,13 +983,58 @@ NIVELES_JERARQUICOS = (
 NIVEL_JERARQUICO_POR_DESCRIPCION = {descripcion: nivel for nivel, descripcion in NIVELES_JERARQUICOS}
 DESCRIPCION_NJ_CHOICES = [(descripcion, f"{nivel} — {descripcion}") for nivel, descripcion in NIVELES_JERARQUICOS]
 
+# Convención corta ya usada por ZAFIRO en las columnas NJ de EMPLEADOS_COMPLETOS_SIG
+# (no coincide textualmente con NIVELES_JERARQUICOS: p.ej. nivel 1 es "Titular", no
+# "Director General"; niveles 2 y 3 comparten "Director"). Verificada contra datos
+# reales de producción; nivel 0 no tiene precedente (sin empleados hoy en ese nivel).
+NIVEL_JERARQUICO_LABELS = {
+    0: {"nj": "0", "nj_comp": "0 Titular ANAM", "nj_ok": "0 TITULAR ANAM", "nombre_nj": "TITULAR ANAM", "nj_operativo_comb": "TITULAR ANAM"},
+    1: {"nj": "1", "nj_comp": "1 Titular", "nj_ok": "1 TITULAR", "nombre_nj": "TITULAR", "nj_operativo_comb": "TITULAR"},
+    2: {"nj": "2", "nj_comp": "2 Director", "nj_ok": "2 DIRECTOR", "nombre_nj": "DIRECTOR", "nj_operativo_comb": "DIRECTOR"},
+    3: {"nj": "3", "nj_comp": "3 Director", "nj_ok": "3 DIRECTOR", "nombre_nj": "DIRECTOR", "nj_operativo_comb": "DIRECTOR"},
+    4: {"nj": "4", "nj_comp": "4 Subdirector", "nj_ok": "4 SUBDIRECTOR", "nombre_nj": "SUBDIRECTOR", "nj_operativo_comb": "SUBDIRECTOR"},
+    5: {"nj": "5", "nj_comp": "5 Jefe de Depto", "nj_ok": "5 JEFE DE DEPTO", "nombre_nj": "JEFE DE DEPTO", "nj_operativo_comb": "JEFE DE DEPTO"},
+    6: {"nj": "6", "nj_comp": "6 Enlace", "nj_ok": "6 ENLACE", "nombre_nj": "ENLACE", "nj_operativo_comb": "ENLACE"},
+    7: {"nj": "7", "nj_comp": "7 Operativo Confianza", "nj_ok": "7 OPERATIVO CONFIANZA", "nombre_nj": "OPERATIVO CONFIANZA", "nj_operativo_comb": "OPERATIVOS"},
+    8: {"nj": "8", "nj_comp": "8 Operativo Base", "nj_ok": "8 OPERATIVO BASE", "nombre_nj": "OPERATIVO BASE", "nj_operativo_comb": "OPERATIVOS"},
+}
+
+FUENTE_PRIORIDAD_CHOICES = [
+    ("nivel_jerarquico", "Nivel Jerárquico (asignación manual)"),
+    ("nvl_direc_origen", "Nvl Direc (referencia MOV_POS)"),
+]
+
+
+class NivelJerarquicoPrioridadConfig(models.Model):
+    """
+    Config singleton (pk=1): cuál columna de cat_nivel_jerarquico_plaza manda
+    como fuente de verdad del nivel jerárquico al cruzar contra MOV_POS y
+    EMPLEADOS_COMPLETOS_SIG (checkbox de prioridad en el frontend). Se
+    reaplica automáticamente en cada import ZAFIRO (ver
+    plantilla.tasks._reaplicar_prioridad_nivel_jerarquico) porque esas dos
+    tablas se truncan y recargan completas cada 30 min.
+    """
+
+    fuente = models.CharField(max_length=20, choices=FUENTE_PRIORIDAD_CHOICES, blank=True, null=True)
+    modificado_por = models.CharField(max_length=255, blank=True, null=True)
+    fecha_modificacion = models.DateTimeField(blank=True, null=True, auto_now=True)
+
+    class Meta:
+        managed = True
+        db_table = "cat_nivel_jerarquico_prioridad"
+
+    def __str__(self):
+        return self.fuente or "sin prioridad"
+
 
 class CatNivelJerarquicoPlaza(models.Model):
     """
     Nivel jerárquico (enum NJ + descripción) asignado manualmente por plaza.
-    Se siembra desde MOV_POS (plaza + Nvl Direc de referencia) vía la acción
-    `sync-plazas`; el nivel jerárquico se asigna después en bloque desde el
-    frontend (`bulk-assign`) y no viene de ninguna fuente automática.
+    Se siembra/actualiza desde MOV_POS (plaza + Nvl Direc de referencia) en
+    cada import ZAFIRO (ver
+    `plantilla.tasks._sincronizar_plazas_nivel_jerarquico`); el nivel
+    jerárquico se asigna después en bloque desde el frontend (`bulk-assign`)
+    y no viene de ninguna fuente automática.
     """
 
     plaza = models.CharField(max_length=255, primary_key=True)

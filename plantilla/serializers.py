@@ -59,5 +59,5 @@ class CatNivelJerarquicoPlazaSerializer(serializers.ModelSerializer):
             "nvl_direc_origen", "modificado_por", "fecha_modificacion",
         ]
         # nivel_jerarquico se deriva de descripcion_nivel_jerarquico en el modelo;
-        # nvl_direc_origen sólo lo escribe la acción sync-plazas.
+        # nvl_direc_origen sólo lo escribe la sincronización automática de ZAFIRO.
         read_only_fields = ["nivel_jerarquico", "nvl_direc_origen", "modificado_por", "fecha_modificacion"]

@@ -118,14 +118,19 @@ urlpatterns = [
         name="cat-nivel-jerarquico-plaza-niveles",
     ),
     path(
-        "cat-nivel-jerarquico-plaza/sync-plazas/",
-        CatNivelJerarquicoPlazaViewSet.as_view({"post": "sync_plazas"}),
-        name="cat-nivel-jerarquico-plaza-sync",
-    ),
-    path(
         "cat-nivel-jerarquico-plaza/bulk-assign/",
         CatNivelJerarquicoPlazaViewSet.as_view({"post": "bulk_assign"}),
         name="cat-nivel-jerarquico-plaza-bulk-assign",
+    ),
+    path(
+        "cat-nivel-jerarquico-plaza/prioridad/",
+        CatNivelJerarquicoPlazaViewSet.as_view({"get": "prioridad"}),
+        name="cat-nivel-jerarquico-plaza-prioridad",
+    ),
+    path(
+        "cat-nivel-jerarquico-plaza/aplicar-prioridad/",
+        CatNivelJerarquicoPlazaViewSet.as_view({"post": "aplicar_prioridad"}),
+        name="cat-nivel-jerarquico-plaza-aplicar-prioridad",
     ),
     path(
         "cat-nivel-jerarquico-plaza/",

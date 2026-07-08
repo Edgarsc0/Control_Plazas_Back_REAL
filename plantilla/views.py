@@ -33,9 +33,11 @@ from .models import (
     EmpleadosCompletosSig,
     MovPos,
     MovPosLatest,
+    NivelJerarquicoPrioridadConfig,
     Plantilla1800Plazas,
     RcCatCodPresupuestal,
 )
+from .nivel_jerarquico_sync import aplicar_prioridad_nivel_jerarquico
 from .serializers import (
     CatAccionesMotivosSerializer,
     CatAccionesSerializer,
@@ -3533,9 +3535,14 @@ class CatNivelJerarquicoPlazaViewSet(AuditedViewSetMixin, viewsets.ModelViewSet)
     """
     CRUD + acciones en bloque del catálogo cat_nivel_jerarquico_plaza.
 
-    - `sync-plazas`: siembra/actualiza filas desde MOV_POS (plazas activas,
-      última captura por `Nº Pos Actual`), sin tocar el nivel jerárquico ya
-      asignado.
+    La siembra/actualización de plazas desde MOV_POS (`nvl_direc_origen`) ya
+    no es una acción manual: corre automáticamente en cada import ZAFIRO (ver
+    `plantilla.tasks._sincronizar_plazas_nivel_jerarquico`), justo antes de
+    reaplicar la prioridad. Se quitó el trigger manual porque dispararlo a
+    mitad de ciclo (con MOV_POS ya sobreescrito por una prioridad
+    `nivel_jerarquico` recién aplicada) contaminaba `nvl_direc_origen` con el
+    propio override, en vez de con el dato original de ZAFIRO.
+
     - `bulk-assign`: asigna una misma descripción de nivel jerárquico (enum)
       a varias plazas seleccionadas desde el frontend.
     """
@@ -3557,36 +3564,6 @@ class CatNivelJerarquicoPlazaViewSet(AuditedViewSetMixin, viewsets.ModelViewSet)
             for value, label in DESCRIPCION_NJ_CHOICES
         ])
 
-    @action(detail=False, methods=["post"], url_path="sync-plazas")
-    def sync_plazas(self, request):
-        latest_ids = MovPosLatest.objects.filter(estado_psn="A").values_list("mov_pos_id", flat=True)
-        activas = list(MovPos.objects.filter(id__in=latest_ids).exclude(
-            no_pos_actual__isnull=True
-        ).values_list("no_pos_actual", "nvl_direc"))
-
-        # bulk_create/bulk_update en vez de loop create()/update() fila por fila:
-        # con ~11k plazas activas el loop individual contra la BD remota tardaba
-        # minutos (un round-trip de red por fila); en bloque son 1-2 queries.
-        existentes = dict(CatNivelJerarquicoPlaza.objects.values_list("plaza", "nvl_direc_origen"))
-        nuevas = [
-            CatNivelJerarquicoPlaza(plaza=plaza, nvl_direc_origen=nvl_direc)
-            for plaza, nvl_direc in activas if plaza not in existentes
-        ]
-        por_actualizar = []
-        for plaza, nvl_direc in activas:
-            if plaza in existentes and existentes[plaza] != nvl_direc:
-                por_actualizar.append(CatNivelJerarquicoPlaza(plaza=plaza, nvl_direc_origen=nvl_direc))
-
-        with transaction.atomic():
-            if nuevas:
-                CatNivelJerarquicoPlaza.objects.bulk_create(nuevas, batch_size=1000, ignore_conflicts=True)
-            if por_actualizar:
-                CatNivelJerarquicoPlaza.objects.bulk_update(por_actualizar, ["nvl_direc_origen"], batch_size=1000)
-
-        return Response({
-            "creadas": len(nuevas), "actualizadas": len(por_actualizar), "total_activas": len(activas),
-        })
-
     @action(detail=False, methods=["post"], url_path="bulk-assign")
     def bulk_assign(self, request):
         plazas = request.data.get("plazas") or []
@@ -3606,6 +3583,37 @@ class CatNivelJerarquicoPlazaViewSet(AuditedViewSetMixin, viewsets.ModelViewSet)
                 obj.save()
                 actualizadas += 1
         return Response({"actualizadas": actualizadas})
+
+    @action(detail=False, methods=["get"], url_path="prioridad")
+    def prioridad(self, request):
+        """Fuente de prioridad configurada actualmente (o null si no se ha fijado)."""
+        config = NivelJerarquicoPrioridadConfig.objects.first()
+        return Response({"fuente": config.fuente if config else None})
+
+    @action(detail=False, methods=["post"], url_path="aplicar-prioridad")
+    def aplicar_prioridad(self, request):
+        """
+        Fija qué columna manda como fuente de verdad del nivel jerárquico
+        ("nivel_jerarquico" o "nvl_direc_origen") y de inmediato cruza
+        cat_nivel_jerarquico_plaza contra MOV_POS y EMPLEADOS_COMPLETOS_SIG,
+        sobreescribiendo sus columnas de nivel jerárquico donde la posición
+        coincida. La misma fuente se reaplica automáticamente en cada import
+        de ZAFIRO (esas dos tablas se truncan y recargan completas cada 30
+        min, ver plantilla.tasks._reaplicar_prioridad_nivel_jerarquico).
+        """
+        fuente = request.data.get("fuente")
+        if fuente not in ("nivel_jerarquico", "nvl_direc_origen"):
+            return Response({"detail": "fuente inválida."}, status=status.HTTP_400_BAD_REQUEST)
+
+        usuario = request.user.username
+        with transaction.atomic():
+            config, _ = NivelJerarquicoPrioridadConfig.objects.get_or_create(pk=1)
+            config.fuente = fuente
+            config.modificado_por = usuario
+            config.save()
+            stats = aplicar_prioridad_nivel_jerarquico(fuente)
+
+        return Response({"fuente": fuente, **stats})
 
 
 class MovimientosPersonalHistorialView(APIView):
@@ -3820,7 +3828,9 @@ class DesgloseJerarquicoView(APIView):
             e.`TIPO DE CONTRATACIÓN`,
             e.`Sindicato`,
             e.`Entidad Federativa`,
-            e.`nombreNJ`
+            e.`nombreNJ`,
+            e.`Id Departamento`,
+            e.`Departamento`
         FROM EMPLEADOS_COMPLETOS_SIG e
         INNER JOIN MOV_POS m
             ON e.`Posición` = m.`Nº Pos Actual`
