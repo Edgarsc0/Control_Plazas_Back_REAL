@@ -3465,6 +3465,90 @@ class OrganigramaDeptoView(APIView):
         ])
 
 
+class OrganigramaTreeView(APIView):
+    """
+    Árbol jerárquico de ORGANIGRAMA_ANAM para una unidad_negocio, con la misma
+    forma que los antiguos JSON estáticos (nodo raíz con `subordinados` anidados).
+    Lógica de parentesco en organigrama_tree.build_tree.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from .organigrama_tree import build_tree
+
+        unidad_negocio = request.GET.get("unidad_negocio", "").strip()
+        if not unidad_negocio:
+            return Response({"error": "Falta el parámetro unidad_negocio"}, status=400)
+
+        sql = """
+            SELECT departamento, descripcion_larga, nivel_direccion, unidad_negocio,
+                   unidad_administrativa, doaf, num_posicion_gerente, posicion_director
+            FROM ORGANIGRAMA_ANAM
+            WHERE unidad_negocio = %s
+        """
+        with connection.cursor() as cursor:
+            cursor.execute(sql, [unidad_negocio])
+            columns = [col[0] for col in cursor.description]
+            rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+        if not rows:
+            return Response({"error": f"Sin datos para unidad_negocio={unidad_negocio}"}, status=404)
+
+        tree = build_tree(rows)
+        return Response(tree)
+
+
+class OrganigramaPosicionInfoView(APIView):
+    """
+    Dado un número de plaza (posición), indica si está activa al día de hoy
+    (según MOV_POS_LATEST, que ya trae la última fila por posición) y, de
+    estarlo, el ocupante actual en EMPLEADOS_COMPLETOS_SIG.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from django.db import connection
+
+        posicion = request.GET.get("posicion", "").strip()
+        if not posicion or posicion in ("(en blanco)",):
+            return Response({"error": "Falta el parámetro posicion"}, status=400)
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT 1 FROM MOV_POS_LATEST WHERE `Nº Pos Actual` = %s AND `Estado Psn` = 'A'",
+                [posicion],
+            )
+            activa = cursor.fetchone() is not None
+
+        if not activa:
+            return Response({"posicion": posicion, "activa": False})
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT `Nombres`, `Numempleado`, `Estado Nómina`
+                FROM EMPLEADOS_COMPLETOS_SIG
+                WHERE `Posición` = %s
+                LIMIT 1
+                """,
+                [posicion],
+            )
+            row = cursor.fetchone()
+
+        if not row or not str(row[2] or "").strip():
+            return Response({"posicion": posicion, "activa": True, "vacante": True})
+
+        nombre, num_empleado, estado_nomina = row
+        return Response({
+            "posicion": posicion,
+            "activa": True,
+            "vacante": False,
+            "nombre": nombre,
+            "num_empleado": num_empleado,
+            "estado_nomina": estado_nomina,
+        })
+
+
 class AuditedViewSetMixin:
     """
     Llena `modificado_por` con el usuario autenticado en cada create/update.
