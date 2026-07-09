@@ -2552,6 +2552,7 @@ def get_mov_pos_alineacion_stats(resultados=None):
         difieren = sum(1 for r in resultados if r[f"match_{key}"] == "Difiere")
         coinciden = total - difieren
         por_campo[key] = {
+            "key": key,
             "label": campo["label"],
             "coinciden": coinciden,
             "difieren": difieren,
@@ -2674,7 +2675,10 @@ class MovPosAlineacionView(APIView):
     incl. ``exclude__``) sobre cualquier columna base o calculada
     (``estado_alineacion``, ``match_<campo>``, ``ocupacion``), ``distinct_field``/
     ``distinct_search``, ``sort_by``/``sort_order``, ``page``/``page_size``,
-    ``no_pagination``.
+    ``no_pagination``. Además ``diff_fields`` (lista separada por comas de
+    keys de ``ALINEACION_CAMPOS``, p.ej. ``id_departamento,dependencia_directa``):
+    conserva solo las plazas que difieren en AL MENOS UNO de esos campos (OR),
+    a diferencia de los filtros de columna normales que son AND entre columnas.
     """
 
     permission_classes = [IsAuthenticated]
@@ -2689,6 +2693,16 @@ class MovPosAlineacionView(APIView):
                 request.query_params.get("search", ""),
                 ["no_pos_actual", "nombre_puesto", "unidad_de_negocio", "depnd_drt", "ubicacion", "ocupante_nombre"],
             )
+
+            diff_fields_param = request.query_params.get("diff_fields", "").strip()
+            if diff_fields_param:
+                campos_validos = {c["key"] for c in ALINEACION_CAMPOS}
+                diff_keys = [k.strip() for k in diff_fields_param.split(",") if k.strip() in campos_validos]
+                if diff_keys:
+                    resultados = [
+                        r for r in resultados
+                        if any(r.get(f"match_{k}") == "Difiere" for k in diff_keys)
+                    ]
 
             distinct_field = request.query_params.get("distinct_field", "").strip()
             if distinct_field:
