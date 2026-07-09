@@ -13,6 +13,7 @@ from .views import (
     EmpleadosCompletosActivosDetalleView,
     EmpleadosEstatusPorNivelUaView,
     EmpleadosDistribucionGeograficaView,
+    MovPosAlineacionView,
     MovPosDetalleView,
     MovPosExportExcelView,
     MovPosHistoriaView,
@@ -270,6 +271,11 @@ urlpatterns = [
         "mov_pos_vacancia_detalle/",
         MovPosVacanciaDetalleView.as_view(),
         name="mov_pos_vacancia_detalle",
+    ),
+    path(
+        "mov_pos_alineacion/",
+        MovPosAlineacionView.as_view(),
+        name="mov_pos_alineacion",
     ),
     path(
         "cadena_mando/",

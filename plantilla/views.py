@@ -33,6 +33,7 @@ from .models import (
     EmpleadosCompletosSig,
     MovPos,
     MovPosLatest,
+    NIVEL_JERARQUICO_LABELS,
     NivelJerarquicoPrioridadConfig,
     Plantilla1800Plazas,
     RcCatCodPresupuestal,
@@ -2337,6 +2338,410 @@ class MovPosVacanciaDetalleView(APIView):
         return Response(
             {**base, "error": f"Categoría de vacancia desconocida: {categoria}"}
         )
+
+
+# ── Comprobar Alineación Organizacional (MOV_POS vs EMPLEADOS_COMPLETOS_SIG) ──
+#
+# 13 pares de columnas que deberían coincidir entre la plaza (MOV_POS, la
+# fila más reciente y activa por posición vía MOV_POS_LATEST) y la persona/
+# ocupante actual (EMPLEADOS_COMPLETOS_SIG, 1 fila por `Posición`, siempre
+# presente aunque la plaza esté vacante). Ver ALINEACIÓN_PLAZA_PERSONA.
+ALINEACION_CAMPOS = [
+    {"key": "cd_un", "label": "Código Unidad de Negocio", "mov_field": "cd_un", "emp_field": "cd_un", "prefijo2": False},
+    {"key": "cd_ua", "label": "Código Unidad Administrativa", "mov_field": "unidad_adva", "emp_field": "cd_ua", "prefijo2": False},
+    {"key": "nivel_jerarquico", "label": "Nivel Jerárquico", "mov_field": "nvl_direc", "emp_field": "nj", "prefijo2": False},
+    {"key": "id_departamento", "label": "Id Departamento", "mov_field": "cd_departamento", "emp_field": "id_departamento", "prefijo2": False},
+    {"key": "cd_pto_funcional", "label": "Código Puesto Funcional", "mov_field": "cd_puesto", "emp_field": "cd_pto_funcional", "prefijo2": False},
+    {"key": "nombre_pto_funcional", "label": "Nombre Puesto Funcional", "mov_field": "nombre_puesto", "emp_field": "nombre_puesto_funcional", "prefijo2": False},
+    {"key": "codigo_presupuestal", "label": "Código Presupuestal", "mov_field": "puesto_ptal", "emp_field": "codigo_presupuestal", "prefijo2": False},
+    {"key": "escala", "label": "Escala", "mov_field": "esc", "emp_field": "escala", "prefijo2": False},
+    {"key": "grado", "label": "Grado", "mov_field": "grado", "emp_field": "nivel", "prefijo2": True},
+    {"key": "partida", "label": "Partida", "mov_field": "partida_ptal", "emp_field": "partida", "prefijo2": False},
+    {"key": "tipo_contratacion", "label": "Tipo de Contratación", "mov_field": "gp_trabajo", "emp_field": "tipo_de_contratacion", "prefijo2": False},
+    {"key": "dependencia_directa", "label": "Dependencia Directa", "mov_field": "depnd_drt", "emp_field": "dependencia_directa", "prefijo2": False},
+    {"key": "ubicacion", "label": "Ubicación", "mov_field": "ubicacion", "emp_field": "ubicacion", "prefijo2": False},
+]
+
+ALINEACION_DATASET_CACHE_KEY = "mov_pos_alineacion_dataset"
+ALINEACION_STATS_CACHE_KEY = "mov_pos_alineacion_stats"
+ALINEACION_CACHE_TTL = 600  # 10 minutos, igual que el resto de caches de Mov Pos
+
+
+def _alineacion_normalizar(valor, prefijo2=False):
+    """Trim + upper case antes de comparar (evita falsos "difiere" por
+    espacios extra o mayúsculas/minúsculas; ambas tablas ya tienen ese
+    problema conocido, de ahí los índices funcionales Trim(...))."""
+    s = "" if valor is None else str(valor).strip().upper()
+    return s[:2] if prefijo2 else s
+
+
+# Campos de ALINEACION_CAMPOS que sí tienen un catálogo de descripción legible
+# detrás del código (ver tooltip en frontend AlineacionOrganizacionalTab). Los
+# demás (escala, grado, partida, etc.) son códigos sin catálogo asociado.
+TOOLTIP_ALINEACION_CAMPOS = {"cd_un", "cd_ua", "nivel_jerarquico", "id_departamento"}
+
+
+def _cargar_catalogos_alineacion():
+    """Catálogos código→nombre para las tooltips de alineación. `ua_unidadadministrativa`
+    y `ORGANIGRAMA_ANAM` no tienen modelo Django (mismo patrón raw SQL que
+    OrganigramaDeptoView / DesgloseJerarquicoView)."""
+    from django.db import connection
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT codigo, nombre FROM ua_unidadadministrativa")
+        ua_lookup = {(row[0] or "").strip().upper(): row[1] for row in cursor.fetchall()}
+        cursor.execute("SELECT departamento, descripcion_larga FROM ORGANIGRAMA_ANAM")
+        depto_lookup = {(row[0] or "").strip().upper(): row[1] for row in cursor.fetchall()}
+    return {"ua": ua_lookup, "depto": depto_lookup}
+
+
+def _nombre_nivel_jerarquico(codigo):
+    s = (codigo or "").strip()
+    if not s:
+        return None
+    try:
+        return NIVEL_JERARQUICO_LABELS[int(s)]["nombre_nj"]
+    except (ValueError, KeyError):
+        return None
+
+
+def _resolver_nombres_tooltip(key, mov_row, emp_row, catalogos):
+    """(nombre_mov, nombre_emp) legibles para un campo con catálogo. `emp_row`
+    ya viene resuelto a dict vacío si la plaza está vacante."""
+    if key == "cd_un":
+        return mov_row.get("unidad_de_negocio"), emp_row.get("unidad_de_negocio")
+    if key == "cd_ua":
+        mov_nombre = catalogos["ua"].get((mov_row.get("unidad_adva") or "").strip().upper())
+        return mov_nombre, emp_row.get("unidad_administrativa")
+    if key == "nivel_jerarquico":
+        return _nombre_nivel_jerarquico(mov_row.get("nvl_direc")), _nombre_nivel_jerarquico(emp_row.get("nj"))
+    if key == "id_departamento":
+        mov_nombre = catalogos["depto"].get((mov_row.get("cd_departamento") or "").strip().upper())
+        return mov_nombre, emp_row.get("departamento")
+    return None, None
+
+
+def _comparar_alineacion_plaza(mov_row, emp_row, catalogos=None):
+    detalle = {}
+    coincidentes = 0
+    diferentes = []
+    emp_row_dict = emp_row or {}
+    for campo in ALINEACION_CAMPOS:
+        key = campo["key"]
+        mov_valor = mov_row.get(campo["mov_field"])
+        emp_valor = emp_row.get(campo["emp_field"]) if emp_row else None
+        mov_norm = _alineacion_normalizar(mov_valor, campo["prefijo2"])
+        emp_norm = _alineacion_normalizar(emp_valor, campo["prefijo2"])
+        coincide = mov_norm == emp_norm
+        if coincide:
+            coincidentes += 1
+        else:
+            diferentes.append(key)
+        detalle[key] = {
+            "label": campo["label"],
+            "mov_pos_valor": mov_valor if mov_valor not in (None, "") else "(vacío)",
+            "empleados_sig_valor": emp_valor if emp_valor not in (None, "") else "(vacío)",
+            "coincide": coincide,
+            "ambos_vacios": mov_norm == "" and emp_norm == "",
+        }
+        if catalogos and key in TOOLTIP_ALINEACION_CAMPOS:
+            mov_nombre, emp_nombre = _resolver_nombres_tooltip(key, mov_row, emp_row_dict, catalogos)
+            detalle[key]["mov_pos_nombre"] = mov_nombre or None
+            detalle[key]["empleados_sig_nombre"] = emp_nombre or None
+    total = len(ALINEACION_CAMPOS)
+    return {
+        "detalle": detalle,
+        "campos_coincidentes": coincidentes,
+        "campos_totales": total,
+        "campos_diferentes": diferentes,
+        "porcentaje_alineacion": round((coincidentes / total) * 100, 1) if total else 0.0,
+        "es_alineada": coincidentes == total,
+    }
+
+
+def _construir_dataset_alineacion():
+    """Cruce completo MOV_POS (activas/latest) x EMPLEADOS_COMPLETOS_SIG.
+    Todo en memoria (~11.4k filas, mismo volumen que ya carga sin paginar
+    la rama `is_latest=true` de MovPosDetalleView): 2 queries + comparación
+    Python, cacheado 10 min."""
+    cached = cache.get(ALINEACION_DATASET_CACHE_KEY)
+    if cached is not None:
+        return cached
+
+    active_ids = list(
+        MovPosLatest.objects.filter(estado_psn="A").values_list("mov_pos_id", flat=True)
+    )
+
+    mov_fields = [
+        "id", "no_pos_actual", "nombre_puesto", "estado_psn",
+        "unidad_de_negocio", "cd_un", "unidad_adva", "nvl_direc",
+        "cd_departamento", "cd_puesto", "puesto_ptal", "esc", "grado",
+        "partida_ptal", "gp_trabajo", "depnd_drt", "ubicacion",
+    ]
+    mov_rows = list(MovPos.objects.filter(id__in=active_ids).values(*mov_fields))
+
+    posiciones = [r["no_pos_actual"] for r in mov_rows if r["no_pos_actual"]]
+    emp_fields = [
+        "posicion", "id_empleado", "nombres",
+        "unidad_de_negocio", "cd_un", "cd_ua", "unidad_administrativa", "nj",
+        "id_departamento", "departamento",
+        "cd_pto_funcional", "nombre_puesto_funcional", "codigo_presupuestal",
+        "escala", "nivel", "partida", "tipo_de_contratacion",
+        "dependencia_directa", "ubicacion",
+    ]
+    emp_by_pos = {
+        row["posicion"]: row
+        for row in EmpleadosCompletosSig.objects.filter(posicion__in=posiciones).values(*emp_fields)
+    }
+    catalogos = _cargar_catalogos_alineacion()
+
+    resultados = []
+    for mov_row in mov_rows:
+        pos = mov_row["no_pos_actual"]
+        emp_row = emp_by_pos.get(pos)
+        id_emp = (emp_row.get("id_empleado") or "").strip() if emp_row else ""
+        nombres = (emp_row.get("nombres") or "").strip() if emp_row else ""
+        es_vacante = not (id_emp or nombres)
+
+        comparacion = _comparar_alineacion_plaza(mov_row, emp_row, catalogos)
+
+        fila = dict(mov_row)
+        fila["ocupante_id"] = id_emp
+        fila["ocupante_nombre"] = nombres
+        fila["ocupacion"] = "Vacante" if es_vacante else "Ocupada"
+        fila["campos_coincidentes"] = comparacion["campos_coincidentes"]
+        fila["campos_totales"] = comparacion["campos_totales"]
+        fila["num_diferencias"] = comparacion["campos_totales"] - comparacion["campos_coincidentes"]
+        fila["porcentaje_alineacion"] = comparacion["porcentaje_alineacion"]
+        fila["estado_alineacion"] = "Alineada" if comparacion["es_alineada"] else "Con Diferencias"
+        fila["campos_diferentes"] = comparacion["campos_diferentes"]
+        fila["alineacion_detalle"] = comparacion["detalle"]
+        for campo in ALINEACION_CAMPOS:
+            det = comparacion["detalle"][campo["key"]]
+            fila[f"match_{campo['key']}"] = "Coincide" if det["coincide"] else "Difiere"
+            # Valores crudos aplanados (columnas separadas MOV_POS / EMPLEADOS_COMPLETOS_SIG
+            # en el frontend) para que el filtro/orden genérico de columna funcione
+            # también sobre ellos, igual que sobre match_<campo>.
+            fila[f"mov_{campo['key']}"] = det["mov_pos_valor"]
+            fila[f"emp_{campo['key']}"] = det["empleados_sig_valor"]
+        resultados.append(fila)
+
+    cache.set(ALINEACION_DATASET_CACHE_KEY, resultados, ALINEACION_CACHE_TTL)
+    return resultados
+
+
+def get_mov_pos_alineacion_stats(resultados=None):
+    stats = cache.get(ALINEACION_STATS_CACHE_KEY)
+    if stats is not None:
+        return stats
+    if resultados is None:
+        resultados = _construir_dataset_alineacion()
+
+    total = len(resultados)
+    alineadas = sum(1 for r in resultados if r["estado_alineacion"] == "Alineada")
+    vacantes = sum(1 for r in resultados if r["ocupacion"] == "Vacante")
+    con_diferencias_vacantes = sum(
+        1 for r in resultados if r["estado_alineacion"] != "Alineada" and r["ocupacion"] == "Vacante"
+    )
+    con_diferencias_ocupadas = sum(
+        1 for r in resultados if r["estado_alineacion"] != "Alineada" and r["ocupacion"] != "Vacante"
+    )
+
+    por_campo = {}
+    for campo in ALINEACION_CAMPOS:
+        key = campo["key"]
+        difieren = sum(1 for r in resultados if r[f"match_{key}"] == "Difiere")
+        coinciden = total - difieren
+        por_campo[key] = {
+            "label": campo["label"],
+            "coinciden": coinciden,
+            "difieren": difieren,
+            "porcentaje_coincidencia": round((coinciden / total) * 100, 1) if total else 0.0,
+        }
+
+    stats = {
+        "total_activas": total,
+        "total_alineadas": alineadas,
+        "total_con_diferencias": total - alineadas,
+        "con_diferencias_ocupadas": con_diferencias_ocupadas,
+        "con_diferencias_vacantes": con_diferencias_vacantes,
+        "total_vacantes": vacantes,
+        "total_ocupadas": total - vacantes,
+        "porcentaje_alineacion_general": round((alineadas / total) * 100, 1) if total else 0.0,
+        "por_campo": por_campo,
+    }
+    cache.set(ALINEACION_STATS_CACHE_KEY, stats, ALINEACION_CACHE_TTL)
+    return stats
+
+
+def _alineacion_valor_o_vacio(v):
+    return "" if v is None else str(v)
+
+
+def _alineacion_texto_coincide(hay, condicion, needle):
+    s = _alineacion_valor_o_vacio(hay).strip().lower()
+    n = (needle or "").strip().lower()
+    if condicion == "istartswith":
+        return s.startswith(n)
+    if condicion == "iendswith":
+        return s.endswith(n)
+    if condicion == "iexact":
+        return s == n
+    return n in s  # icontains / default
+
+
+def apply_dynamic_column_filters_dict(resultados, request):
+    """Equivalente a `apply_dynamic_column_filters` pero sobre una lista de
+    dicts en memoria en vez de un queryset (necesario porque las columnas de
+    alineación -match_<campo>/estado_alineacion- no son campos reales de
+    ningún modelo). Soporta el mismo contrato que ya consume el frontend:
+    ``?campo=v1,v2`` (__in), sufijos __icontains/__istartswith/__iendswith/
+    __iexact, negación ``exclude__campo=...`` y el sentinel de "(Vacío)"."""
+    if not resultados:
+        return resultados
+    campos_validos = resultados[0].keys()
+
+    for param, val in request.query_params.items():
+        if param in FILTER_SKIP_PARAMS or not val:
+            continue
+        is_exclude = param.startswith("exclude__")
+        actual_param = param[9:] if is_exclude else param
+        field, _, suffix = actual_param.partition("__")
+        if field not in campos_validos:
+            continue
+
+        val_list = [
+            "" if v.strip() == EMPTY_VALUE_TOKEN else v.strip()
+            for v in val.split(",") if v.strip()
+        ]
+        if not val_list:
+            continue
+
+        if suffix in ("icontains", "istartswith", "iendswith", "iexact"):
+            needle = val_list[0]
+            keep = lambda row: _alineacion_texto_coincide(row.get(field), suffix, needle)
+        elif suffix == "in" or len(val_list) > 1:
+            selected = set(val_list)
+            keep = lambda row: _alineacion_valor_o_vacio(row.get(field)).strip() in selected
+        else:
+            needle = val_list[0]
+            keep = lambda row: _alineacion_valor_o_vacio(row.get(field)).strip() == needle
+
+        resultados = [r for r in resultados if not keep(r)] if is_exclude else [r for r in resultados if keep(r)]
+
+    return resultados
+
+
+def apply_text_search_dict(resultados, query, fields):
+    query = (query or "").strip().lower()
+    if not query:
+        return resultados
+    return [
+        r for r in resultados
+        if any(query in _alineacion_valor_o_vacio(r.get(f)).lower() for f in fields)
+    ]
+
+
+def apply_distinct_field_dict(resultados, field, search=""):
+    search = (search or "").strip().lower()
+    counts = {}
+    for r in resultados:
+        val = r.get(field)
+        val = "" if val is None else val
+        if search and search not in str(val).lower():
+            continue
+        counts[val] = counts.get(val, 0) + 1
+    def _orden(kv):
+        v = kv[0]
+        return (0, v) if isinstance(v, (int, float)) else (1, str(v))
+
+    return [
+        {"value": v, "count": c}
+        for v, c in sorted(counts.items(), key=_orden)
+    ]
+
+
+class MovPosAlineacionView(APIView):
+    """
+    Comprobar Alineación Organizacional: cruza cada plaza activa de MOV_POS
+    (vía MOV_POS_LATEST) con su fila correspondiente en EMPLEADOS_COMPLETOS_SIG
+    (join por no_pos_actual = Posición) y compara los 13 campos que deberían
+    coincidir entre ambas tablas (ver ALINEACIÓN_PLAZA_PERSONA). Devuelve, por
+    plaza, el detalle campo a campo (valor en cada tabla + si coincide) y
+    agregados globales (% de alineación general y por columna).
+
+    Filtros soportados (mismo contrato que el resto de tablas de Mov. Posiciones):
+    ``search``, filtros de columna (``campo=v1,v2``, ``__icontains``, etc.,
+    incl. ``exclude__``) sobre cualquier columna base o calculada
+    (``estado_alineacion``, ``match_<campo>``, ``ocupacion``), ``distinct_field``/
+    ``distinct_search``, ``sort_by``/``sort_order``, ``page``/``page_size``,
+    ``no_pagination``.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        try:
+            dataset = _construir_dataset_alineacion()
+            stats = get_mov_pos_alineacion_stats(dataset)
+
+            resultados = apply_text_search_dict(
+                dataset,
+                request.query_params.get("search", ""),
+                ["no_pos_actual", "nombre_puesto", "unidad_de_negocio", "depnd_drt", "ubicacion", "ocupante_nombre"],
+            )
+
+            distinct_field = request.query_params.get("distinct_field", "").strip()
+            if distinct_field:
+                return Response(
+                    apply_distinct_field_dict(
+                        resultados, distinct_field, request.query_params.get("distinct_search", "")
+                    )
+                )
+
+            resultados = apply_dynamic_column_filters_dict(resultados, request)
+
+            sort_by = request.query_params.get("sort_by", "").strip()
+            sort_order = request.query_params.get("sort_order", "asc").strip().lower()
+            if sort_by:
+                sort_fields = [f.strip() for f in sort_by.split(",") if f.strip()]
+                resultados = sorted(
+                    resultados,
+                    key=lambda row: tuple(_alineacion_valor_o_vacio(row.get(f)).lower() for f in sort_fields),
+                    reverse=(sort_order == "desc"),
+                )
+            else:
+                resultados = sorted(resultados, key=lambda r: _alineacion_valor_o_vacio(r.get("no_pos_actual")))
+
+            count = len(resultados)
+
+            no_pagination = request.query_params.get("no_pagination", "false").strip().lower() == "true"
+            if no_pagination:
+                return Response({"count": count, "next": None, "previous": None, "results": resultados, "stats": stats})
+
+            try:
+                page = max(1, int(request.query_params.get("page", 1)))
+            except (TypeError, ValueError):
+                page = 1
+            try:
+                page_size = max(1, min(int(request.query_params.get("page_size", 50)), 10000))
+            except (TypeError, ValueError):
+                page_size = 50
+
+            start = (page - 1) * page_size
+            return Response(
+                {
+                    "count": count,
+                    "next": page * page_size < count,
+                    "previous": page > 1,
+                    "results": resultados[start:start + page_size],
+                    "stats": stats,
+                }
+            )
+        except Exception:
+            logger.exception("Error inesperado en {}".format(request.path))
+            return Response(
+                {"error": "Error interno del servidor"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 
 class MovPosExportExcelView(APIView):
