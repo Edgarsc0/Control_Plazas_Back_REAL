@@ -88,6 +88,21 @@ class ValuacionPresupuestariaPorNivelViewSet(viewsets.ModelViewSet):
 class CatalogoPlazasViewSet(viewsets.ModelViewSet):
     queryset = CatalogoPlazas.objects.all()
     serializer_class = CatalogoPlazasSerializer
+    # El listado (GET) lo consume tanto el tab "Parámetros" como el Simulador
+    # (busca/selecciona plazas de este mismo catálogo) — cualquiera de los 2
+    # permisos basta para leer. Escribir (editar el catálogo) sí exige
+    # específicamente Parámetros. Las 3 @action de abajo las usan Simulador y
+    # Asuntos de Plazas con permiso distinto — de ahí action_permissions.
+    view_permission = (
+        "authentication.view_valuacion_presupuestaria",
+        "authentication.edit_valuacion_parametros",
+    )
+    edit_permission = "authentication.edit_valuacion_parametros"
+    action_permissions = {
+        "calcular": "authentication.view_valuacion_presupuestaria",
+        "eventuales_ocupadas": "authentication.view_valuacion_presupuestaria",
+        "permanentes_ocupadas": "authentication.view_valuacion_presupuestaria",
+    }
 
     @action(detail=False, methods=['get'])
     def eventuales_ocupadas(self, request):
@@ -323,8 +338,10 @@ class CatalogoPlazasViewSet(viewsets.ModelViewSet):
 class ConstantesSistemaViewSet(viewsets.ModelViewSet):
     queryset = ConstantesSistema.objects.all()
     serializer_class = ConstantesSistemaSerializer
+    view_permission = "authentication.edit_valuacion_parametros"
 
 
 class ConceptosPresupuestalViewSet(viewsets.ModelViewSet):
     queryset = ConceptosPresupuestal.objects.all()
     serializer_class = ConceptosPresupuestalSerializer
+    view_permission = "authentication.edit_valuacion_parametros"

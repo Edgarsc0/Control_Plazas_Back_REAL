@@ -22,6 +22,48 @@ class Whitelist(models.Model):
         return f"{self.email} - {self.rol.name}"
 
 
+class ModulePermission(models.Model):
+    # Sin tabla real (managed=False): existe solo para que Django registre estos
+    # codenames en auth_permission via el signal post_migrate, sin migrar datos reales.
+    class Meta:
+        managed = False
+        default_permissions = ()
+        permissions = [
+            # Plantilla de Empleados — un permiso por tab (datos con distinta
+            # sensibilidad: bajas/nómina no deberían verlos los mismos roles
+            # que ven el detalle general).
+            ("view_plantilla_detalle", "Plantilla de Empleados: ver tab Detalle"),
+            ("view_plantilla_estatus_nomina", "Plantilla de Empleados: ver tab Estatus Nómina"),
+            ("view_plantilla_mov_posiciones", "Plantilla de Empleados: ver tab Mov. Posiciones"),
+            ("view_plantilla_movimientos", "Plantilla de Empleados: ver tab Movimientos"),
+            ("view_plantilla_bajas", "Plantilla de Empleados: ver tab Empleados Bajas"),
+            ("view_plantilla_geografia", "Plantilla de Empleados: ver tab Distribución Geográfica"),
+            ("view_plantilla_catalogos", "Plantilla de Empleados: ver tab Catálogos"),
+            # Ocupación de Plazas por Oficio
+            ("view_ocupacion_sankey", "Ocupación de Plazas: ver tab Sankey"),
+            ("view_ocupacion_tabla", "Ocupación de Plazas: ver tab Tabla"),
+            ("view_ocupacion_estadisticas", "Ocupación de Plazas: ver tab Estadísticas"),
+            ("edit_ocupacion_plazas", "Ocupación de Plazas: editar asignación de plazas"),
+            # Valuación Presupuestaria
+            ("view_valuacion_presupuestaria", "Valuación Presupuestaria: ver Simulador y Asuntos"),
+            ("edit_valuacion_parametros", "Valuación Presupuestaria: editar Parámetros (catálogo/conceptos/constantes)"),
+            # Resto de módulos (sin tabs)
+            ("view_oficios_turnados", "Puede ver Oficios Turnados DO"),
+            ("view_organigrama", "Puede ver Organigrama ANAM"),
+            ("view_monitoreo_zafiro", "Puede ver Monitoreo ZAFIRO"),
+            # Administración del propio sistema de roles
+            ("manage_roles", "Puede administrar roles y permisos"),
+            ("manage_usuarios", "Puede administrar usuarios (whitelist)"),
+        ]
+
+    @classmethod
+    def catalog_queryset(cls):
+        from django.contrib.auth.models import Permission
+        from django.contrib.contenttypes.models import ContentType
+
+        return Permission.objects.filter(content_type=ContentType.objects.get_for_model(cls))
+
+
 class VerificationCode(models.Model):
     email = models.EmailField()
     code = models.CharField(max_length=6)

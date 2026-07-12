@@ -5,6 +5,7 @@ from .models import (
     CatNivelJerarquicoPlaza,
     CatPtoFunc,
     CpTblMovCompleto290526,
+    OrganigramaAnam,
     RcCatCodPresupuestal,
 )
 
@@ -48,6 +49,13 @@ class RcCatCodPresupuestalSerializer(serializers.ModelSerializer):
             "codigo_presupuestal", "escala", "nivel", "smb", "smn",
             "nivel_jerarquico", "modificado_por", "fecha_modificacion",
         ]
+        read_only_fields = ["modificado_por", "fecha_modificacion"]
+
+
+class OrganigramaAnamSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = OrganigramaAnam
+        fields = "__all__"
         read_only_fields = ["modificado_por", "fecha_modificacion"]
 
 

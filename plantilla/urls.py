@@ -40,6 +40,7 @@ from .views import (
     CatAccionesMotivosViewSet,
     CatNivelJerarquicoPlazaViewSet,
     CatPtoFuncViewSet,
+    OrganigramaAnamViewSet,
     RcCatCodPresupuestalViewSet,
     CuadroVacanciaView,
     DesgloseJerarquicoView,
@@ -124,6 +125,18 @@ urlpatterns = [
             {"put": "update", "patch": "partial_update", "delete": "destroy"}
         ),
         name="cat-cod-presupuestal-detail",
+    ),
+    path(
+        "cat-organigrama-anam/",
+        OrganigramaAnamViewSet.as_view({"get": "list", "post": "create"}),
+        name="cat-organigrama-anam",
+    ),
+    path(
+        "cat-organigrama-anam/<str:pk>/",
+        OrganigramaAnamViewSet.as_view(
+            {"put": "update", "patch": "partial_update", "delete": "destroy"}
+        ),
+        name="cat-organigrama-anam-detail",
     ),
     path(
         "cat-nivel-jerarquico-plaza/niveles/",

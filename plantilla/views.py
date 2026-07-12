@@ -35,6 +35,7 @@ from .models import (
     MovPosLatest,
     NIVEL_JERARQUICO_LABELS,
     NivelJerarquicoPrioridadConfig,
+    OrganigramaAnam,
     Plantilla1800Plazas,
     RcCatCodPresupuestal,
 )
@@ -44,6 +45,7 @@ from .serializers import (
     CatAccionesSerializer,
     CatNivelJerarquicoPlazaSerializer,
     CatPtoFuncSerializer,
+    OrganigramaAnamSerializer,
     RcCatCodPresupuestalSerializer,
 )
 
@@ -922,7 +924,7 @@ class PlantillaVacantesPorNivelResumenView(APIView):
 
 
 class EmpleadosCompletosEstatusNominaResumenView(APIView):
-    permission_classes = [IsAuthenticated]
+    view_permission = "authentication.view_plantilla_detalle"
 
     def get(self, request, *args, **kwargs):
         cache_key = "empleados_completos_estatus_resumen"
@@ -983,7 +985,13 @@ class EmpleadosCompletosEstatusNominaResumenView(APIView):
 
 
 class EmpleadosCompletosActivosDetalleView(APIView):
-    permission_classes = [IsAuthenticated]
+    # Dataset base compartido por 3 tabs (Detalle/Estatus/Mov. Posiciones cruzan
+    # contra `detalle`) — cualquiera de los 3 permisos basta, no solo Detalle.
+    view_permission = (
+        "authentication.view_plantilla_detalle",
+        "authentication.view_plantilla_estatus_nomina",
+        "authentication.view_plantilla_mov_posiciones",
+    )
 
     def get(self, request, *args, **kwargs):
         oficio = request.query_params.get("oficio")
@@ -1056,6 +1064,8 @@ class EmpleadosPorNivelYEstatusView(APIView):
     Query params: nivel, estado_nomina
     Ejemplo: /api/empleados/?nivel=C1&estado_nomina=Activo
     """
+
+    view_permission = "authentication.view_plantilla_estatus_nomina"
 
     def get(self, request):
         nivel = request.query_params.get("nivel")
@@ -1137,7 +1147,12 @@ class OcupacionPorOficiosResumenView(APIView):
     }
     """
 
-    permission_classes = [IsAuthenticated]
+    # Alimenta las 3 tabs de Ocupación (Sankey/Tabla/Estadísticas) con el mismo dato.
+    view_permission = (
+        "authentication.view_ocupacion_sankey",
+        "authentication.view_ocupacion_tabla",
+        "authentication.view_ocupacion_estadisticas",
+    )
 
     @staticmethod
     def obtener_resumen_dinamico():
@@ -1401,7 +1416,7 @@ class Plantilla1800PlazasListView(APIView):
     Vista para listar y actualizar registros de la plantilla de 1800 plazas.
     """
 
-    permission_classes = [IsAuthenticated]
+    view_permission = "authentication.edit_ocupacion_plazas"
 
     CACHE_KEY = "plantilla_1800_list_json"
 
@@ -1495,7 +1510,7 @@ class EmpleadosEstatusPorNivelUaView(APIView):
     de los empleados correspondientes a las posiciones activas.
     """
 
-    permission_classes = [IsAuthenticated]
+    view_permission = "authentication.view_plantilla_estatus_nomina"
 
     def get(self, request, *args, **kwargs):
         cache_key = "empleados_estatus_por_nivel_ua"
@@ -1556,7 +1571,7 @@ class EmpleadosDistribucionGeograficaView(APIView):
     Retorna la distribución geográfica agrupada por coordenadas para los empleados activos.
     """
 
-    permission_classes = [IsAuthenticated]
+    view_permission = "authentication.view_plantilla_geografia"
 
     def get(self, request, *args, **kwargs):
         cache_key = "empleados_distribucion_geografica"
@@ -1711,7 +1726,7 @@ class MovPosPagination(PageNumberPagination):
 
 
 class MovPosDetalleView(APIView):
-    permission_classes = [IsAuthenticated]
+    view_permission = "authentication.view_plantilla_mov_posiciones"
     pagination_class = MovPosPagination
 
     def get(self, request, *args, **kwargs):
@@ -2180,7 +2195,7 @@ class MovPosDetalleView(APIView):
 
 
 class MovPosHistoriaView(APIView):
-    permission_classes = [IsAuthenticated]
+    view_permission = "authentication.view_plantilla_mov_posiciones"
 
     def get(self, request, *args, **kwargs):
         posicion = request.query_params.get("posicion")
@@ -2222,7 +2237,7 @@ class MovPosVacanciaDetalleView(APIView):
     que se muestra la fecha de vacancia, NO el idRegistroDesicivo).
     """
 
-    permission_classes = [IsAuthenticated]
+    view_permission = "authentication.view_plantilla_mov_posiciones"
 
     def get(self, request, *args, **kwargs):
         from .models import CpTblMovCompleto290526
@@ -2681,7 +2696,7 @@ class MovPosAlineacionView(APIView):
     a diferencia de los filtros de columna normales que son AND entre columnas.
     """
 
-    permission_classes = [IsAuthenticated]
+    view_permission = "authentication.view_plantilla_mov_posiciones"
 
     def get(self, request, *args, **kwargs):
         try:
@@ -3338,7 +3353,7 @@ class BajasSigListView(APIView):
     Endpoint para obtener todos los registros de bajas sin paginación.
     """
 
-    permission_classes = [IsAuthenticated]
+    view_permission = "authentication.view_plantilla_bajas"
 
     def get(self, request):
         oficio = request.query_params.get("oficio")
@@ -3392,7 +3407,7 @@ class BajasMotivosPieView(APIView):
     Respuesta: [{"motivo": "...", "total": N}, ...] ordenado por total descendente.
     """
 
-    permission_classes = [IsAuthenticated]
+    view_permission = "authentication.view_plantilla_bajas"
 
     def get(self, request):
         cache_key = "bajas_motivos_pie"
@@ -3420,7 +3435,7 @@ class BajasHistoricoView(APIView):
     Agrupado por día (el registro más reciente de cada día donde registros_bajas > 0).
     """
 
-    permission_classes = [IsAuthenticated]
+    view_permission = "authentication.view_plantilla_bajas"
 
     def get(self, request):
         cache_key = "bajas_historico"
@@ -3866,7 +3881,7 @@ class OrganigramaDeptoView(APIView):
     Catálogo departamento→descripcion_larga/nivel_direccion de ORGANIGRAMA_ANAM.
     Respuesta: [{"departamento": "00100000000", "descripcion_larga": "...", "nivel_direccion": "..."}, ...]
     """
-    permission_classes = [IsAuthenticated]
+    view_permission = "authentication.view_plantilla_catalogos"
 
     def get(self, request):
         from django.db import connection
@@ -3991,6 +4006,7 @@ class CatAccionesViewSet(AuditedViewSetMixin, viewsets.ModelViewSet):
     """
     queryset = CatAcciones.objects.all()
     serializer_class = CatAccionesSerializer
+    view_permission = "authentication.view_plantilla_catalogos"
 
 
 class CatAccionesMotivosViewSet(AuditedViewSetMixin, viewsets.ModelViewSet):
@@ -3999,6 +4015,7 @@ class CatAccionesMotivosViewSet(AuditedViewSetMixin, viewsets.ModelViewSet):
     """
     queryset = CatAccionesMotivos.objects.all()
     serializer_class = CatAccionesMotivosSerializer
+    view_permission = "authentication.view_plantilla_catalogos"
 
 
 class CatPtoFuncViewSet(AuditedViewSetMixin, viewsets.ModelViewSet):
@@ -4032,6 +4049,17 @@ class RcCatCodPresupuestalViewSet(AuditedViewSetMixin, viewsets.ModelViewSet):
         )
         self.check_object_permissions(self.request, obj)
         return obj
+
+
+class OrganigramaAnamViewSet(AuditedViewSetMixin, viewsets.ModelViewSet):
+    """
+    CRUD del catálogo ORGANIGRAMA_ANAM (unidad_negocio/departamento →
+    descripción, nivel de dirección, DOAF, posiciones de gerente/director),
+    usado por organigrama_tree.build_tree y las vistas de búsqueda de
+    organigrama.
+    """
+    queryset = OrganigramaAnam.objects.all()
+    serializer_class = OrganigramaAnamSerializer
 
 
 class CatNivelJerarquicoPlazaViewSet(AuditedViewSetMixin, viewsets.ModelViewSet):
@@ -4129,7 +4157,7 @@ class MovimientosPersonalHistorialView(APIView):
     (evita el límite de longitud de URL de un GET). Se mantiene ?num_empleado__in=
     por compatibilidad con clientes existentes.
     """
-    permission_classes = [IsAuthenticated]
+    view_permission = "authentication.view_plantilla_movimientos"
 
     def get(self, request):
         raw_param = request.query_params.get("num_empleado__in", "").strip()

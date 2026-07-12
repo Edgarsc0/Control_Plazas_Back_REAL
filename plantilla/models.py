@@ -965,6 +965,35 @@ class RcCatCodPresupuestal(models.Model):
         return f"{self.codigo_presupuestal} - {self.escala}"
 
 
+class OrganigramaAnam(models.Model):
+    """
+    Catálogo de estructura organizacional (unidad_negocio/departamento →
+    descripción, nivel de dirección, DOAF, posiciones de gerente/director).
+    Adoptada vía SeparateDatabaseAndState (tabla ya existente en producción,
+    poblada por el pipeline ZAFIRO). Usada por organigrama_tree.build_tree y
+    las vistas de búsqueda de organigrama en views.py.
+    """
+
+    departamento = models.CharField(primary_key=True, max_length=255)
+    unidad_negocio = models.CharField(max_length=255)
+    estado_fecha_efectiva = models.CharField(max_length=255)
+    descripcion_larga = models.CharField(max_length=500)
+    nivel_direccion = models.CharField(max_length=255, blank=True, null=True)
+    unidad_administrativa = models.CharField(max_length=255)
+    doaf = models.CharField(max_length=255)
+    num_posicion_gerente = models.CharField(max_length=255)
+    posicion_director = models.CharField(max_length=255)
+    modificado_por = models.CharField(max_length=255, blank=True, null=True)
+    fecha_modificacion = models.DateTimeField(blank=True, null=True, auto_now=True)
+
+    class Meta:
+        managed = True
+        db_table = "ORGANIGRAMA_ANAM"
+
+    def __str__(self):
+        return f"{self.departamento} - {self.descripcion_larga}"
+
+
 # Enum de negocio (NJ, Descripción). Nivel 3 tiene 2 descripciones válidas
 # ("Director" / "Titular de Aduana"), por eso la descripción -no el nivel- es
 # la clave única del enum: `nivel_jerarquico` se deriva de ella en save().

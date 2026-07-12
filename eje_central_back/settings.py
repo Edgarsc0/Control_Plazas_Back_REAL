@@ -203,6 +203,9 @@ REST_FRAMEWORK = {
     # AllowAny explícitamente (p. ej. los endpoints de login).
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.IsAuthenticated",
+        # No-op en vistas sin view_permission/edit_permission declarado — permite
+        # retrofitear permisos por módulo de forma incremental sin romper nada.
+        "authentication.permissions.HasModulePermission",
     ],
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "rest_framework.authentication.SessionAuthentication",

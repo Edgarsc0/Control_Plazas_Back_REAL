@@ -1,20 +1,92 @@
-from rest_framework import status, views, viewsets
+from rest_framework import generics, status, views, viewsets
+from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.authtoken.models import Token
-from django.contrib.auth.models import User
+from django.contrib.auth.models import Group, User
 from django.contrib.auth import login
 from django.core.mail import send_mail
 from django.template.loader import render_to_string
 from django.utils.html import strip_tags
 from django.conf import settings
-from .models import Whitelist, VerificationCode
-from .serializers import WhitelistSerializer
+from .models import ModulePermission, Whitelist, VerificationCode
+from .serializers import GroupSerializer, PermissionSerializer, WhitelistSerializer
 
 
 class WhitelistViewSet(viewsets.ModelViewSet):
     queryset = Whitelist.objects.all()
     serializer_class = WhitelistSerializer
+    view_permission = "authentication.manage_usuarios"
+    edit_permission = "authentication.manage_usuarios"
+
+    def perform_update(self, serializer):
+        previous_rol_id = serializer.instance.rol_id
+        instance = serializer.save()
+
+        # user.groups solo se sincroniza en login (VerifyCodeView); si el usuario
+        # ya tiene sesión creada, hay que reflejar aquí el cambio de rol para que
+        # sus permisos cambien de inmediato, sin esperar a que vuelva a loguearse.
+        if instance.user and instance.rol_id != previous_rol_id:
+            instance.user.groups.set([instance.rol])
+            if instance.rol.name.lower() == "superadmin" and not instance.user.is_superuser:
+                instance.user.is_staff = True
+                instance.user.is_superuser = True
+                instance.user.save(update_fields=["is_staff", "is_superuser"])
+
+
+class RoleViewSet(viewsets.ModelViewSet):
+    """CRUD de roles (Group) editable desde UI, con asignación de permisos."""
+
+    queryset = Group.objects.all().prefetch_related("permissions__content_type").order_by("name")
+    serializer_class = GroupSerializer
+    view_permission = "authentication.manage_roles"
+    edit_permission = "authentication.manage_roles"
+
+    def perform_destroy(self, instance):
+        if Whitelist.objects.filter(rol=instance).exists():
+            raise ValidationError(
+                "No se puede eliminar un rol con usuarios asignados. Reasigna esos usuarios primero."
+            )
+        instance.delete()
+
+
+class PermissionListView(generics.ListAPIView):
+    """Catálogo de permisos de negocio asignables a un rol."""
+
+    queryset = ModulePermission.catalog_queryset().select_related("content_type").order_by("codename")
+    serializer_class = PermissionSerializer
+    view_permission = "authentication.manage_roles"
+
+
+class MePermissionsView(views.APIView):
+    """Rol y permisos efectivos del usuario autenticado (para hidratar el front)."""
+
+    def get(self, request):
+        user = request.user
+        whitelist_entry = getattr(user, "perfil", None)
+
+        if user.is_superuser:
+            # get_all_permissions() no expande automáticamente a "todo" para
+            # superusers (solo has_perm() hace ese bypass); exponemos el
+            # catálogo completo para que el front no oculte módulos.
+            permissions = sorted(
+                f"{app_label}.{codename}"
+                for app_label, codename in ModulePermission.catalog_queryset().values_list(
+                    "content_type__app_label", "codename"
+                )
+            )
+        else:
+            permissions = sorted(user.get_all_permissions())
+
+        return Response(
+            {
+                "email": user.email,
+                "role": whitelist_entry.rol.name if whitelist_entry else None,
+                "ua": whitelist_entry.ua.nombre if whitelist_entry and whitelist_entry.ua else None,
+                "is_superuser": user.is_superuser,
+                "permissions": permissions,
+            }
+        )
 
 
 class CheckEmailView(views.APIView):
@@ -101,7 +173,7 @@ class VerifyCodeView(views.APIView):
 
                 # Automatización de privilegios para Administradores
                 rol_name = whitelist_entry.rol.name.lower()
-                if rol_name == "SuperAdmin":
+                if rol_name == "superadmin":
                     user.is_staff = True
                     user.is_superuser = True
                     user.save()
