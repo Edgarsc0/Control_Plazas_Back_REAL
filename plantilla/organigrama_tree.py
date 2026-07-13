@@ -5,6 +5,15 @@ Construye el árbol jerárquico (mismo formato que los antiguos JSON estáticos
 en eje_central_front/public/organigramas/) a partir de filas planas de
 ORGANIGRAMA_ANAM para una sola unidad_negocio.
 
+`build_tree` (usado en cada request de OrganigramaTreeView) ya NO recalcula
+el parentesco: arma el árbol leyendo directo la columna `subordinados`
+(hijos directos, códigos separados por coma), que se precalcula offline.
+
+El algoritmo de segmentación de determinante (candidate_parents,
+resolve_by_position, build_parent_map/build_children_map) se conserva en
+este mismo módulo porque es el que puebla esa columna — lo usa el comando
+`poblar_subordinados_organigrama` (plantilla/management/commands/), que hay
+que re-correr cuando el pipeline ZAFIRO reimporta ORGANIGRAMA_ANAM.
 Lógica portada de Webwright_runs/generar_organigramas.py — ver ese archivo
 para la explicación completa del algoritmo de segmentación de códigos.
 """
@@ -168,7 +177,25 @@ def build_children_map(data, parent_map):
     return by_parent
 
 
-def build_tree_node(node, by_parent, visited=None):
+def build_children_map_from_column(data):
+    """
+    Arma by_parent (código -> lista de rows hijos) leyendo directo la columna
+    `subordinados` (códigos separados por coma) en vez de recalcular
+    parentesco. Es lo que usa build_tree en cada request.
+    """
+    by_code = {d["departamento"]: d for d in data}
+    by_parent = {}
+    for d in data:
+        raw = (d.get("subordinados") or "").strip()
+        if not raw:
+            continue
+        children = [by_code[c] for c in raw.split(",") if c in by_code]
+        if children:
+            by_parent[d["departamento"]] = children
+    return by_parent
+
+
+def build_tree_node(node, by_parent, occupant_map, visited=None):
     if visited is None:
         visited = set()
     code = node["departamento"]
@@ -187,7 +214,7 @@ def build_tree_node(node, by_parent, visited=None):
 
     subordinados = []
     for child in children_sorted:
-        node_child = build_tree_node(child, by_parent, visited)
+        node_child = build_tree_node(child, by_parent, occupant_map, visited)
         if node_child is not None:
             subordinados.append(node_child)
 
@@ -200,18 +227,36 @@ def build_tree_node(node, by_parent, visited=None):
         "doaf": node["doaf"],
         "num_posicion_gerente": node["num_posicion_gerente"],
         "posicion_director": node["posicion_director"],
+        "ocupante": occupant_map.get(node["num_posicion_gerente"]),
         "subordinados": subordinados,
     }
 
 
-def build_tree(data):
+def build_tree(data, occupant_map=None):
     """
     data: lista de dicts con las columnas de ORGANIGRAMA_ANAM (ya filtradas
-    por unidad_negocio). Retorna el nodo raíz anidado, o None si data está vacío.
+    por unidad_negocio), incluyendo `subordinados` (hijos directos
+    precalculados). Retorna el nodo raíz anidado, o None si data está vacío.
+    occupant_map: dict num_posicion_gerente -> info del ocupante (nombre/nivel/
+    smb/activa/vacante), ver OrganigramaTreeView._build_occupant_map.
+
+    No recalcula parentesco: solo lee la columna `subordinados` y arma el
+    árbol. Si esa columna viene vacía para toda la unidad_negocio (p.ej. no
+    se ha corrido poblar_subordinados_organigrama todavía), cae de vuelta al
+    cálculo en vivo vía build_parent_map/build_children_map para no romper
+    la vista.
     """
     if not data:
         return None
-    parent_map, root_code = build_parent_map(data)
-    by_parent = build_children_map(data, parent_map)
-    root_node = next(d for d in data if d["departamento"] == root_code)
-    return build_tree_node(root_node, by_parent)
+
+    root = find_root(data)
+    root_code = root["departamento"]
+
+    if any((d.get("subordinados") or "").strip() for d in data):
+        by_parent = build_children_map_from_column(data)
+    else:
+        parent_map, root_code = build_parent_map(data)
+        by_parent = build_children_map(data, parent_map)
+        root = next(d for d in data if d["departamento"] == root_code)
+
+    return build_tree_node(root, by_parent, occupant_map or {})

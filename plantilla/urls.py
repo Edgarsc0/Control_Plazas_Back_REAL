@@ -1,6 +1,7 @@
 from django.urls import path
 
 from .views import (
+    EmpleadosBusquedaView,
     TorreCaballitoSearchView,
     EmpleadosPorNivelYEstatusView,
     ExportExcelView,
@@ -36,6 +37,8 @@ from .views import (
     OrganigramaDeptoView,
     OrganigramaTreeView,
     OrganigramaPosicionInfoView,
+    OrganigramaUnidadesView,
+    OrganigramaCrearNodoView,
     CatAccionesViewSet,
     CatAccionesMotivosViewSet,
     CatNivelJerarquicoPlazaViewSet,
@@ -77,6 +80,21 @@ urlpatterns = [
         "organigrama-posicion-info/",
         OrganigramaPosicionInfoView.as_view(),
         name="organigrama-posicion-info",
+    ),
+    path(
+        "organigrama-unidades/",
+        OrganigramaUnidadesView.as_view(),
+        name="organigrama-unidades",
+    ),
+    path(
+        "organigrama-crear-nodo/",
+        OrganigramaCrearNodoView.as_view(),
+        name="organigrama-crear-nodo",
+    ),
+    path(
+        "empleados-search/",
+        EmpleadosBusquedaView.as_view(),
+        name="empleados-search",
     ),
     path(
         "cat-acciones/",

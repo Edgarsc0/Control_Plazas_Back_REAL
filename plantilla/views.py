@@ -3903,7 +3903,10 @@ class OrganigramaTreeView(APIView):
     """
     Árbol jerárquico de ORGANIGRAMA_ANAM para una unidad_negocio, con la misma
     forma que los antiguos JSON estáticos (nodo raíz con `subordinados` anidados).
-    Lógica de parentesco en organigrama_tree.build_tree.
+    El parentesco ya NO se recalcula en cada request: se lee directo de la
+    columna `subordinados` (poblada por el comando de management
+    poblar_subordinados_organigrama, que sí corre la lógica de segmentación
+    del determinante). Ver organigrama_tree.build_tree.
     """
     permission_classes = [IsAuthenticated]
 
@@ -3916,7 +3919,8 @@ class OrganigramaTreeView(APIView):
 
         sql = """
             SELECT departamento, descripcion_larga, nivel_direccion, unidad_negocio,
-                   unidad_administrativa, doaf, num_posicion_gerente, posicion_director
+                   unidad_administrativa, doaf, num_posicion_gerente, posicion_director,
+                   subordinados
             FROM ORGANIGRAMA_ANAM
             WHERE unidad_negocio = %s
         """
@@ -3928,8 +3932,64 @@ class OrganigramaTreeView(APIView):
         if not rows:
             return Response({"error": f"Sin datos para unidad_negocio={unidad_negocio}"}, status=404)
 
-        tree = build_tree(rows)
+        occupant_map = self._build_occupant_map(rows)
+        tree = build_tree(rows, occupant_map)
         return Response(tree)
+
+    def _build_occupant_map(self, rows):
+        """
+        Batchea el ocupante (nombre/nivel/SMB) de la plaza titular de cada
+        depto (num_posicion_gerente) en 2 queries en vez de una por nodo.
+        Misma lógica que OrganigramaPosicionInfoView pero para N plazas.
+        """
+        posiciones = sorted({
+            r["num_posicion_gerente"] for r in rows
+            if r.get("num_posicion_gerente") and r["num_posicion_gerente"] != "(en blanco)"
+        })
+        if not posiciones:
+            return {}
+
+        placeholders = ", ".join(["%s"] * len(posiciones))
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"SELECT `Nº Pos Actual` FROM MOV_POS_LATEST "
+                f"WHERE `Nº Pos Actual` IN ({placeholders}) AND `Estado Psn` = 'A'",
+                posiciones,
+            )
+            activas = {r[0] for r in cursor.fetchall()}
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"""
+                SELECT `Posición`, `Nombres`, `Nivel`, `SMB`, `Estado Nómina`
+                FROM EMPLEADOS_COMPLETOS_SIG
+                WHERE `Posición` IN ({placeholders})
+                """,
+                posiciones,
+            )
+            ocupantes = {}
+            for posicion, nombre, nivel, smb, estado_nomina in cursor.fetchall():
+                if posicion not in ocupantes:
+                    ocupantes[posicion] = (nombre, nivel, smb, estado_nomina)
+
+        occupant_map = {}
+        for posicion in posiciones:
+            if posicion not in activas:
+                occupant_map[posicion] = {"activa": False, "vacante": None}
+                continue
+            row = ocupantes.get(posicion)
+            if not row or not str(row[3] or "").strip():
+                occupant_map[posicion] = {"activa": True, "vacante": True}
+                continue
+            nombre, nivel, smb, estado_nomina = row
+            occupant_map[posicion] = {
+                "activa": True,
+                "vacante": False,
+                "nombre": nombre,
+                "nivel": nivel,
+                "smb": smb,
+            }
+        return occupant_map
 
 
 class OrganigramaPosicionInfoView(APIView):
@@ -3981,6 +4041,255 @@ class OrganigramaPosicionInfoView(APIView):
             "num_empleado": num_empleado,
             "estado_nomina": estado_nomina,
         })
+
+
+class OrganigramaUnidadesView(APIView):
+    """
+    Catálogo dinámico de unidades de negocio para el selector del front
+    (reemplaza el arreglo estático UNIDADES que antes vivía en
+    organigrama/page.jsx). Una "unidad de negocio" = un lienzo del
+    organigrama; su raíz se resuelve con la misma heurística que
+    organigrama_tree.build_tree (find_root), por si existen varias filas
+    General/Titular sueltas bajo el mismo unidad_negocio (dato legado).
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from .organigrama_tree import find_root
+
+        rows = list(
+            OrganigramaAnam.objects.values(
+                "departamento", "descripcion_larga", "nivel_direccion", "unidad_negocio"
+            )
+        )
+        by_unidad = {}
+        for r in rows:
+            by_unidad.setdefault(r["unidad_negocio"], []).append(r)
+
+        unidades = [
+            {"id": unidad_negocio, "label": find_root(group)["descripcion_larga"]}
+            for unidad_negocio, group in by_unidad.items()
+        ]
+        unidades.sort(key=lambda u: u["id"])
+        return Response(unidades)
+
+
+class OrganigramaCrearNodoView(APIView):
+    """
+    Alta de un nuevo nodo en ORGANIGRAMA_ANAM aplicando la regla de negocio
+    del determinante (ver organigrama_tree.py / Webwright_runs/generar_organigramas.py):
+
+      Nivel        Segmento
+      General      G
+      Central      C
+      Director     A (Área)
+      Subdir.      S
+      Jefe Depto   D
+
+    Dos modos:
+      - tipo="General": alta de una nueva Dirección General (raíz, sin padre,
+        abre lienzo nuevo). unidad_negocio y departamento se capturan a mano
+        porque son códigos asignados externamente (SAT/SIG), no hay fórmula.
+      - cualquier otro tipo: requiere parent_departamento. El código se
+        autogenera heredando el esquema de longitud del padre (10 u 11 chars,
+        ver organigrama_tree.parse_code), reutilizando sus segmentos hasta el
+        nivel del padre, poniendo a cero los niveles intermedios saltados y
+        asignando el siguiente número de 2 dígitos libre en el segmento
+        objetivo. Actualiza también `subordinados` del padre para que el
+        árbol se refleje sin esperar a poblar_subordinados_organigrama.
+    """
+    permission_classes = [IsAuthenticated]
+
+    LEVEL_SEGPOS = {"General": 0, "Central": 1, "Director": 2, "Subdir.": 3, "Jefe Depto": 4}
+    WIDTHS_11 = [3, 2, 2, 2, 2]
+    WIDTHS_10 = [2, 2, 2, 2, 2]
+
+    def post(self, request):
+        data = request.data
+        tipo = (data.get("tipo") or "").strip()
+        if tipo not in self.LEVEL_SEGPOS:
+            return Response(
+                {"detail": f"tipo inválido. Debe ser uno de: {', '.join(self.LEVEL_SEGPOS)}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        descripcion_larga = (data.get("descripcion_larga") or "").strip()
+        if not descripcion_larga:
+            return Response({"detail": "Falta descripcion_larga."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if tipo == "General":
+            return self._crear_general(request, data, descripcion_larga)
+        return self._crear_hijo(request, data, tipo, descripcion_larga)
+
+    def _crear_general(self, request, data, descripcion_larga):
+        unidad_negocio = (data.get("unidad_negocio") or "").strip()
+        departamento = (data.get("departamento") or "").strip()
+        if not unidad_negocio or not departamento:
+            return Response(
+                {"detail": "unidad_negocio y departamento son obligatorios para crear una Dirección General."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if OrganigramaAnam.objects.filter(departamento=departamento).exists():
+            return Response({"detail": f"Ya existe el departamento {departamento}."}, status=status.HTTP_409_CONFLICT)
+        if OrganigramaAnam.objects.filter(unidad_negocio=unidad_negocio).exists():
+            return Response({"detail": f"Ya existe la unidad_negocio {unidad_negocio}."}, status=status.HTTP_409_CONFLICT)
+
+        nuevo = OrganigramaAnam.objects.create(
+            departamento=departamento,
+            unidad_negocio=unidad_negocio,
+            estado_fecha_efectiva="Activo",
+            descripcion_larga=descripcion_larga,
+            nivel_direccion="General",
+            unidad_administrativa=(data.get("unidad_administrativa") or "").strip(),
+            doaf=(data.get("doaf") or "").strip(),
+            num_posicion_gerente=(data.get("num_posicion_gerente") or "(en blanco)").strip(),
+            posicion_director="(en blanco)",
+            modificado_por=request.user.username,
+        )
+        return Response(OrganigramaAnamSerializer(nuevo).data, status=status.HTTP_201_CREATED)
+
+    def _crear_hijo(self, request, data, tipo, descripcion_larga):
+        from django.shortcuts import get_object_or_404
+
+        parent_code = (data.get("parent_departamento") or "").strip()
+        if not parent_code:
+            return Response({"detail": "Falta parent_departamento."}, status=status.HTTP_400_BAD_REQUEST)
+        parent = get_object_or_404(OrganigramaAnam, departamento=parent_code)
+
+        parent_nivel = parent.nivel_direccion
+        if parent_nivel == "Titular":
+            parent_pos = 0
+        elif parent_nivel in self.LEVEL_SEGPOS:
+            parent_pos = self.LEVEL_SEGPOS[parent_nivel]
+        else:
+            return Response(
+                {"detail": f"El padre ({parent_code}) tiene nivel_direccion '{parent_nivel}', no reconocido para derivar un hijo."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        target_pos = self.LEVEL_SEGPOS[tipo]
+        if target_pos <= parent_pos:
+            return Response(
+                {"detail": f"'{tipo}' debe ser un nivel más profundo que el padre ({parent_nivel})."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        length = len(parent_code)
+        if length == 11:
+            widths = self.WIDTHS_11
+        elif length == 10:
+            widths = self.WIDTHS_10
+        else:
+            return Response(
+                {"detail": f"El código del padre ({parent_code}) no tiene una longitud reconocida (10 u 11)."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        bounds = []
+        idx = 0
+        for w in widths:
+            bounds.append((idx, idx + w))
+            idx += w
+
+        segs = [parent_code[a:b] for a, b in bounds]
+
+        # Niveles intermedios saltados (p.ej. Depto directo bajo Director,
+        # sin Subdirección): quedan en cero, igual que el resto de códigos
+        # legados que hoy resuelve organigrama_tree.candidate_parents.
+        for i in range(parent_pos + 1, target_pos):
+            segs[i] = "0" * widths[i]
+
+        prefix = "".join(segs[:target_pos])
+        w_target = widths[target_pos]
+        siblings = OrganigramaAnam.objects.filter(
+            unidad_negocio=parent.unidad_negocio,
+            departamento__startswith=prefix,
+        ).values_list("departamento", flat=True)
+
+        max_num = 0
+        seg_start, seg_end = bounds[target_pos]
+        for dep in siblings:
+            if len(dep) != length:
+                continue
+            seg_val = dep[seg_start:seg_end]
+            if seg_val.isdigit():
+                max_num = max(max_num, int(seg_val))
+        next_num = max_num + 1
+        if next_num >= 10 ** w_target:
+            return Response(
+                {"detail": f"Se agotó la numeración disponible ({w_target} dígitos) bajo {parent_code} para el nivel '{tipo}'."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        segs[target_pos] = str(next_num).zfill(w_target)
+
+        for i in range(target_pos + 1, len(widths)):
+            segs[i] = "0" * widths[i]
+
+        new_code = "".join(segs)
+        if OrganigramaAnam.objects.filter(departamento=new_code).exists():
+            return Response(
+                {"detail": f"Colisión al generar el código {new_code}, intenta de nuevo."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        with transaction.atomic():
+            nuevo = OrganigramaAnam.objects.create(
+                departamento=new_code,
+                unidad_negocio=parent.unidad_negocio,
+                estado_fecha_efectiva="Activo",
+                descripcion_larga=descripcion_larga,
+                nivel_direccion=tipo,
+                unidad_administrativa=(data.get("unidad_administrativa") or parent.unidad_administrativa or "").strip(),
+                doaf=(data.get("doaf") or parent.doaf or "").strip(),
+                num_posicion_gerente=(data.get("num_posicion_gerente") or "(en blanco)").strip(),
+                posicion_director=parent.num_posicion_gerente or "(en blanco)",
+                modificado_por=request.user.username,
+            )
+            existentes = [c for c in (parent.subordinados or "").split(",") if c]
+            existentes.append(new_code)
+            parent.subordinados = ",".join(existentes)
+            parent.save(update_fields=["subordinados"])
+
+        return Response(OrganigramaAnamSerializer(nuevo).data, status=status.HTTP_201_CREATED)
+
+
+class EmpleadosBusquedaView(APIView):
+    """
+    Búsqueda de empleados en EMPLEADOS_COMPLETOS_SIG por nombre, posición o
+    número de empleado, usada para reasignar plazas (titular/superior) en el
+    organigrama. A diferencia de TorreCaballitoSearchView, no filtra por
+    ubicación física.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        query = request.GET.get("q", "").strip()
+        if len(query) < 3:
+            return Response({"results": []})
+
+        empleados = (
+            EmpleadosCompletosSig.objects.filter(
+                Q(nombres__icontains=query)
+                | Q(posicion__icontains=query)
+                | Q(numempleado__icontains=query),
+                estado_nomina="A",
+            )
+            .values("posicion", "numempleado", "nombres", "nivel", "smb", "unidad_administrativa", "departamento")[:20]
+        )
+
+        results = [
+            {
+                "posicion": e["posicion"],
+                "num_empleado": e["numempleado"],
+                "nombre": e["nombres"],
+                "nivel": e["nivel"],
+                "smb": e["smb"],
+                "unidad_administrativa": e["unidad_administrativa"],
+                "departamento": e["departamento"],
+            }
+            for e in empleados
+        ]
+        return Response({"results": results})
 
 
 class AuditedViewSetMixin:

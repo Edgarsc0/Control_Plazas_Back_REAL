@@ -983,6 +983,11 @@ class OrganigramaAnam(models.Model):
     doaf = models.CharField(max_length=255)
     num_posicion_gerente = models.CharField(max_length=255)
     posicion_director = models.CharField(max_length=255)
+    subordinados = models.TextField(
+        blank=True, null=True,
+        help_text="Códigos de departamento (subordinados directos) separados por coma, "
+                   "calculados con la misma lógica de organigrama_tree.build_parent_map.",
+    )
     modificado_por = models.CharField(max_length=255, blank=True, null=True)
     fecha_modificacion = models.DateTimeField(blank=True, null=True, auto_now=True)
 
