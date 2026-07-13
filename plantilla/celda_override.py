@@ -98,6 +98,45 @@ def registrar_y_aplicar_override_empleado(posicion, columna, valor_nuevo, usuari
     return override
 
 
+def borrar_contenido_celda(posicion, columna):
+    """
+    Borra el contenido de una celda de EMPLEADOS_COMPLETOS_SIG: pone la
+    columna en NULL sobre la fila viva y elimina (hard delete, no solo
+    desactiva) todo el historial de CeldaOverride de esa celda, para que
+    la próxima importación de ZAFIRO no reaplique un override viejo sobre
+    una celda que el usuario borró explícitamente (ver
+    `aplicar_overrides_empleados_completos`).
+
+    Lanza ValueError si la columna no es editable o la posición no existe.
+    """
+    if columna not in EDITABLE_COLUMNS_EMPLEADOS:
+        raise ValueError(f"Columna '{columna}' no es editable.")
+
+    clave_negocio = {"posicion": posicion}
+    clave_hash = compute_clave_hash(clave_negocio)
+
+    with transaction.atomic():
+        fila = (
+            EmpleadosCompletosSig.objects.select_for_update()
+            .filter(posicion=posicion)
+            .first()
+        )
+        if fila is None:
+            raise ValueError(
+                f"Posición '{posicion}' no existe en EMPLEADOS_COMPLETOS_SIG."
+            )
+
+        CeldaOverride.objects.filter(
+            tabla=TABLA_EMPLEADOS,
+            clave_negocio_hash=clave_hash,
+            columna=columna,
+        ).delete()
+
+        EmpleadosCompletosSig.objects.filter(posicion=posicion).update(
+            **{columna: None}
+        )
+
+
 def aplicar_overrides_empleados_completos(bitacora=None):
     """
     Reaplica todos los overrides activos de EMPLEADOS_COMPLETOS_SIG sobre la

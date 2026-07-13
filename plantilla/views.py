@@ -40,7 +40,10 @@ from .models import (
     Plantilla1800Plazas,
     RcCatCodPresupuestal,
 )
-from .celda_override import registrar_y_aplicar_override_empleado
+from .celda_override import (
+    borrar_contenido_celda,
+    registrar_y_aplicar_override_empleado,
+)
 from .nivel_jerarquico_sync import aplicar_prioridad_nivel_jerarquico
 from .serializers import (
     CatAccionesMotivosSerializer,
@@ -1087,6 +1090,37 @@ class EmpleadosCompletosCeldaOverrideView(APIView):
         except ValueError as e:
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
+        self._invalidar_cache_detalle()
+
+        return Response({
+            "posicion": posicion,
+            "columna": columna,
+            "valor_nuevo": override.valor_nuevo,
+            "valor_original": override.valor_original,
+            "usuario": request.user.username,
+            "fecha_modificacion": override.fecha_modificacion,
+        })
+
+    def delete(self, request):
+        posicion = request.data.get("posicion")
+        columna = request.data.get("columna")
+        if not posicion or not columna:
+            return Response(
+                {"detail": "posicion y columna son requeridos."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            borrar_contenido_celda(posicion, columna)
+        except ValueError as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        self._invalidar_cache_detalle()
+
+        return Response({"posicion": posicion, "columna": columna, "valor_nuevo": None})
+
+    @staticmethod
+    def _invalidar_cache_detalle():
         cache.delete_many(["empleados_completos_activos_detalle", "active_employees_filtered"])
         # Variante cacheada por filtros oficio/nivel (ver EmpleadosCompletosActivosDetalleView.get,
         # cache_key = f"empleados_completos_activos_detalle_{oficio}_{nivel}") — misma barrida por
@@ -1099,15 +1133,6 @@ class EmpleadosCompletosCeldaOverrideView(APIView):
                 r.delete(key)
         except Exception:
             logger.exception("Error al invalidar cache filtrada tras override de celda")
-
-        return Response({
-            "posicion": posicion,
-            "columna": columna,
-            "valor_nuevo": override.valor_nuevo,
-            "valor_original": override.valor_original,
-            "usuario": request.user.username,
-            "fecha_modificacion": override.fecha_modificacion,
-        })
 
 
 class EmpleadosPorNivelYEstatusView(APIView):
