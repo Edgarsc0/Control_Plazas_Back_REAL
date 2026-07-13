@@ -24,6 +24,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import (
+    AlineacionOrganizacionalHistorico,
     CatAcciones,
     CatAccionesMotivos,
     CatNivelJerarquicoPlaza,
@@ -39,6 +40,7 @@ from .models import (
     Plantilla1800Plazas,
     RcCatCodPresupuestal,
 )
+from .celda_override import registrar_y_aplicar_override_empleado
 from .nivel_jerarquico_sync import aplicar_prioridad_nivel_jerarquico
 from .serializers import (
     CatAccionesMotivosSerializer,
@@ -1056,6 +1058,56 @@ class EmpleadosCompletosActivosDetalleView(APIView):
             return Response(
                 {"error": "Error interno del servidor"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+
+class EmpleadosCompletosCeldaOverrideView(APIView):
+    """
+    Edición manual de una celda de EMPLEADOS_COMPLETOS_SIG desde el tab
+    Detalle. Registra el cambio en CeldaOverride y lo aplica de inmediato
+    sobre la fila viva (ver plantilla.celda_override). Se reaplica solo tras
+    cada importar_zafiro, ya que la tabla se trunca y recarga cada 30 min.
+    """
+
+    edit_permission = "authentication.edit_plantilla_detalle"
+
+    def post(self, request):
+        posicion = request.data.get("posicion")
+        columna = request.data.get("columna")
+        valor_nuevo = request.data.get("valor_nuevo")
+        if not posicion or not columna:
+            return Response(
+                {"detail": "posicion y columna son requeridos."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            override = registrar_y_aplicar_override_empleado(
+                posicion, columna, valor_nuevo, request.user
+            )
+        except ValueError as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        cache.delete_many(["empleados_completos_activos_detalle", "active_employees_filtered"])
+        # Variante cacheada por filtros oficio/nivel (ver EmpleadosCompletosActivosDetalleView.get,
+        # cache_key = f"empleados_completos_activos_detalle_{oficio}_{nivel}") — misma barrida por
+        # patrón que hace importar_zafiro tras cada import.
+        try:
+            import redis as redis_lib
+
+            r = redis_lib.Redis.from_url(settings.CELERY_BROKER_URL)
+            for key in r.scan_iter("*empleados_completos_activos_detalle_*"):
+                r.delete(key)
+        except Exception:
+            logger.exception("Error al invalidar cache filtrada tras override de celda")
+
+        return Response({
+            "posicion": posicion,
+            "columna": columna,
+            "valor_nuevo": override.valor_nuevo,
+            "valor_original": override.valor_original,
+            "usuario": request.user.username,
+            "fecha_modificacion": override.fecha_modificacion,
+        })
 
 
 class EmpleadosPorNivelYEstatusView(APIView):
@@ -2766,6 +2818,47 @@ class MovPosAlineacionView(APIView):
                     "stats": stats,
                 }
             )
+        except Exception:
+            logger.exception("Error inesperado en {}".format(request.path))
+            return Response(
+                {"error": "Error interno del servidor"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class MovPosAlineacionHistoricoView(APIView):
+    """Histórico diario del % de Alineación General, poblado por la tarea
+    Celery `importar_zafiro` (ver `_actualizar_historico_alineacion_general`
+    en plantilla/tasks.py: 1 fila por día, upsert). Alimenta la gráfica de
+    tendencia en AlineacionOrganizacionalTab."""
+
+    view_permission = "authentication.view_plantilla_mov_posiciones"
+
+    def get(self, request, *args, **kwargs):
+        try:
+            from datetime import timedelta
+
+            from django.utils import timezone
+
+            qs = AlineacionOrganizacionalHistorico.objects.all().order_by("fecha")
+            dias_param = request.query_params.get("dias", "").strip()
+            if dias_param:
+                try:
+                    desde = timezone.localdate() - timedelta(days=int(dias_param))
+                    qs = qs.filter(fecha__gte=desde)
+                except ValueError:
+                    pass
+
+            resultados = [
+                {
+                    "fecha": r.fecha.isoformat(),
+                    "porcentaje_alineacion_general": float(r.porcentaje_alineacion_general),
+                    "total_activas": r.total_activas,
+                    "total_alineadas": r.total_alineadas,
+                    "total_con_diferencias": r.total_con_diferencias,
+                }
+                for r in qs
+            ]
+            return Response({"results": resultados})
         except Exception:
             logger.exception("Error inesperado en {}".format(request.path))
             return Response(

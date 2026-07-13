@@ -12,9 +12,11 @@ from .views import (
     RegistrosPorOficio1800PlazasView,
     EmpleadosCompletosEstatusNominaResumenView,
     EmpleadosCompletosActivosDetalleView,
+    EmpleadosCompletosCeldaOverrideView,
     EmpleadosEstatusPorNivelUaView,
     EmpleadosDistribucionGeograficaView,
     MovPosAlineacionView,
+    MovPosAlineacionHistoricoView,
     MovPosDetalleView,
     MovPosExportExcelView,
     MovPosHistoriaView,
@@ -249,6 +251,11 @@ urlpatterns = [
         name="empleados_completos_activos_detalle",
     ),
     path(
+        "empleados_completos_sig/override/",
+        EmpleadosCompletosCeldaOverrideView.as_view(),
+        name="empleados_completos_sig_override",
+    ),
+    path(
         "empleados_por_nivel_y_estatus/",
         EmpleadosPorNivelYEstatusView.as_view(),
         name="empleados_por_nivel_y_estatus",
@@ -307,6 +314,11 @@ urlpatterns = [
         "mov_pos_alineacion/",
         MovPosAlineacionView.as_view(),
         name="mov_pos_alineacion",
+    ),
+    path(
+        "mov_pos_alineacion_historico/",
+        MovPosAlineacionHistoricoView.as_view(),
+        name="mov_pos_alineacion_historico",
     ),
     path(
         "cadena_mando/",

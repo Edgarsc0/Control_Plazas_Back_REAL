@@ -39,6 +39,7 @@ class ModulePermission(models.Model):
             ("view_plantilla_bajas", "Plantilla de Empleados: ver tab Empleados Bajas"),
             ("view_plantilla_geografia", "Plantilla de Empleados: ver tab Distribución Geográfica"),
             ("view_plantilla_catalogos", "Plantilla de Empleados: ver tab Catálogos"),
+            ("edit_plantilla_detalle", "Plantilla de Empleados: editar celdas en tab Detalle"),
             # Ocupación de Plazas por Oficio
             ("view_ocupacion_sankey", "Ocupación de Plazas: ver tab Sankey"),
             ("view_ocupacion_tabla", "Ocupación de Plazas: ver tab Tabla"),

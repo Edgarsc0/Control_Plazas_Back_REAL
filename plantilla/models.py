@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.db import models
 from django.db.models.functions import Trim
 
@@ -1239,6 +1240,30 @@ class ZafiroBitacora(models.Model):
         return f"{self.fecha_ejecucion} - {self.status}"
 
 
+class AlineacionOrganizacionalHistorico(models.Model):
+    """1 fila por día con el % de Alineación General (ver
+    `get_mov_pos_alineacion_stats` en plantilla/views.py) al momento en que
+    corrió la última importación ZAFIRO de ese día. Se actualiza (upsert por
+    `fecha`) al final de cada corrida de `importar_zafiro` en plantilla/tasks.py
+    solo si el valor cambió respecto al ya guardado, para tener un histórico
+    diario y poder graficar la tendencia en AlineacionOrganizacionalTab."""
+
+    fecha = models.DateField(unique=True)
+    porcentaje_alineacion_general = models.DecimalField(max_digits=5, decimal_places=1)
+    total_activas = models.IntegerField(default=0)
+    total_alineadas = models.IntegerField(default=0)
+    total_con_diferencias = models.IntegerField(default=0)
+    actualizado_en = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        managed = True
+        db_table = "ALINEACION_ORGANIZACIONAL_HISTORICO"
+        ordering = ["fecha"]
+
+    def __str__(self):
+        return f"{self.fecha} - {self.porcentaje_alineacion_general}%"
+
+
 class CpTblMovCompleto290526Base(models.Model):
     id = models.AutoField(primary_key=True)
     posicion = models.CharField(max_length=50, blank=True, null=True)
@@ -1333,3 +1358,40 @@ class CuadroVacancia(models.Model):
         db_table = 'cuadro_vacancia'
         verbose_name = 'Cuadro Vacancia'
         verbose_name_plural = 'Cuadros Vacancia'
+
+
+class CeldaOverride(models.Model):
+    """
+    Edición manual de una celda sobre una tabla alimentada por ZAFIRO (que se
+    trunca y recarga completa en cada `importar_zafiro`, ver tasks.py). No se
+    escribe encima del import: se registra aquí y se reaplica sobre la tabla
+    viva tanto al momento de editar como después de cada import (ver
+    `plantilla.celda_override.aplicar_overrides_empleados_completos`).
+    """
+
+    tabla = models.CharField(max_length=64, choices=[
+        ("EMPLEADOS_COMPLETOS_SIG", "Empleados"),
+        ("BAJAS_SIG", "Bajas"),
+        ("MOV_POS", "Movimientos Posición"),
+        ("CP_TBL_HISTORIAL", "Histórico Movimientos"),
+    ])
+    clave_negocio = models.JSONField()
+    clave_negocio_hash = models.CharField(max_length=64, db_index=True)
+    columna = models.CharField(max_length=128)
+    valor_original = models.TextField(null=True)
+    valor_nuevo = models.TextField()
+    usuario = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    fecha_modificacion = models.DateTimeField(auto_now=True)
+    activo = models.BooleanField(default=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["tabla", "clave_negocio_hash", "columna", "activo"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tabla", "clave_negocio_hash", "columna"],
+                condition=models.Q(activo=True),
+                name="uniq_override_activo",
+            ),
+        ]

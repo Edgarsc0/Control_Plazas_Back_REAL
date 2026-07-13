@@ -1085,6 +1085,28 @@ def _reaplicar_prioridad_nivel_jerarquico(bitacora):
         logger.error("Error en _reaplicar_prioridad_nivel_jerarquico: %s", e, exc_info=True)
 
 
+def _reaplicar_celda_overrides_empleados(bitacora):
+    """
+    Reaplica las ediciones manuales de celda (CeldaOverride, ver
+    plantilla/celda_override.py) sobre EMPLEADOS_COMPLETOS_SIG, que se acaba
+    de truncar y recargar completa por el swap Blue-Green. Mismo motivo que
+    `_reaplicar_prioridad_nivel_jerarquico`: sin esto, cualquier edición
+    manual hecha desde el tab Detalle se perdería en la siguiente importación.
+    """
+    from .celda_override import aplicar_overrides_empleados_completos
+
+    try:
+        stats = aplicar_overrides_empleados_completos(bitacora)
+        _append_log(
+            bitacora,
+            f"CeldaOverride reaplicados sobre EMPLEADOS_COMPLETOS_SIG: "
+            f"{stats['aplicados']} aplicado(s), {stats['huerfanos']} huérfano(s).",
+        )
+    except Exception as e:
+        _append_log(bitacora, f"Error reaplicando CeldaOverride: {str(e)}", is_error=True)
+        logger.error("Error en _reaplicar_celda_overrides_empleados: %s", e, exc_info=True)
+
+
 def _calcular_y_actualizar_vacancias(bitacora):
     """
     Ejecuta el Stored Procedure sp_obtener_todas_vacancias, el cual
@@ -1105,6 +1127,46 @@ def _calcular_y_actualizar_vacancias(bitacora):
         logger.error(
             f"Error en _calcular_y_actualizar_vacancias: {str(e)}", exc_info=True
         )
+
+
+def _actualizar_historico_alineacion_general(bitacora=None):
+    """Recalcula el % de Alineación General (mismo cruce MOV_POS x
+    EMPLEADOS_COMPLETOS_SIG que MovPosAlineacionView, ver plantilla/views.py)
+    y hace upsert de la fila del día en ALINEACION_ORGANIZACIONAL_HISTORICO:
+    1 fila por día (no un log por cada corrida de Celery cada 30 min), solo
+    se actualiza si el % cambió respecto al ya guardado hoy."""
+    from .models import AlineacionOrganizacionalHistorico
+    from .views import _construir_dataset_alineacion, get_mov_pos_alineacion_stats
+
+    try:
+        dataset = _construir_dataset_alineacion()
+        stats = get_mov_pos_alineacion_stats(dataset)
+        porcentaje = stats["porcentaje_alineacion_general"]
+        hoy = timezone.localdate()
+
+        registro, created = AlineacionOrganizacionalHistorico.objects.get_or_create(
+            fecha=hoy,
+            defaults={
+                "porcentaje_alineacion_general": porcentaje,
+                "total_activas": stats["total_activas"],
+                "total_alineadas": stats["total_alineadas"],
+                "total_con_diferencias": stats["total_con_diferencias"],
+            },
+        )
+        if not created and float(registro.porcentaje_alineacion_general) != porcentaje:
+            registro.porcentaje_alineacion_general = porcentaje
+            registro.total_activas = stats["total_activas"]
+            registro.total_alineadas = stats["total_alineadas"]
+            registro.total_con_diferencias = stats["total_con_diferencias"]
+            registro.save()
+
+        _append_log(
+            bitacora,
+            f"Histórico de alineación general actualizado: {porcentaje}% ({hoy.isoformat()})",
+        )
+    except Exception as e:
+        logger.error("Error actualizando histórico de alineación general: %s", e, exc_info=True)
+        _append_log(bitacora, f"Error actualizando histórico de alineación general: {e}", is_error=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1263,6 +1325,10 @@ def importar_zafiro(self):
         # ── 10. Reaplicar prioridad de nivel jerárquico (si hay una fijada) ─
         _reaplicar_prioridad_nivel_jerarquico(bitacora)
 
+        # ── 10.5. Reaplicar ediciones manuales (CeldaOverride) sobre
+        # EMPLEADOS_COMPLETOS_SIG, que se acaba de truncar y recargar ───────
+        _reaplicar_celda_overrides_empleados(bitacora)
+
         # ── 11. Generar/Actualizar Cuadro de Vacancia ──────────────────────
         _append_log(bitacora, "Generando/Actualizando Cuadro de Vacancia Diario...")
         try:
@@ -1319,6 +1385,8 @@ def importar_zafiro(self):
                 "bajas_sig_list",
                 "bajas_motivos_pie",
                 "bajas_historico",
+                "mov_pos_alineacion_dataset",
+                "mov_pos_alineacion_stats",
             ]
             cache.delete_many(cache_keys)
 
@@ -1328,6 +1396,9 @@ def importar_zafiro(self):
                     r.delete(key)
         except Exception:
             logger.exception("Error al invalidar caché tras importación de ZAFIRO")
+
+        # ── 12. Actualizar histórico diario de % Alineación General ────────
+        _actualizar_historico_alineacion_general(bitacora)
 
         _append_log(
             bitacora,
