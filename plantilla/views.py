@@ -4463,6 +4463,46 @@ class OrganigramaAnamViewSet(AuditedViewSetMixin, viewsets.ModelViewSet):
     queryset = OrganigramaAnam.objects.all()
     serializer_class = OrganigramaAnamSerializer
 
+    # Campos bloqueados en update: `departamento` es la PK y codifica el
+    # determinante (ver organigrama_tree.parse_code); `nivel_direccion` y
+    # `unidad_negocio` están atados a esa codificación y a la resolución
+    # padre-hijo (candidate_parents/resolve_by_position). Cambiarlos sin
+    # regenerar el código (y el de todos los descendientes) deja el árbol
+    # inconsistente. Para "mover" o "re-nivelar" un nodo: crear uno nuevo
+    # bajo el padre correcto y eliminar el viejo.
+    LOCKED_UPDATE_FIELDS = ("departamento", "nivel_direccion", "unidad_negocio")
+
+    def perform_update(self, serializer):
+        for field in self.LOCKED_UPDATE_FIELDS:
+            serializer.validated_data.pop(field, None)
+        serializer.save(modificado_por=self.request.user.username)
+
+    def destroy(self, request, *args, **kwargs):
+        """
+        No permite borrar un nodo con subordinados (quedarían huérfanos: ya
+        no aparecerían en ningún `subordinados` CSV y se volverían
+        invisibles en el árbol, ver build_children_map_from_column). Al
+        borrar, limpia también la referencia en el `subordinados` del padre.
+        """
+        instance = self.get_object()
+        departamento = instance.departamento
+        if (instance.subordinados or "").strip():
+            n_hijos = len([c for c in instance.subordinados.split(",") if c])
+            return Response(
+                {"detail": f"No se puede eliminar '{departamento}': tiene {n_hijos} subordinado(s). Elimínalos o reasígnalos primero."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        with transaction.atomic():
+            for padre in OrganigramaAnam.objects.filter(subordinados__contains=departamento):
+                codigos = [c for c in (padre.subordinados or "").split(",") if c and c != departamento]
+                nuevo_valor = ",".join(codigos)
+                if nuevo_valor != (padre.subordinados or ""):
+                    padre.subordinados = nuevo_valor
+                    padre.save(update_fields=["subordinados"])
+            instance.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
 
 class CatNivelJerarquicoPlazaViewSet(AuditedViewSetMixin, viewsets.ModelViewSet):
     """
