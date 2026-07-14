@@ -1352,18 +1352,10 @@ def importar_zafiro(self):
         bitacora.status = "EXITO"
         bitacora.save()
 
-        # Publicar evento de actualización exitosa a Redis para tiempo real (SSE)
-        try:
-            from datetime import timedelta
-
-            fecha_fin = bitacora.fecha_ejecucion
-            if bitacora.duracion_segundos:
-                fecha_fin += timedelta(seconds=bitacora.duracion_segundos)
-            r.publish("zafiro_updates", fecha_fin.isoformat())
-        except Exception as e:
-            logger.error("Error al publicar evento de actualización en Redis: %s", e)
-
-        # Invalida cache de posiciones activas y dashboard para recargar en siguiente request
+        # Invalida cache de posiciones activas y dashboard ANTES de publicar el
+        # evento SSE: los clientes reaccionan al publish con un router.refresh()
+        # casi inmediato, así que si el cache siguiera vivo en ese instante
+        # podrían recargar y seguir viendo datos viejos.
         try:
             from django.core.cache import cache
 
@@ -1382,6 +1374,7 @@ def importar_zafiro(self):
                 "mov_pos_card_stats",
                 "mov_pos_ocupadas_set",
                 "desglose_jerarquico",
+                "desglose_jerarquico_ocupados",
                 "bajas_sig_list",
                 "bajas_motivos_pie",
                 "bajas_historico",
@@ -1396,6 +1389,17 @@ def importar_zafiro(self):
                     r.delete(key)
         except Exception:
             logger.exception("Error al invalidar caché tras importación de ZAFIRO")
+
+        # Publicar evento de actualización exitosa a Redis para tiempo real (SSE)
+        try:
+            from datetime import timedelta
+
+            fecha_fin = bitacora.fecha_ejecucion
+            if bitacora.duracion_segundos:
+                fecha_fin += timedelta(seconds=bitacora.duracion_segundos)
+            r.publish("zafiro_updates", fecha_fin.isoformat())
+        except Exception as e:
+            logger.error("Error al publicar evento de actualización en Redis: %s", e)
 
         # ── 12. Actualizar histórico diario de % Alineación General ────────
         _actualizar_historico_alineacion_general(bitacora)
