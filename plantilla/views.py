@@ -43,7 +43,10 @@ from .models import (
 )
 from .celda_override import (
     borrar_contenido_celda,
+    obtener_estadisticas_overrides_empleados,
+    obtener_historial_overrides_empleados,
     registrar_y_aplicar_override_empleado,
+    serializar_override,
 )
 from .nivel_jerarquico_sync import aplicar_prioridad_nivel_jerarquico
 from .serializers import (
@@ -1134,6 +1137,58 @@ class EmpleadosCompletosCeldaOverrideView(APIView):
                 r.delete(key)
         except Exception:
             logger.exception("Error al invalidar cache filtrada tras override de celda")
+
+
+class EmpleadosCompletosCeldaHistorialView(APIView):
+    """
+    Historial completo de ediciones manuales (CeldaOverride) sobre
+    EMPLEADOS_COMPLETOS_SIG, para el modal "Historial de Cambios" del tab
+    Detalle. Solo lectura — no reaplica ni modifica nada (ver
+    plantilla.celda_override.obtener_historial_overrides_empleados).
+    """
+
+    view_permission = "authentication.view_plantilla_detalle"
+
+    def get(self, request):
+        search = (request.query_params.get("search") or "").strip() or None
+        columna = (request.query_params.get("columna") or "").strip() or None
+        posicion = (request.query_params.get("posicion") or "").strip() or None
+
+        activo_param = request.query_params.get("activo")
+        activo = None
+        if activo_param in ("true", "1"):
+            activo = True
+        elif activo_param in ("false", "0"):
+            activo = False
+
+        try:
+            limit = min(max(int(request.query_params.get("limit", 100)), 1), 500)
+        except (TypeError, ValueError):
+            limit = 100
+        try:
+            offset = max(int(request.query_params.get("offset", 0)), 0)
+        except (TypeError, ValueError):
+            offset = 0
+
+        resultados, total = obtener_historial_overrides_empleados(
+            search=search,
+            columna=columna,
+            posicion=posicion,
+            activo=activo,
+            limit=limit,
+            offset=offset,
+        )
+
+        return Response(
+            {
+                "count": total,
+                "limit": limit,
+                "offset": offset,
+                "resultados": [serializar_override(o) for o in resultados],
+                "estadisticas": obtener_estadisticas_overrides_empleados(),
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class EmpleadosPorNivelYEstatusView(APIView):

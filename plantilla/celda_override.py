@@ -13,6 +13,7 @@ import hashlib
 import json
 
 from django.db import transaction
+from django.db.models import Count, Q
 
 from .models import CeldaOverride, EmpleadosCompletosSig, EmpleadosCompletosSigBase
 
@@ -156,3 +157,78 @@ def aplicar_overrides_empleados_completos(bitacora=None):
             else:
                 huerfanos += 1
     return {"aplicados": aplicados, "huerfanos": huerfanos}
+
+
+def serializar_override(override: CeldaOverride) -> dict:
+    return {
+        "id": override.id,
+        "posicion": override.clave_negocio.get("posicion"),
+        "columna": override.columna,
+        "valor_original": override.valor_original,
+        "valor_nuevo": override.valor_nuevo,
+        "usuario": override.usuario.username,
+        "usuario_nombre": override.usuario.get_full_name() or override.usuario.username,
+        "fecha_modificacion": override.fecha_modificacion,
+        "activo": override.activo,
+    }
+
+
+def obtener_historial_overrides_empleados(
+    *, search=None, columna=None, posicion=None, activo=None, limit=100, offset=0
+):
+    """
+    Historial completo (activo e inactivo) de ediciones manuales sobre
+    EMPLEADOS_COMPLETOS_SIG, para el modal "Historial de Cambios" del tab
+    Detalle. Solo lectura — no reaplica ni modifica nada.
+    """
+    qs = (
+        CeldaOverride.objects.filter(tabla=TABLA_EMPLEADOS)
+        .select_related("usuario")
+        .order_by("-fecha_modificacion", "-id")
+    )
+    if columna:
+        qs = qs.filter(columna=columna)
+    if posicion:
+        qs = qs.filter(clave_negocio_hash=compute_clave_hash({"posicion": posicion}))
+    if activo is not None:
+        qs = qs.filter(activo=activo)
+    if search:
+        qs = qs.filter(
+            Q(columna__icontains=search)
+            | Q(usuario__username__icontains=search)
+            | Q(usuario__first_name__icontains=search)
+            | Q(usuario__last_name__icontains=search)
+            | Q(valor_nuevo__icontains=search)
+            | Q(valor_original__icontains=search)
+        )
+
+    total = qs.count()
+    resultados = list(qs[offset : offset + limit])
+    return resultados, total
+
+
+def obtener_estadisticas_overrides_empleados():
+    """
+    Métricas agregadas del historial completo (sin filtros) para el panel
+    resumen del modal "Historial de Cambios".
+    """
+    base = CeldaOverride.objects.filter(tabla=TABLA_EMPLEADOS)
+    total_cambios = base.count()
+    total_activos = base.filter(activo=True).count()
+    total_posiciones = base.values("clave_negocio_hash").distinct().count()
+    total_usuarios = base.values("usuario").distinct().count()
+
+    top_columnas = list(
+        base.values("columna")
+        .annotate(total=Count("id"))
+        .order_by("-total")[:5]
+    )
+
+    return {
+        "total_cambios": total_cambios,
+        "total_activos": total_activos,
+        "total_sobrescritos": total_cambios - total_activos,
+        "total_posiciones_afectadas": total_posiciones,
+        "total_usuarios": total_usuarios,
+        "columnas_mas_editadas": top_columnas,
+    }

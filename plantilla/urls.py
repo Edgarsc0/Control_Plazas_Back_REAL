@@ -13,6 +13,7 @@ from .views import (
     EmpleadosCompletosEstatusNominaResumenView,
     EmpleadosCompletosActivosDetalleView,
     EmpleadosCompletosCeldaOverrideView,
+    EmpleadosCompletosCeldaHistorialView,
     EmpleadosEstatusPorNivelUaView,
     EmpleadosDistribucionGeograficaView,
     MovPosAlineacionView,
@@ -260,6 +261,11 @@ urlpatterns = [
         "empleados_completos_sig/override/",
         EmpleadosCompletosCeldaOverrideView.as_view(),
         name="empleados_completos_sig_override",
+    ),
+    path(
+        "empleados_completos_sig/override/historial/",
+        EmpleadosCompletosCeldaHistorialView.as_view(),
+        name="empleados_completos_sig_override_historial",
     ),
     path(
         "empleados_por_nivel_y_estatus/",
