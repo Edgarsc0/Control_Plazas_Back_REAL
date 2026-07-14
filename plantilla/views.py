@@ -5,6 +5,7 @@ from django.conf import settings
 from django.core import exceptions
 from django.db.models import (
     Aggregate,
+    Avg,
     Case,
     CharField,
     Count,
@@ -15,7 +16,7 @@ from django.db.models import (
     When,
 )
 from django.db import transaction
-from django.db.models.functions import Trim
+from django.db.models.functions import ExtractHour, Trim
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.pagination import PageNumberPagination
@@ -3345,6 +3346,53 @@ class ZafiroBitacoraView(APIView):
                     "logs_en_vivo": log.logs_en_vivo,
                 }
             )
+
+        return Response(data, status=status.HTTP_200_OK)
+
+
+class ZafiroDuracionPromedioPorHoraView(APIView):
+    """
+    Endpoint para obtener el promedio de duración (segundos) de las
+    importaciones exitosas de ZAFIRO, agrupado por hora del día (hora
+    local de Ciudad de México).
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    # `fecha_ejecucion` se guarda en UTC (USE_TZ=True), pero el servidor
+    # MySQL no tiene cargadas las tablas de zona horaria (CONVERT_TZ
+    # regresa NULL), así que no se puede pedirle a la DB que convierta a
+    # America/Mexico_City. Como esa zona ya no aplica horario de verano,
+    # el desfase es un entero fijo y se resta en Python.
+    OFFSET_HORAS_CDMX = -6
+
+    def get(self, request):
+        import datetime
+
+        resultados = (
+            ZafiroBitacora.objects.filter(status="EXITO")
+            .annotate(
+                hora=ExtractHour("fecha_ejecucion", tzinfo=datetime.timezone.utc)
+            )
+            .values("hora")
+            .annotate(
+                duracion_promedio=Avg("duracion_segundos"),
+                total_casos=Count("id"),
+            )
+            .order_by("hora")
+        )
+
+        data = [
+            {
+                "hora": (r["hora"] + self.OFFSET_HORAS_CDMX) % 24,
+                "duracion_promedio_segundos": round(r["duracion_promedio"], 2)
+                if r["duracion_promedio"] is not None
+                else None,
+                "total_casos": r["total_casos"],
+            }
+            for r in resultados
+        ]
+        data.sort(key=lambda d: d["hora"])
 
         return Response(data, status=status.HTTP_200_OK)
 

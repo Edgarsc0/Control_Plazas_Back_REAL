@@ -23,6 +23,7 @@ from .views import (
     MovPosVacanciaDetalleView,
     CadenaMandoView,
     ZafiroBitacoraView,
+    ZafiroDuracionPromedioPorHoraView,
     UltimaActualizacionZafiroView,
     IniciarSincronizacionZafiroView,
     ZafiroSSEView,
@@ -224,6 +225,11 @@ urlpatterns = [
         "bitacora/",
         ZafiroBitacoraView.as_view(),
         name="zafiro_bitacora",
+    ),
+    path(
+        "bitacora/duracion-promedio-por-hora/",
+        ZafiroDuracionPromedioPorHoraView.as_view(),
+        name="zafiro_duracion_promedio_por_hora",
     ),
     path(
         "export/excel/",
