@@ -12,6 +12,7 @@ patrón que `tasks._reaplicar_prioridad_nivel_jerarquico`).
 import hashlib
 import json
 
+from django.conf import settings
 from django.db import transaction
 from django.db.models import Count, Q
 
@@ -136,6 +137,30 @@ def borrar_contenido_celda(posicion, columna):
         EmpleadosCompletosSig.objects.filter(posicion=posicion).update(
             **{columna: None}
         )
+
+
+def notificar_cambio_celda(posicion, columna, valor_nuevo, usuario, fecha_modificacion):
+    """
+    Publica el cambio en el canal Redis "plantilla_celda_updates" para que
+    CeldaUpdatesSSEView lo reenvíe a los clientes con el tab Detalle abierto
+    (ver plantilla.views.CeldaUpdatesSSEView). Mismo patrón que el publish de
+    "zafiro_updates" en tasks.importar_zafiro.
+    """
+    import redis as redis_lib
+
+    r = redis_lib.Redis.from_url(settings.CELERY_BROKER_URL)
+    r.publish(
+        "plantilla_celda_updates",
+        json.dumps({
+            "type": "cell_update",
+            "posicion": posicion,
+            "columna": columna,
+            "valor_nuevo": valor_nuevo,
+            "usuario": usuario.username,
+            "usuario_nombre": usuario.get_full_name() or usuario.username,
+            "fecha_modificacion": fecha_modificacion.isoformat() if fecha_modificacion else None,
+        }),
+    )
 
 
 def aplicar_overrides_empleados_completos(bitacora=None):

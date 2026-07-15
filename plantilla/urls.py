@@ -28,6 +28,7 @@ from .views import (
     UltimaActualizacionZafiroView,
     IniciarSincronizacionZafiroView,
     ZafiroSSEView,
+    CeldaUpdatesSSEView,
     BajasSigListView,
     BajasMotivosPieView,
     BajasHistoricoView,
@@ -266,6 +267,11 @@ urlpatterns = [
         "empleados_completos_sig/override/historial/",
         EmpleadosCompletosCeldaHistorialView.as_view(),
         name="empleados_completos_sig_override_historial",
+    ),
+    path(
+        "empleados_completos_sig/celda-updates/sse/",
+        CeldaUpdatesSSEView.as_view(),
+        name="celda_updates_sse",
     ),
     path(
         "empleados_por_nivel_y_estatus/",

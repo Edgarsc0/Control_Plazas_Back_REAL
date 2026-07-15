@@ -43,6 +43,7 @@ from .models import (
 )
 from .celda_override import (
     borrar_contenido_celda,
+    notificar_cambio_celda,
     obtener_estadisticas_overrides_empleados,
     obtener_historial_overrides_empleados,
     registrar_y_aplicar_override_empleado,
@@ -1095,6 +1096,9 @@ class EmpleadosCompletosCeldaOverrideView(APIView):
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
         self._invalidar_cache_detalle()
+        notificar_cambio_celda(
+            posicion, columna, override.valor_nuevo, request.user, override.fecha_modificacion
+        )
 
         return Response({
             "posicion": posicion,
@@ -1120,6 +1124,9 @@ class EmpleadosCompletosCeldaOverrideView(APIView):
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
         self._invalidar_cache_detalle()
+        from django.utils import timezone
+
+        notificar_cambio_celda(posicion, columna, None, request.user, timezone.now())
 
         return Response({"posicion": posicion, "columna": columna, "valor_nuevo": None})
 
@@ -3562,6 +3569,64 @@ class ZafiroSSEView(View):
         # retiene todos los mensajes hasta que la conexión se cierra,
         # rompiendo el streaming en tiempo real. Content-Encoding ya seteado
         # hace que GZipMiddleware.process_response la omita.
+        response["Content-Encoding"] = "identity"
+        return response
+
+
+class CeldaUpdatesSSEView(View):
+    """
+    SSE dedicado a cambios de celdas de EMPLEADOS_COMPLETOS_SIG (tab Detalle
+    de Plantilla), para reflejar ediciones de otros usuarios en tiempo real
+    (ver plantilla.celda_override.notificar_cambio_celda). A diferencia de
+    ZafiroSSEView (bitácora, sin datos sensibles), este stream lleva datos de
+    personal, así que exige el permiso view_plantilla_detalle vía token antes
+    de aceptar la conexión — EventSource no puede mandar headers, por eso el
+    token viaja como query param.
+    """
+
+    def get(self, request):
+        import redis
+        from django.http import HttpResponseForbidden, StreamingHttpResponse
+        from rest_framework.authtoken.models import Token
+
+        token_key = request.GET.get("token")
+        token_obj = (
+            Token.objects.filter(key=token_key).select_related("user").first()
+            if token_key else None
+        )
+        user = token_obj.user if token_obj else None
+        if not user or not user.is_active or not user.has_perm("authentication.view_plantilla_detalle"):
+            return HttpResponseForbidden("No autorizado.")
+
+        def event_stream():
+            r = redis.Redis.from_url(settings.CELERY_BROKER_URL)
+            pubsub = r.pubsub()
+            pubsub.subscribe("plantilla_celda_updates")
+
+            yield "data: init\n\n"
+
+            try:
+                while True:
+                    message = pubsub.get_message(
+                        ignore_subscribe_messages=True, timeout=20.0
+                    )
+                    if message:
+                        data_str = message["data"].decode("utf-8")
+                        yield f"data: {data_str}\n\n"
+                    else:
+                        yield ": ping\n\n"
+            except GeneratorExit:
+                try:
+                    pubsub.unsubscribe("plantilla_celda_updates")
+                    pubsub.close()
+                except Exception:
+                    pass
+
+        response = StreamingHttpResponse(
+            event_stream(), content_type="text/event-stream"
+        )
+        response["Cache-Control"] = "no-cache"
+        response["X-Accel-Buffering"] = "no"
         response["Content-Encoding"] = "identity"
         return response
 
