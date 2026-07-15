@@ -3459,6 +3459,37 @@ class ZafiroDuracionPromedioPorHoraView(APIView):
         return Response(data, status=status.HTTP_200_OK)
 
 
+def _calcular_ultima_actualizacion_zafiro():
+    """
+    Busca la última corrida de ZafiroBitacora (EXITO, o "OK" / cualquiera como
+    fallback) y devuelve (fecha_fin_iso, status), o (None, None) si no hay
+    ninguna bitácora. Compartido por UltimaActualizacionZafiroView (polling
+    REST) y ZafiroSSEView (fallback por BD, ver comentario ahí).
+    """
+    last_success = (
+        ZafiroBitacora.objects.filter(status="EXITO")
+        .order_by("-fecha_ejecucion")
+        .first()
+    )
+    if not last_success:
+        last_success = (
+            ZafiroBitacora.objects.filter(status="OK")
+            .order_by("-fecha_ejecucion")
+            .first()
+        )
+    if not last_success:
+        last_success = ZafiroBitacora.objects.all().first()
+
+    if not last_success:
+        return None, None
+
+    from datetime import timedelta
+    fecha_fin = last_success.fecha_ejecucion
+    if last_success.duracion_segundos:
+        fecha_fin += timedelta(seconds=last_success.duracion_segundos)
+    return fecha_fin.isoformat(), last_success.status
+
+
 class UltimaActualizacionZafiroView(APIView):
     """
     Endpoint público para obtener la fecha y estatus de la última actualización exitosa de ZAFIRO.
@@ -3467,34 +3498,12 @@ class UltimaActualizacionZafiroView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
-        last_success = (
-            ZafiroBitacora.objects.filter(status="EXITO")
-            .order_by("-fecha_ejecucion")
-            .first()
-        )
-        if not last_success:
-            last_success = (
-                ZafiroBitacora.objects.filter(status="OK")
-                .order_by("-fecha_ejecucion")
-                .first()
-            )
-        if not last_success:
-            last_success = ZafiroBitacora.objects.all().first()
-
-        if last_success:
-            from datetime import timedelta
-            fecha_fin = last_success.fecha_ejecucion
-            if last_success.duracion_segundos:
-                fecha_fin += timedelta(seconds=last_success.duracion_segundos)
-
+        fecha_iso, last_status = _calcular_ultima_actualizacion_zafiro()
+        if fecha_iso:
             return Response(
-                {
-                    "fecha": fecha_fin.isoformat(),
-                    "status": last_success.status,
-                },
+                {"fecha": fecha_iso, "status": last_status},
                 status=status.HTTP_200_OK,
             )
-
         return Response({"fecha": None, "status": None}, status=status.HTTP_200_OK)
 
 
@@ -3527,10 +3536,22 @@ from django.views import View
 class ZafiroSSEView(View):
     """
     Endpoint de Server-Sent Events (SSE) para notificar actualizaciones en tiempo real a clientes.
+
+    El Celery worker que corre `importar_zafiro` puede vivir en una máquina
+    aparte del backend Linux (ver copia_back/.env.example: "esta PC Windows
+    corre su propio Redis, separado del de Linux"). El `r.publish(
+    "zafiro_updates", ...)` de esa tarea llega al Redis LOCAL de esa máquina,
+    no al de este servidor, así que el pubsub de abajo nunca recibe nada en
+    ese escenario — el navbar solo se enteraba de la actualización hasta el
+    siguiente refresh completo de página. Como respaldo, en cada timeout del
+    pubsub (~20s sin mensaje) se revisa directo en la BD compartida (misma
+    para ambas máquinas) si hay una corrida EXITO más reciente que la última
+    enviada, y si la hay, se emite igual por este canal.
     """
 
     def get(self, request):
         import redis
+        from django.db import close_old_connections
         from django.http import StreamingHttpResponse
 
         def event_stream():
@@ -3541,6 +3562,9 @@ class ZafiroSSEView(View):
             # Enviamos evento de inicialización de conexión
             yield "data: init\n\n"
 
+            close_old_connections()
+            last_sent, _ = _calcular_ultima_actualizacion_zafiro()
+
             try:
                 while True:
                     # Esperar mensajes en el canal de redis con timeout de 20s
@@ -3549,10 +3573,18 @@ class ZafiroSSEView(View):
                     )
                     if message:
                         date_str = message["data"].decode("utf-8")
+                        last_sent = date_str
                         yield f"data: {date_str}\n\n"
                     else:
-                        # Mantener conexión viva enviando pings
-                        yield ": ping\n\n"
+                        # Sin mensaje de Redis: fallback por BD (ver docstring
+                        # de la clase) antes de caer al ping de "sigo vivo".
+                        close_old_connections()
+                        current, _ = _calcular_ultima_actualizacion_zafiro()
+                        if current and current != last_sent:
+                            last_sent = current
+                            yield f"data: {current}\n\n"
+                        else:
+                            yield ": ping\n\n"
             except GeneratorExit:
                 try:
                     pubsub.unsubscribe("zafiro_updates")
