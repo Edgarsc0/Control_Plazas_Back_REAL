@@ -2034,6 +2034,90 @@ class MovPosDetalleView(APIView):
             else:
                 queryset = queryset.none()
 
+        # Advanced filters (built from the "Filtros Avanzados" modal). Se aplica
+        # ANTES de las ramas distinct_field de abajo: si no, "Vista actual" en el
+        # dropdown de columna ignoraría las condiciones del modal (mismo bug que
+        # en MovimientosPersonalListView). "ocupacion" y "total_movimientos" son
+        # columnas calculadas (no campos reales del modelo), por eso
+        # apply_advanced_filters() necesita este resolver; el resto es genérico
+        # (ver apply_advanced_filters).
+        def mov_pos_computed_resolver(column, condition, value):
+            def get_posiciones_ocupadas():
+                cache_key_ocupadas = "mov_pos_ocupadas_set"
+                posiciones_ocupadas = cache.get(cache_key_ocupadas)
+                if posiciones_ocupadas is None:
+                    with connection.cursor() as cursor:
+                        cursor.execute(OCUPADAS_RAW_SQL)
+                        posiciones_ocupadas = set(
+                            [row[0] for row in cursor.fetchall() if row[0]]
+                        )
+                    cache.set(cache_key_ocupadas, posiciones_ocupadas, 600)
+                return posiciones_ocupadas
+
+            def text_condition_matches(haystack, condition, needle):
+                s = str(haystack).lower()
+                n = str(needle).lower()
+                if condition == "contains":
+                    return n in s
+                if condition == "not_contains":
+                    return n not in s
+                if condition == "starts_with":
+                    return s.startswith(n)
+                if condition == "not_starts_with":
+                    return not s.startswith(n)
+                if condition == "ends_with":
+                    return s.endswith(n)
+                if condition == "not_ends_with":
+                    return not s.endswith(n)
+                if condition == "equals":
+                    return s == n
+                if condition == "not_equals":
+                    return s != n
+                return False
+
+            if column == "ocupacion":
+                posiciones_ocupadas = get_posiciones_ocupadas()
+                candidates = ["Ocupada", "Vacante"]
+                selected = {
+                    c for c in candidates if text_condition_matches(c, condition, value)
+                }
+
+                want_ocupada = "Ocupada" in selected
+                want_vacante = "Vacante" in selected
+                if want_ocupada and want_vacante:
+                    return Q(no_pos_actual__isnull=False) | Q(no_pos_actual__isnull=True)
+                if want_ocupada:
+                    return Q(no_pos_actual__in=list(posiciones_ocupadas))
+                if want_vacante:
+                    return ~Q(no_pos_actual__in=list(posiciones_ocupadas))
+                return Q(pk__in=[])
+
+            if column == "total_movimientos":
+                pos_list = list(
+                    queryset.values_list("no_pos_actual", flat=True).distinct()
+                )
+                if not pos_list:
+                    return Q(pk__in=[])
+                full_counts = dict(
+                    MovPos.objects.filter(no_pos_actual__in=pos_list)
+                    .values("no_pos_actual")
+                    .annotate(c=Count("id"))
+                    .values_list("no_pos_actual", "c")
+                )
+                match_pos = [
+                    p for p, c in full_counts.items()
+                    if text_condition_matches(c, condition, value)
+                ]
+                if not match_pos:
+                    return Q(pk__in=[])
+                return Q(no_pos_actual__in=match_pos)
+
+            return None
+
+        queryset = apply_advanced_filters(
+            queryset, request, MovPos, computed_resolver=mov_pos_computed_resolver
+        )
+
         # If distinct_field requested, return distinct values directly
         distinct_field = request.query_params.get("distinct_field", "").strip()
 
@@ -2115,87 +2199,6 @@ class MovPosDetalleView(APIView):
                     {"value": val if val is not None else "", "count": item["count"]}
                 )
             return Response(results)
-
-        # Advanced filters (built from the "Filtros Avanzados" modal).
-        # "ocupacion" and "total_movimientos" are computed columns (not real
-        # model fields), so apply_advanced_filters() needs this resolver to
-        # handle them; everything else is generic (see apply_advanced_filters).
-        def mov_pos_computed_resolver(column, condition, value):
-            def get_posiciones_ocupadas():
-                cache_key_ocupadas = "mov_pos_ocupadas_set"
-                posiciones_ocupadas = cache.get(cache_key_ocupadas)
-                if posiciones_ocupadas is None:
-                    with connection.cursor() as cursor:
-                        cursor.execute(OCUPADAS_RAW_SQL)
-                        posiciones_ocupadas = set(
-                            [row[0] for row in cursor.fetchall() if row[0]]
-                        )
-                    cache.set(cache_key_ocupadas, posiciones_ocupadas, 600)
-                return posiciones_ocupadas
-
-            def text_condition_matches(haystack, condition, needle):
-                s = str(haystack).lower()
-                n = str(needle).lower()
-                if condition == "contains":
-                    return n in s
-                if condition == "not_contains":
-                    return n not in s
-                if condition == "starts_with":
-                    return s.startswith(n)
-                if condition == "not_starts_with":
-                    return not s.startswith(n)
-                if condition == "ends_with":
-                    return s.endswith(n)
-                if condition == "not_ends_with":
-                    return not s.endswith(n)
-                if condition == "equals":
-                    return s == n
-                if condition == "not_equals":
-                    return s != n
-                return False
-
-            if column == "ocupacion":
-                posiciones_ocupadas = get_posiciones_ocupadas()
-                candidates = ["Ocupada", "Vacante"]
-                selected = {
-                    c for c in candidates if text_condition_matches(c, condition, value)
-                }
-
-                want_ocupada = "Ocupada" in selected
-                want_vacante = "Vacante" in selected
-                if want_ocupada and want_vacante:
-                    return Q(no_pos_actual__isnull=False) | Q(no_pos_actual__isnull=True)
-                if want_ocupada:
-                    return Q(no_pos_actual__in=list(posiciones_ocupadas))
-                if want_vacante:
-                    return ~Q(no_pos_actual__in=list(posiciones_ocupadas))
-                return Q(pk__in=[])
-
-            if column == "total_movimientos":
-                pos_list = list(
-                    queryset.values_list("no_pos_actual", flat=True).distinct()
-                )
-                if not pos_list:
-                    return Q(pk__in=[])
-                full_counts = dict(
-                    MovPos.objects.filter(no_pos_actual__in=pos_list)
-                    .values("no_pos_actual")
-                    .annotate(c=Count("id"))
-                    .values_list("no_pos_actual", "c")
-                )
-                match_pos = [
-                    p for p, c in full_counts.items()
-                    if text_condition_matches(c, condition, value)
-                ]
-                if not match_pos:
-                    return Q(pk__in=[])
-                return Q(no_pos_actual__in=match_pos)
-
-            return None
-
-        queryset = apply_advanced_filters(
-            queryset, request, MovPos, computed_resolver=mov_pos_computed_resolver
-        )
 
         # Sorting
         sort_by_param = request.query_params.get("sort_by", "").strip()
@@ -2859,6 +2862,12 @@ class MovPosAlineacionView(APIView):
                         if any(r.get(f"match_{k}") == "Difiere" for k in diff_keys)
                     ]
 
+            # Filtros de columna ANTES de la rama distinct_field: si no, "Vista
+            # actual" en el dropdown de columna ignoraría el resto de filtros
+            # de columna activos (mismo bug que en MovimientosPersonalListView
+            # / MovPosDetalleView).
+            resultados = apply_dynamic_column_filters_dict(resultados, request)
+
             distinct_field = request.query_params.get("distinct_field", "").strip()
             if distinct_field:
                 return Response(
@@ -2866,8 +2875,6 @@ class MovPosAlineacionView(APIView):
                         resultados, distinct_field, request.query_params.get("distinct_search", "")
                     )
                 )
-
-            resultados = apply_dynamic_column_filters_dict(resultados, request)
 
             sort_by = request.query_params.get("sort_by", "").strip()
             sort_order = request.query_params.get("sort_order", "asc").strip().lower()
@@ -4108,6 +4115,12 @@ class MovimientosPersonalListView(APIView):
 
         queryset = apply_dynamic_column_filters(queryset, request, CpTblMovCompleto290526)
 
+        # Advanced filters (built from the "Filtros Avanzados" modal). Se aplica
+        # ANTES de la rama distinct_field: si no, "Vista actual" en el dropdown
+        # de columna ignoraría las condiciones del modal (bug reportado: el
+        # dropdown de Motivo mostraba valores fuera del rango filtrado).
+        queryset = apply_advanced_filters(queryset, request, CpTblMovCompleto290526)
+
         # If distinct_field requested, return distinct values directly
         if distinct_field in valid_fields:
             is_text = distinct_field in text_fields
@@ -4147,10 +4160,6 @@ class MovimientosPersonalListView(APIView):
                     {"value": val if val is not None else "", "count": item["count"]}
                 )
             return Response(results)
-
-        # Advanced filters (built from the "Filtros Avanzados" modal). No
-        # computed columns here (unlike MovPosDetalleView), so no resolver needed.
-        queryset = apply_advanced_filters(queryset, request, CpTblMovCompleto290526)
 
         # Sorting
         sort_by_param = request.query_params.get("sort_by", "").strip()
