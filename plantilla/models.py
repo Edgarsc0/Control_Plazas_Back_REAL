@@ -991,6 +991,7 @@ class OrganigramaAnam(models.Model):
     )
     modificado_por = models.CharField(max_length=255, blank=True, null=True)
     fecha_modificacion = models.DateTimeField(blank=True, null=True, auto_now=True)
+    isSIGInfo = models.BooleanField(default=False)
 
     class Meta:
         managed = True

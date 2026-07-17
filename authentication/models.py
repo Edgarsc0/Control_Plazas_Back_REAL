@@ -52,6 +52,7 @@ class ModulePermission(models.Model):
             ("view_oficios_turnados", "Puede ver Oficios Turnados DO"),
             ("view_organigrama_institucional", "Organigrama ANAM: ver Vista Institucional"),
             ("view_organigrama_alineacion", "Organigrama ANAM: ver Vista Alineación"),
+            ("view_organigrama_sig", "Organigrama ANAM: ver Vista SIG"),
             ("edit_organigrama", "Organigrama ANAM: crear/editar/eliminar nodos (departamentos)"),
             ("view_monitoreo_zafiro", "Puede ver Monitoreo ZAFIRO"),
             # Administración del propio sistema de roles

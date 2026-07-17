@@ -3868,6 +3868,7 @@ class OrganigramaSearchView(APIView):
     view_permission = (
         "authentication.view_organigrama_institucional",
         "authentication.view_organigrama_alineacion",
+        "authentication.view_organigrama_sig",
     )
 
     def get(self, request):
@@ -4258,15 +4259,25 @@ class OrganigramaTreeView(APIView):
     poblar_subordinados_organigrama, que sí corre la lógica de segmentación
     del determinante) — "Vista Institucional" (manual/curada, editable).
 
-    Query param opcional `vista`: `"institucional"` (default) o
-    `"alineacion"` — este último fuerza el recálculo en vivo desde el
-    determinante real, ignorando `subordinados` ("Vista Alineación", solo
-    lectura en el frontend). Ver organigrama_tree.build_tree.
+    Query param opcional `vista`: `"institucional"` (default), `"alineacion"`
+    — este último fuerza el recálculo en vivo desde el determinante real,
+    ignorando `subordinados` ("Vista Alineación", solo lectura en el
+    frontend) — o `"sig"` — mismo algoritmo que Institucional (lee
+    `subordinados`), pero filtrando de entrada solo las filas con
+    `isSIGInfo=1` ("Vista SIG", solo lectura en el frontend). Ver
+    organigrama_tree.build_tree.
     """
     view_permission = (
         "authentication.view_organigrama_institucional",
         "authentication.view_organigrama_alineacion",
+        "authentication.view_organigrama_sig",
     )
+
+    VISTA_PERMISSIONS = {
+        "alineacion": "authentication.view_organigrama_alineacion",
+        "sig": "authentication.view_organigrama_sig",
+        "institucional": "authentication.view_organigrama_institucional",
+    }
 
     def get(self, request):
         from .organigrama_tree import build_tree
@@ -4276,14 +4287,11 @@ class OrganigramaTreeView(APIView):
             return Response({"error": "Falta el parámetro unidad_negocio"}, status=400)
 
         vista = request.GET.get("vista", "institucional").strip().lower()
-        # El class-level view_permission solo exige AL MENOS UNO de los dos
+        # El class-level view_permission solo exige AL MENOS UNO de los tres
         # (para no bloquear el entry point); aquí se exige el específico de
-        # la vista pedida, ya que institucional/alineación son permisos
+        # la vista pedida, ya que institucional/alineación/sig son permisos
         # independientes (ver ModulePermission).
-        vista_permission = (
-            "authentication.view_organigrama_alineacion" if vista == "alineacion"
-            else "authentication.view_organigrama_institucional"
-        )
+        vista_permission = self.VISTA_PERMISSIONS.get(vista, self.VISTA_PERMISSIONS["institucional"])
         if not request.user.has_perm(vista_permission):
             return Response({"error": "No tienes permiso para ver esta vista del organigrama."}, status=403)
 
@@ -4294,8 +4302,11 @@ class OrganigramaTreeView(APIView):
             FROM ORGANIGRAMA_ANAM
             WHERE unidad_negocio = %s
         """
+        params = [unidad_negocio]
+        if vista == "sig":
+            sql += " AND isSIGInfo = 1"
         with connection.cursor() as cursor:
-            cursor.execute(sql, [unidad_negocio])
+            cursor.execute(sql, params)
             columns = [col[0] for col in cursor.description]
             rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
 
@@ -4371,6 +4382,7 @@ class OrganigramaPosicionInfoView(APIView):
     view_permission = (
         "authentication.view_organigrama_institucional",
         "authentication.view_organigrama_alineacion",
+        "authentication.view_organigrama_sig",
     )
 
     def get(self, request):
@@ -4428,6 +4440,7 @@ class OrganigramaUnidadesView(APIView):
     view_permission = (
         "authentication.view_organigrama_institucional",
         "authentication.view_organigrama_alineacion",
+        "authentication.view_organigrama_sig",
     )
 
     def get(self, request):
