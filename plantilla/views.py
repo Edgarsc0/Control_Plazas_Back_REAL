@@ -19,6 +19,7 @@ from django.db import transaction
 from django.db.models.functions import ExtractHour, Trim
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -4230,10 +4231,15 @@ class OrganigramaTreeView(APIView):
     """
     Árbol jerárquico de ORGANIGRAMA_ANAM para una unidad_negocio, con la misma
     forma que los antiguos JSON estáticos (nodo raíz con `subordinados` anidados).
-    El parentesco ya NO se recalcula en cada request: se lee directo de la
-    columna `subordinados` (poblada por el comando de management
+    El parentesco por default NO se recalcula en cada request: se lee directo
+    de la columna `subordinados` (poblada por el comando de management
     poblar_subordinados_organigrama, que sí corre la lógica de segmentación
-    del determinante). Ver organigrama_tree.build_tree.
+    del determinante) — "Vista Institucional" (manual/curada, editable).
+
+    Query param opcional `vista`: `"institucional"` (default) o
+    `"alineacion"` — este último fuerza el recálculo en vivo desde el
+    determinante real, ignorando `subordinados` ("Vista Alineación", solo
+    lectura en el frontend). Ver organigrama_tree.build_tree.
     """
     permission_classes = [IsAuthenticated]
 
@@ -4243,6 +4249,8 @@ class OrganigramaTreeView(APIView):
         unidad_negocio = request.GET.get("unidad_negocio", "").strip()
         if not unidad_negocio:
             return Response({"error": "Falta el parámetro unidad_negocio"}, status=400)
+
+        vista = request.GET.get("vista", "institucional").strip().lower()
 
         sql = """
             SELECT departamento, descripcion_larga, nivel_direccion, unidad_negocio,
@@ -4260,7 +4268,7 @@ class OrganigramaTreeView(APIView):
             return Response({"error": f"Sin datos para unidad_negocio={unidad_negocio}"}, status=404)
 
         occupant_map = self._build_occupant_map(rows)
-        tree = build_tree(rows, occupant_map)
+        tree = build_tree(rows, occupant_map, forzar_recalculo=(vista == "alineacion"))
         return Response(tree)
 
     def _build_occupant_map(self, rows):
@@ -4413,10 +4421,15 @@ class OrganigramaCrearNodoView(APIView):
       Subdir.      S
       Jefe Depto   D
 
-    Dos modos:
+    "Enlace" no tiene tramo propio (el código solo tiene 5, y Jefe Depto ya
+    ocupa el último) — se codifica aparte, ver `_crear_enlace`.
+
+    Tres modos:
       - tipo="General": alta de una nueva Dirección General (raíz, sin padre,
         abre lienzo nuevo). unidad_negocio y departamento se capturan a mano
         porque son códigos asignados externamente (SAT/SIG), no hay fórmula.
+      - tipo="Enlace": ver `_crear_enlace` — nivel puramente manual, solo
+        visible en Vista Institucional (excluido de Vista Alineación).
       - cualquier otro tipo: requiere parent_departamento. El código se
         autogenera heredando el esquema de longitud del padre (10 u 11 chars,
         ver organigrama_tree.parse_code), reutilizando sus segmentos hasta el
@@ -4427,7 +4440,7 @@ class OrganigramaCrearNodoView(APIView):
     """
     permission_classes = [IsAuthenticated]
 
-    LEVEL_SEGPOS = {"General": 0, "Central": 1, "Director": 2, "Subdir.": 3, "Jefe Depto": 4}
+    LEVEL_SEGPOS = {"General": 0, "Central": 1, "Director": 2, "Subdir.": 3, "Jefe Depto": 4, "Enlace": 5}
     WIDTHS_11 = [3, 2, 2, 2, 2]
     WIDTHS_10 = [2, 2, 2, 2, 2]
 
@@ -4482,6 +4495,9 @@ class OrganigramaCrearNodoView(APIView):
         if not parent_code:
             return Response({"detail": "Falta parent_departamento."}, status=status.HTTP_400_BAD_REQUEST)
         parent = get_object_or_404(OrganigramaAnam, departamento=parent_code)
+
+        if tipo == "Enlace":
+            return self._crear_enlace(request, data, parent, descripcion_larga)
 
         parent_nivel = parent.nivel_direccion
         if parent_nivel == "Titular":
@@ -4566,6 +4582,63 @@ class OrganigramaCrearNodoView(APIView):
                 estado_fecha_efectiva="Activo",
                 descripcion_larga=descripcion_larga,
                 nivel_direccion=tipo,
+                unidad_administrativa=(data.get("unidad_administrativa") or parent.unidad_administrativa or "").strip(),
+                doaf=(data.get("doaf") or parent.doaf or "").strip(),
+                num_posicion_gerente=(data.get("num_posicion_gerente") or "(en blanco)").strip(),
+                posicion_director=parent.num_posicion_gerente or "(en blanco)",
+                modificado_por=request.user.username,
+            )
+            existentes = [c for c in (parent.subordinados or "").split(",") if c]
+            existentes.append(new_code)
+            parent.subordinados = ",".join(existentes)
+            parent.save(update_fields=["subordinados"])
+
+        return Response(OrganigramaAnamSerializer(nuevo).data, status=status.HTTP_201_CREATED)
+
+    def _crear_enlace(self, request, data, parent, descripcion_larga):
+        """
+        'Enlace' no ocupa un tramo del determinante (solo hay 5 tramos, y
+        'Jefe Depto' ya ocupa el último) — se codifica apendizando 2 dígitos
+        al código completo del padre, sea cual sea su nivel_direccion (no es
+        regla estricta que cuelgue de un Jefe Depto). El código resultante
+        (12-13 chars) nunca colisiona con un código real de ZAFIRO (siempre
+        10 u 11 chars exactos). Por eso Vista Alineación (organigrama_tree.
+        build_tree con forzar_recalculo=True) excluye por completo los nodos
+        'Enlace': no tienen tramo que parsear en el determinante oficial.
+        """
+        parent_code = parent.departamento
+        suffix_len = len(parent_code) + 2
+        siblings = OrganigramaAnam.objects.filter(
+            departamento__startswith=parent_code,
+        ).values_list("departamento", flat=True)
+
+        max_num = 0
+        for dep in siblings:
+            if len(dep) != suffix_len:
+                continue
+            seg_val = dep[len(parent_code):]
+            if seg_val.isdigit():
+                max_num = max(max_num, int(seg_val))
+        next_num = max_num + 1
+        if next_num >= 100:
+            return Response(
+                {"detail": f"Se agotó la numeración disponible (2 dígitos) bajo {parent_code} para 'Enlace'."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        new_code = f"{parent_code}{str(next_num).zfill(2)}"
+        if OrganigramaAnam.objects.filter(departamento=new_code).exists():
+            return Response(
+                {"detail": f"Colisión al generar el código {new_code}, intenta de nuevo."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        with transaction.atomic():
+            nuevo = OrganigramaAnam.objects.create(
+                departamento=new_code,
+                unidad_negocio=parent.unidad_negocio,
+                estado_fecha_efectiva="Activo",
+                descripcion_larga=descripcion_larga,
+                nivel_direccion="Enlace",
                 unidad_administrativa=(data.get("unidad_administrativa") or parent.unidad_administrativa or "").strip(),
                 doaf=(data.get("doaf") or parent.doaf or "").strip(),
                 num_posicion_gerente=(data.get("num_posicion_gerente") or "(en blanco)").strip(),
@@ -4709,6 +4782,20 @@ class OrganigramaAnamViewSet(AuditedViewSetMixin, viewsets.ModelViewSet):
     def perform_update(self, serializer):
         for field in self.LOCKED_UPDATE_FIELDS:
             serializer.validated_data.pop(field, None)
+
+        # `subordinados` sí es editable (lo usa el drag-and-drop de
+        # reordenamiento de hermanos), pero solo para REORDENAR — debe seguir
+        # siendo el mismo conjunto de códigos. Agregar/quitar hijos por esta
+        # vía dejaría el árbol inconsistente sin pasar por las validaciones
+        # de crear/eliminar nodo (OrganigramaCrearNodoView / destroy).
+        if "subordinados" in serializer.validated_data:
+            nuevo = {c for c in (serializer.validated_data["subordinados"] or "").split(",") if c}
+            actual = {c for c in (serializer.instance.subordinados or "").split(",") if c}
+            if nuevo != actual:
+                raise ValidationError({
+                    "subordinados": "Solo se puede reordenar a los subordinados existentes — usa crear/eliminar nodo para agregar o quitar.",
+                })
+
         serializer.save(modificado_por=self.request.user.username)
 
     def destroy(self, request, *args, **kwargs):

@@ -5,9 +5,15 @@ Construye el árbol jerárquico (mismo formato que los antiguos JSON estáticos
 en eje_central_front/public/organigramas/) a partir de filas planas de
 ORGANIGRAMA_ANAM para una sola unidad_negocio.
 
-`build_tree` (usado en cada request de OrganigramaTreeView) ya NO recalcula
-el parentesco: arma el árbol leyendo directo la columna `subordinados`
-(hijos directos, códigos separados por coma), que se precalcula offline.
+`build_tree` (usado en cada request de OrganigramaTreeView) por default ya NO
+recalcula el parentesco: arma el árbol leyendo directo la columna
+`subordinados` (hijos directos, códigos separados por coma), que se
+precalcula offline. Esta es la "Vista Institucional" (manual/curada).
+
+Con `forzar_recalculo=True` ignora la columna `subordinados` aunque esté
+poblada y siempre reconstruye el árbol parseando el determinante real
+("Vista Alineación", solo lectura) — distinto del fallback de abajo, que
+solo se activa si *ninguna* fila de la unidad_negocio tiene `subordinados`.
 
 El algoritmo de segmentación de determinante (candidate_parents,
 resolve_by_position, build_parent_map/build_children_map) se conserva en
@@ -19,12 +25,13 @@ para la explicación completa del algoritmo de segmentación de códigos.
 """
 
 LEVEL_ORDER = {
-    "Titular": 6,
-    "General": 5,
-    "Central": 4,
-    "Director": 3,
-    "Subdir.": 2,
-    "Jefe Depto": 1,
+    "Titular": 7,
+    "General": 6,
+    "Central": 5,
+    "Director": 4,
+    "Subdir.": 3,
+    "Jefe Depto": 2,
+    "Enlace": 1,
     "(en blanco)": 0,
 }
 
@@ -170,10 +177,18 @@ def build_parent_map(data):
 
 
 def build_children_map(data, parent_map):
+    """
+    Solo la usa el modo Alineación (cálculo puro desde el determinante) — ahí
+    sí normalizamos el orden por nivel+descripción porque no existe un "orden
+    elegido por el usuario" que preservar (a diferencia de
+    build_children_map_from_column, que preserva el orden manual del CSV).
+    """
     by_parent = {}
     for d in data:
         p = parent_map.get(d["departamento"])
         by_parent.setdefault(p or "ROOT", []).append(d)
+    for children in by_parent.values():
+        children.sort(key=lambda x: (-LEVEL_ORDER.get(x["nivel_direccion"], 0), x["descripcion_larga"]))
     return by_parent
 
 
@@ -203,17 +218,15 @@ def build_tree_node(node, by_parent, occupant_map, visited=None):
         return None
     visited.add(code)
 
-    children_raw = by_parent.get(code, [])
-    children_sorted = sorted(
-        children_raw,
-        key=lambda x: (
-            -LEVEL_ORDER.get(x["nivel_direccion"], 0),
-            x["descripcion_larga"],
-        ),
-    )
+    # El orden ya viene decidido por quien construyó `by_parent`:
+    # build_children_map_from_column preserva el orden manual del CSV
+    # `subordinados` (reordenable por el usuario); build_children_map (modo
+    # Alineación) ya lo normaliza por nivel+descripción. No se vuelve a
+    # ordenar aquí.
+    children = by_parent.get(code, [])
 
     subordinados = []
-    for child in children_sorted:
+    for child in children:
         node_child = build_tree_node(child, by_parent, occupant_map, visited)
         if node_child is not None:
             subordinados.append(node_child)
@@ -232,27 +245,41 @@ def build_tree_node(node, by_parent, occupant_map, visited=None):
     }
 
 
-def build_tree(data, occupant_map=None):
+def build_tree(data, occupant_map=None, forzar_recalculo=False):
     """
     data: lista de dicts con las columnas de ORGANIGRAMA_ANAM (ya filtradas
     por unidad_negocio), incluyendo `subordinados` (hijos directos
     precalculados). Retorna el nodo raíz anidado, o None si data está vacío.
     occupant_map: dict num_posicion_gerente -> info del ocupante (nombre/nivel/
     smb/activa/vacante), ver OrganigramaTreeView._build_occupant_map.
+    forzar_recalculo: si True, ignora la columna `subordinados` aunque esté
+    poblada y siempre reconstruye el parentesco vía
+    build_parent_map/build_children_map ("Vista Alineación").
 
-    No recalcula parentesco: solo lee la columna `subordinados` y arma el
-    árbol. Si esa columna viene vacía para toda la unidad_negocio (p.ej. no
-    se ha corrido poblar_subordinados_organigrama todavía), cae de vuelta al
-    cálculo en vivo vía build_parent_map/build_children_map para no romper
-    la vista.
+    Por default no recalcula parentesco: solo lee la columna `subordinados`
+    y arma el árbol ("Vista Institucional"). Si esa columna viene vacía para
+    toda la unidad_negocio (p.ej. no se ha corrido
+    poblar_subordinados_organigrama todavía), cae de vuelta al cálculo en
+    vivo vía build_parent_map/build_children_map para no romper la vista.
     """
     if not data:
         return None
 
+    if forzar_recalculo:
+        # "Enlace" es un nivel puramente manual (no existe tramo del
+        # determinante para él, ver OrganigramaCrearNodoView._crear_enlace) —
+        # se excluye por completo de Vista Alineación: nunca aparece colgado
+        # de la raíz ni de ningún otro nodo en esa vista.
+        data = [d for d in data if d.get("nivel_direccion") != "Enlace"]
+        if not data:
+            return None
+
     root = find_root(data)
     root_code = root["departamento"]
 
-    if any((d.get("subordinados") or "").strip() for d in data):
+    usar_columna = (not forzar_recalculo) and any((d.get("subordinados") or "").strip() for d in data)
+
+    if usar_columna:
         by_parent = build_children_map_from_column(data)
     else:
         parent_map, root_code = build_parent_map(data)
