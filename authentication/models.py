@@ -50,7 +50,8 @@ class ModulePermission(models.Model):
             ("edit_valuacion_parametros", "Valuación Presupuestaria: editar Parámetros (catálogo/conceptos/constantes)"),
             # Resto de módulos (sin tabs)
             ("view_oficios_turnados", "Puede ver Oficios Turnados DO"),
-            ("view_organigrama", "Puede ver Organigrama ANAM"),
+            ("view_organigrama_institucional", "Organigrama ANAM: ver Vista Institucional"),
+            ("view_organigrama_alineacion", "Organigrama ANAM: ver Vista Alineación"),
             ("edit_organigrama", "Organigrama ANAM: crear/editar/eliminar nodos (departamentos)"),
             ("view_monitoreo_zafiro", "Puede ver Monitoreo ZAFIRO"),
             # Administración del propio sistema de roles

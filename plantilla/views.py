@@ -3303,7 +3303,10 @@ class CadenaMandoView(APIView):
     Busca por posición, nombre completo o número de empleado, y usa un CTE recursivo para subir la jerarquía.
     """
 
-    view_permission = "authentication.view_organigrama"
+    view_permission = (
+        "authentication.view_organigrama_institucional",
+        "authentication.view_organigrama_alineacion",
+    )
 
     def get(self, request):
         query = request.query_params.get("q", "").strip()
@@ -3862,7 +3865,10 @@ class OrganigramaSearchView(APIView):
     Retorna la unidad_negocio para que el frontend sepa qué JSON cargar.
     """
 
-    view_permission = "authentication.view_organigrama"
+    view_permission = (
+        "authentication.view_organigrama_institucional",
+        "authentication.view_organigrama_alineacion",
+    )
 
     def get(self, request):
         query = request.GET.get("q", "").strip()
@@ -3898,7 +3904,10 @@ class OrganigramaSearchView(APIView):
 
 
 class TorreCaballito3DView(APIView):
-    view_permission = "authentication.view_organigrama"
+    view_permission = (
+        "authentication.view_organigrama_institucional",
+        "authentication.view_organigrama_alineacion",
+    )
 
     def get(self, request):
         from django.db import connection
@@ -3941,7 +3950,10 @@ class TorreCaballito3DView(APIView):
 
 
 class TorreCaballitoEmpleadosView(APIView):
-    view_permission = "authentication.view_organigrama"
+    view_permission = (
+        "authentication.view_organigrama_institucional",
+        "authentication.view_organigrama_alineacion",
+    )
 
     def get(self, request):
         piso = request.query_params.get("piso", None)
@@ -4023,7 +4035,10 @@ class TorreCaballitoEmpleadosView(APIView):
 
 
 class TorreCaballitoSearchView(APIView):
-    view_permission = "authentication.view_organigrama"
+    view_permission = (
+        "authentication.view_organigrama_institucional",
+        "authentication.view_organigrama_alineacion",
+    )
 
     def get(self, request):
         q = request.query_params.get("q", "").strip()
@@ -4248,7 +4263,10 @@ class OrganigramaTreeView(APIView):
     determinante real, ignorando `subordinados` ("Vista Alineación", solo
     lectura en el frontend). Ver organigrama_tree.build_tree.
     """
-    view_permission = "authentication.view_organigrama"
+    view_permission = (
+        "authentication.view_organigrama_institucional",
+        "authentication.view_organigrama_alineacion",
+    )
 
     def get(self, request):
         from .organigrama_tree import build_tree
@@ -4258,6 +4276,16 @@ class OrganigramaTreeView(APIView):
             return Response({"error": "Falta el parámetro unidad_negocio"}, status=400)
 
         vista = request.GET.get("vista", "institucional").strip().lower()
+        # El class-level view_permission solo exige AL MENOS UNO de los dos
+        # (para no bloquear el entry point); aquí se exige el específico de
+        # la vista pedida, ya que institucional/alineación son permisos
+        # independientes (ver ModulePermission).
+        vista_permission = (
+            "authentication.view_organigrama_alineacion" if vista == "alineacion"
+            else "authentication.view_organigrama_institucional"
+        )
+        if not request.user.has_perm(vista_permission):
+            return Response({"error": "No tienes permiso para ver esta vista del organigrama."}, status=403)
 
         sql = """
             SELECT departamento, descripcion_larga, nivel_direccion, unidad_negocio,
@@ -4340,7 +4368,10 @@ class OrganigramaPosicionInfoView(APIView):
     (según MOV_POS_LATEST, que ya trae la última fila por posición) y, de
     estarlo, el ocupante actual en EMPLEADOS_COMPLETOS_SIG.
     """
-    view_permission = "authentication.view_organigrama"
+    view_permission = (
+        "authentication.view_organigrama_institucional",
+        "authentication.view_organigrama_alineacion",
+    )
 
     def get(self, request):
         from django.db import connection
@@ -4394,7 +4425,10 @@ class OrganigramaUnidadesView(APIView):
     organigrama_tree.build_tree (find_root), por si existen varias filas
     General/Titular sueltas bajo el mismo unidad_negocio (dato legado).
     """
-    view_permission = "authentication.view_organigrama"
+    view_permission = (
+        "authentication.view_organigrama_institucional",
+        "authentication.view_organigrama_alineacion",
+    )
 
     def get(self, request):
         from .organigrama_tree import find_root
@@ -4668,7 +4702,7 @@ class EmpleadosBusquedaView(APIView):
     organigrama. A diferencia de TorreCaballitoSearchView, no filtra por
     ubicación física.
     """
-    view_permission = "authentication.view_organigrama"
+    view_permission = "authentication.view_organigrama_institucional"
 
     def get(self, request):
         query = request.GET.get("q", "").strip()
@@ -4787,7 +4821,7 @@ class OrganigramaAnamViewSet(AuditedViewSetMixin, viewsets.ModelViewSet):
     # roles enfocados en el organigrama que no tengan Catálogos.
     view_permission = (
         "authentication.view_plantilla_catalogos",
-        "authentication.view_organigrama",
+        "authentication.view_organigrama_institucional",
     )
     edit_permission = (
         "authentication.view_plantilla_catalogos",
