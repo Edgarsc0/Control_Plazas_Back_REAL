@@ -4243,6 +4243,7 @@ class OrganigramaDeptoView(APIView):
         sql = """
             SELECT departamento, descripcion_larga, nivel_direccion
             FROM ORGANIGRAMA_ANAM
+            WHERE isSIGInfo = 1
             ORDER BY departamento
         """
         with connection.cursor() as cursor:
