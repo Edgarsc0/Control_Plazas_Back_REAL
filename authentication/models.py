@@ -51,6 +51,7 @@ class ModulePermission(models.Model):
             # Resto de módulos (sin tabs)
             ("view_oficios_turnados", "Puede ver Oficios Turnados DO"),
             ("view_organigrama", "Puede ver Organigrama ANAM"),
+            ("edit_organigrama", "Organigrama ANAM: crear/editar/eliminar nodos (departamentos)"),
             ("view_monitoreo_zafiro", "Puede ver Monitoreo ZAFIRO"),
             # Administración del propio sistema de roles
             ("manage_roles", "Puede administrar roles y permisos"),

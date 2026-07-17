@@ -1480,7 +1480,12 @@ class RegistrosPorOficio1800PlazasView(APIView):
     Devuelve los registros detallados del modelo Plantilla1800Plazas filtrados por 'Of. De Solicitud' y opcionalmente por 'Nivel'.
     """
 
-    permission_classes = [IsAuthenticated]
+    # Mismo dataset que OcupacionPorOficiosResumenView, filtrado por oficio/nivel.
+    view_permission = (
+        "authentication.view_ocupacion_sankey",
+        "authentication.view_ocupacion_tabla",
+        "authentication.view_ocupacion_estadisticas",
+    )
 
     def get(self, request):
         no_oficio = request.query_params.get("oficio")
@@ -2967,7 +2972,7 @@ class MovPosExportExcelView(APIView):
     con los filtros activos en el frontend. Evita que el cliente descargue
     todos los datos en JSON y ejecute ExcelJS localmente."""
 
-    permission_classes = [IsAuthenticated]
+    view_permission = "authentication.view_plantilla_mov_posiciones"
 
     def get(self, request, *args, **kwargs):
         from django.db import connection as db_connection
@@ -3298,7 +3303,7 @@ class CadenaMandoView(APIView):
     Busca por posición, nombre completo o número de empleado, y usa un CTE recursivo para subir la jerarquía.
     """
 
-    permission_classes = [IsAuthenticated]
+    view_permission = "authentication.view_organigrama"
 
     def get(self, request):
         query = request.query_params.get("q", "").strip()
@@ -3393,7 +3398,7 @@ class ZafiroBitacoraView(APIView):
     Endpoint para obtener el historial de ejecuciones de ZAFIRO.
     """
 
-    permission_classes = [IsAuthenticated]
+    view_permission = "authentication.view_monitoreo_zafiro"
 
     def get(self, request):
         limit = int(request.query_params.get("limit", 50))
@@ -3427,7 +3432,7 @@ class ZafiroDuracionPromedioPorHoraView(APIView):
     local de Ciudad de México).
     """
 
-    permission_classes = [IsAuthenticated]
+    view_permission = "authentication.view_monitoreo_zafiro"
 
     # `fecha_ejecucion` se guarda en UTC (USE_TZ=True), pero el servidor
     # MySQL no tiene cargadas las tablas de zona horaria (CONVERT_TZ
@@ -3520,7 +3525,7 @@ class IniciarSincronizacionZafiroView(APIView):
     Endpoint para arrancar manualmente la sincronización de ZAFIRO.
     """
 
-    permission_classes = [IsAuthenticated]
+    view_permission = "authentication.view_monitoreo_zafiro"
 
     def post(self, request):
         if ZafiroBitacora.objects.filter(status="RUNNING").exists():
@@ -3793,7 +3798,7 @@ class ExportarEstatusExcelView(APIView):
     Si no, lo genera de forma síncrona en el hilo de la petición y lo retorna.
     """
 
-    permission_classes = [IsAuthenticated]
+    view_permission = "authentication.view_plantilla_estatus_nomina"
 
     def get(self, request):
         from django.core.cache import cache
@@ -3857,13 +3862,15 @@ class OrganigramaSearchView(APIView):
     Retorna la unidad_negocio para que el frontend sepa qué JSON cargar.
     """
 
+    view_permission = "authentication.view_organigrama"
+
     def get(self, request):
         query = request.GET.get("q", "").strip()
 
         with connection.cursor() as cursor:
             if not query:
                 sql = """
-                    SELECT departamento, descripcion_larga, unidad_negocio, nivel_direccion 
+                    SELECT departamento, descripcion_larga, unidad_negocio, nivel_direccion
                     FROM ORGANIGRAMA_ANAM
                 """
                 cursor.execute(sql)
@@ -3891,7 +3898,7 @@ class OrganigramaSearchView(APIView):
 
 
 class TorreCaballito3DView(APIView):
-    permission_classes = [IsAuthenticated]
+    view_permission = "authentication.view_organigrama"
 
     def get(self, request):
         from django.db import connection
@@ -3934,7 +3941,7 @@ class TorreCaballito3DView(APIView):
 
 
 class TorreCaballitoEmpleadosView(APIView):
-    permission_classes = [IsAuthenticated]
+    view_permission = "authentication.view_organigrama"
 
     def get(self, request):
         piso = request.query_params.get("piso", None)
@@ -4016,7 +4023,7 @@ class TorreCaballitoEmpleadosView(APIView):
 
 
 class TorreCaballitoSearchView(APIView):
-    permission_classes = [IsAuthenticated]
+    view_permission = "authentication.view_organigrama"
 
     def get(self, request):
         q = request.query_params.get("q", "").strip()
@@ -4077,7 +4084,7 @@ class MovimientosPersonalPagination(PageNumberPagination):
 
 
 class MovimientosPersonalListView(APIView):
-    permission_classes = [IsAuthenticated]
+    view_permission = "authentication.view_plantilla_movimientos"
     pagination_class = MovimientosPersonalPagination
 
     def get(self, request):
@@ -4241,7 +4248,7 @@ class OrganigramaTreeView(APIView):
     determinante real, ignorando `subordinados` ("Vista Alineación", solo
     lectura en el frontend). Ver organigrama_tree.build_tree.
     """
-    permission_classes = [IsAuthenticated]
+    view_permission = "authentication.view_organigrama"
 
     def get(self, request):
         from .organigrama_tree import build_tree
@@ -4333,7 +4340,7 @@ class OrganigramaPosicionInfoView(APIView):
     (según MOV_POS_LATEST, que ya trae la última fila por posición) y, de
     estarlo, el ocupante actual en EMPLEADOS_COMPLETOS_SIG.
     """
-    permission_classes = [IsAuthenticated]
+    view_permission = "authentication.view_organigrama"
 
     def get(self, request):
         from django.db import connection
@@ -4387,7 +4394,7 @@ class OrganigramaUnidadesView(APIView):
     organigrama_tree.build_tree (find_root), por si existen varias filas
     General/Titular sueltas bajo el mismo unidad_negocio (dato legado).
     """
-    permission_classes = [IsAuthenticated]
+    view_permission = "authentication.view_organigrama"
 
     def get(self, request):
         from .organigrama_tree import find_root
@@ -4438,7 +4445,8 @@ class OrganigramaCrearNodoView(APIView):
         objetivo. Actualiza también `subordinados` del padre para que el
         árbol se refleje sin esperar a poblar_subordinados_organigrama.
     """
-    permission_classes = [IsAuthenticated]
+    # Solo POST (alta de nodo): exige el permiso de edición, no basta con ver.
+    edit_permission = "authentication.edit_organigrama"
 
     LEVEL_SEGPOS = {"General": 0, "Central": 1, "Director": 2, "Subdir.": 3, "Jefe Depto": 4, "Enlace": 5}
     WIDTHS_11 = [3, 2, 2, 2, 2]
@@ -4660,7 +4668,7 @@ class EmpleadosBusquedaView(APIView):
     organigrama. A diferencia de TorreCaballitoSearchView, no filtra por
     ubicación física.
     """
-    permission_classes = [IsAuthenticated]
+    view_permission = "authentication.view_organigrama"
 
     def get(self, request):
         query = request.GET.get("q", "").strip()
@@ -4735,6 +4743,7 @@ class CatPtoFuncViewSet(AuditedViewSetMixin, viewsets.ModelViewSet):
     """
     queryset = CatPtoFunc.objects.all()
     serializer_class = CatPtoFuncSerializer
+    view_permission = "authentication.view_plantilla_catalogos"
 
 
 class RcCatCodPresupuestalViewSet(AuditedViewSetMixin, viewsets.ModelViewSet):
@@ -4748,6 +4757,7 @@ class RcCatCodPresupuestalViewSet(AuditedViewSetMixin, viewsets.ModelViewSet):
     """
     queryset = RcCatCodPresupuestal.objects.all()
     serializer_class = RcCatCodPresupuestalSerializer
+    view_permission = "authentication.view_plantilla_catalogos"
 
     def get_object(self):
         from django.shortcuts import get_object_or_404
@@ -4769,6 +4779,20 @@ class OrganigramaAnamViewSet(AuditedViewSetMixin, viewsets.ModelViewSet):
     """
     queryset = OrganigramaAnam.objects.all()
     serializer_class = OrganigramaAnamSerializer
+    # Se usa desde 2 superficies: tab Catálogos de Plantilla (tabla cruda) y
+    # el botón "Editar departamento"/alta-baja de nodo en el módulo
+    # Organigrama ANAM (organigrama/page.jsx). Lectura: cualquiera de los 2
+    # permisos basta. Escritura: igual, para no romper a quien ya editaba
+    # desde Catálogos — edit_organigrama solo suma una vía adicional para
+    # roles enfocados en el organigrama que no tengan Catálogos.
+    view_permission = (
+        "authentication.view_plantilla_catalogos",
+        "authentication.view_organigrama",
+    )
+    edit_permission = (
+        "authentication.view_plantilla_catalogos",
+        "authentication.edit_organigrama",
+    )
 
     # Campos bloqueados en update: `departamento` es la PK y codifica el
     # determinante (ver organigrama_tree.parse_code); `nivel_direccion` y
@@ -4842,6 +4866,7 @@ class CatNivelJerarquicoPlazaViewSet(AuditedViewSetMixin, viewsets.ModelViewSet)
     """
     queryset = CatNivelJerarquicoPlaza.objects.all()
     serializer_class = CatNivelJerarquicoPlazaSerializer
+    view_permission = "authentication.view_plantilla_catalogos"
     lookup_value_regex = "[^/]+"
 
     def get_object(self):
@@ -4997,7 +5022,7 @@ class MovimientosPersonalStatsView(APIView):
     }
     """
 
-    permission_classes = [IsAuthenticated]
+    view_permission = "authentication.view_plantilla_movimientos"
 
     def get(self, request):
         accion_nombre = request.query_params.get("accion_nombre")
@@ -5082,7 +5107,8 @@ class MovimientosPersonalStatsView(APIView):
 
 
 class CuadroVacanciaView(APIView):
-    permission_classes = [IsAuthenticated]
+    # Sub-tab "Cuadros" dentro de Mov. Posiciones (CuadrosVacanciaTab en el front).
+    view_permission = "authentication.view_plantilla_mov_posiciones"
 
     def get(self, request, *args, **kwargs):
         try:
@@ -5096,7 +5122,7 @@ class CuadroVacanciaView(APIView):
 
 
 class DesgloseJerarquicoView(APIView):
-    permission_classes = [IsAuthenticated]
+    view_permission = "authentication.view_plantilla_mov_posiciones"
 
     def get(self, request, *args, **kwargs):
         from django.db import connection
@@ -5154,7 +5180,7 @@ class DesgloseJerarquicoView(APIView):
 
 
 class DesgloseJerarquicoOcupadosView(APIView):
-    permission_classes = [IsAuthenticated]
+    view_permission = "authentication.view_plantilla_mov_posiciones"
 
     def get(self, request, *args, **kwargs):
         from django.db import connection

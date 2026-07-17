@@ -83,6 +83,7 @@ def _resolver_ocupadas(rows):
 class ValuacionPresupuestariaPorNivelViewSet(viewsets.ModelViewSet):
     queryset = ValuacionPresupuestariaPorNivel.objects.all()
     serializer_class = ValuacionPresupuestariaPorNivelSerializer
+    view_permission = "authentication.view_valuacion_presupuestaria"
 
 
 class CatalogoPlazasViewSet(viewsets.ModelViewSet):

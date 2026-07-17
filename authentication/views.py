@@ -28,9 +28,14 @@ class WhitelistViewSet(viewsets.ModelViewSet):
         # sus permisos cambien de inmediato, sin esperar a que vuelva a loguearse.
         if instance.user and instance.rol_id != previous_rol_id:
             instance.user.groups.set([instance.rol])
-            if instance.rol.name.lower() == "superadmin" and not instance.user.is_superuser:
-                instance.user.is_staff = True
-                instance.user.is_superuser = True
+            # Sincroniza is_superuser/is_staff en ambos sentidos: si el rol deja de
+            # ser superadmin hay que revocarlos, no solo activarlos al asignarlo
+            # (bug previo: el flag quedaba pegado tras reasignar a otro rol, y
+            # Django ignora los permisos del grupo cuando is_superuser=True).
+            es_superadmin = instance.rol.name.lower() == "superadmin"
+            if instance.user.is_superuser != es_superadmin or instance.user.is_staff != es_superadmin:
+                instance.user.is_staff = es_superadmin
+                instance.user.is_superuser = es_superadmin
                 instance.user.save(update_fields=["is_staff", "is_superuser"])
 
 
@@ -171,11 +176,14 @@ class VerifyCodeView(views.APIView):
                 # Crear o obtener usuario
                 user, created = User.objects.get_or_create(username=email, email=email)
 
-                # Automatización de privilegios para Administradores
+                # Automatización de privilegios para Administradores. Sincroniza en
+                # ambos sentidos (activa Y revoca) para que un cambio de rol previo
+                # a "superadmin" no deje is_superuser pegado tras reasignar el rol.
                 rol_name = whitelist_entry.rol.name.lower()
-                if rol_name == "superadmin":
-                    user.is_staff = True
-                    user.is_superuser = True
+                es_superadmin = rol_name == "superadmin"
+                if user.is_superuser != es_superadmin or user.is_staff != es_superadmin:
+                    user.is_staff = es_superadmin
+                    user.is_superuser = es_superadmin
                     user.save()
 
                 # Vincular la entrada de la whitelist con el usuario de Django
