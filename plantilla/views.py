@@ -3877,14 +3877,14 @@ class OrganigramaSearchView(APIView):
         with connection.cursor() as cursor:
             if not query:
                 sql = """
-                    SELECT departamento, descripcion_larga, unidad_negocio, nivel_direccion
+                    SELECT departamento, descripcion_larga, unidad_negocio, nivel_direccion, isSIGInfo
                     FROM ORGANIGRAMA_ANAM
                 """
                 cursor.execute(sql)
             else:
                 sql = """
-                    SELECT departamento, descripcion_larga, unidad_negocio, nivel_direccion 
-                    FROM ORGANIGRAMA_ANAM 
+                    SELECT departamento, descripcion_larga, unidad_negocio, nivel_direccion, isSIGInfo
+                    FROM ORGANIGRAMA_ANAM
                     WHERE descripcion_larga LIKE %s OR departamento LIKE %s
                     LIMIT 50
                 """
@@ -3892,12 +3892,16 @@ class OrganigramaSearchView(APIView):
 
             rows = cursor.fetchall()
 
+        # isSIGInfo se incluye para que el front pueda filtrar el catálogo
+        # global de búsqueda según la vista activa (Vista SIG solo debe
+        # sugerir/saltar a nodos con isSIGInfo=1, ver organigrama/page.jsx).
         results = [
             {
                 "departamento": r[0],
                 "descripcion_larga": r[1],
                 "unidad_negocio": r[2],
                 "nivel_direccion": r[3],
+                "isSIGInfo": bool(r[4]),
             }
             for r in rows
         ]
