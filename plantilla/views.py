@@ -4264,13 +4264,17 @@ class OrganigramaTreeView(APIView):
     poblar_subordinados_organigrama, que sí corre la lógica de segmentación
     del determinante) — "Vista Institucional" (manual/curada, editable).
 
-    Query param opcional `vista`: `"institucional"` (default), `"alineacion"`
-    — este último fuerza el recálculo en vivo desde el determinante real,
-    ignorando `subordinados` ("Vista Alineación", solo lectura en el
-    frontend) — o `"sig"` — mismo algoritmo que Institucional (lee
-    `subordinados`), pero filtrando de entrada solo las filas con
-    `isSIGInfo=1` ("Vista SIG", solo lectura en el frontend). Ver
-    organigrama_tree.build_tree.
+    Query param opcional `vista`: `"institucional"` (default) lee de
+    ORGANIGRAMA_ANAM tal cual (manual/curada, editable). `"alineacion"` y
+    `"sig"` son de solo lectura y fuerzan el recálculo en vivo desde el
+    determinante real (`forzar_recalculo=True`, ignoran `subordinados`) —
+    la diferencia entre ambas es la TABLA de origen: Alineación recalcula
+    sobre ORGANIGRAMA_ANAM (todo lo editado a mano incluido); SIG recalcula
+    sobre ORGANIGRAMA_ANAM_SIG, una foto fija (snapshot) completamente
+    aparte, poblada una sola vez por el management command
+    `congelar_organigrama_sig` — así SIG es inmune a CUALQUIER edición
+    manual (estructura, orden y contenido), no solo a nodos creados a mano.
+    Ver organigrama_tree.build_tree y plantilla.models.OrganigramaAnamSig.
     """
     view_permission = (
         "authentication.view_organigrama_institucional",
@@ -4300,18 +4304,25 @@ class OrganigramaTreeView(APIView):
         if not request.user.has_perm(vista_permission):
             return Response({"error": "No tienes permiso para ver esta vista del organigrama."}, status=403)
 
-        sql = """
-            SELECT departamento, descripcion_larga, nivel_direccion, unidad_negocio,
-                   unidad_administrativa, doaf, num_posicion_gerente, posicion_director,
-                   subordinados
-            FROM ORGANIGRAMA_ANAM
-            WHERE unidad_negocio = %s
-        """
-        params = [unidad_negocio]
         if vista == "sig":
-            sql += " AND isSIGInfo = 1"
+            # Tabla completamente aparte (foto fija) — no hay isSIGInfo que
+            # filtrar aquí, ORGANIGRAMA_ANAM_SIG completa ES el conjunto SIG.
+            sql = """
+                SELECT departamento, descripcion_larga, nivel_direccion, unidad_negocio,
+                       unidad_administrativa, doaf, num_posicion_gerente, posicion_director
+                FROM ORGANIGRAMA_ANAM_SIG
+                WHERE unidad_negocio = %s
+            """
+        else:
+            sql = """
+                SELECT departamento, descripcion_larga, nivel_direccion, unidad_negocio,
+                       unidad_administrativa, doaf, num_posicion_gerente, posicion_director,
+                       subordinados
+                FROM ORGANIGRAMA_ANAM
+                WHERE unidad_negocio = %s
+            """
         with connection.cursor() as cursor:
-            cursor.execute(sql, params)
+            cursor.execute(sql, [unidad_negocio])
             columns = [col[0] for col in cursor.description]
             rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
 
@@ -4319,7 +4330,7 @@ class OrganigramaTreeView(APIView):
             return Response({"error": f"Sin datos para unidad_negocio={unidad_negocio}"}, status=404)
 
         occupant_map = self._build_occupant_map(rows)
-        tree = build_tree(rows, occupant_map, forzar_recalculo=(vista == "alineacion"))
+        tree = build_tree(rows, occupant_map, forzar_recalculo=(vista in ("alineacion", "sig")))
         return Response(tree)
 
     def _build_occupant_map(self, rows):

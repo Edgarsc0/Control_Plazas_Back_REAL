@@ -1,6 +1,6 @@
 # Organigrama — Arquitectura y lógica de negocio
 
-Documento de referencia (backend + frontend) para planear cambios sobre el módulo de Organigrama. Generado a partir de una revisión de código en ambos repos el 2026-07-16, actualizado el mismo día tras implementar: toggle Vista Institucional/Alineación, nivel "Enlace", layout de carriles horizontales por jerarquía, y reordenamiento de hermanos por drag-and-drop.
+Documento de referencia (backend + frontend) para planear cambios sobre el módulo de Organigrama. Generado a partir de una revisión de código en ambos repos el 2026-07-16, actualizado el mismo día tras implementar: toggle Vista Institucional/Alineación, nivel "Enlace", layout de carriles horizontales por jerarquía, y reordenamiento de hermanos por drag-and-drop. Actualizado de nuevo el 2026-07-17 tras: permisos granulares por vista (`view_organigrama_institucional`/`_alineacion`/`_sig`, `edit_organigrama`) y Vista SIG agregados por un compañero, retiro del botón "Alineación" de la UI, reparación de nodos huérfanos en `subordinados` (ver §13-bis), una verificación de integridad que encontró y corrigió 2 gaps (SIG no era inmune a reordenamiento manual; condición de carrera al cambiar de vista rápido — §13-ter), la separación total Institucional/SIG en tablas distintas (`ORGANIGRAMA_ANAM_SIG`, §13-quater) para que tampoco el contenido pueda filtrarse entre vistas, y finalmente la reescritura de la exportación a PDF a 100% vectorial (§9-ter), reemplazando el enfoque rasterizado de un compañero.
 
 > **Hallazgo estructural clave**: existen dos features distintos con "organigrama" en el nombre que **no comparten código**:
 > 1. `/dashboard/organigrama` — el árbol jerárquico visual real. Es el objeto de este documento.
@@ -44,25 +44,26 @@ Tabla legacy `ORGANIGRAMA_ANAM`, adoptada vía migración (`0024_adopt_organigra
 
 | Ruta | View | Método | Notas |
 |---|---|---|---|
-| `organigrama-deptos/` | `OrganigramaDeptoView` (4206) | GET | Catálogo plano depto→descripción/nivel. Permiso `view_plantilla_catalogos`. |
-| `organigrama-tree/?unidad_negocio=&vista=` | `OrganigramaTreeView` (4229) | GET | **Endpoint principal**. Construye el árbol JSON anidado. Solo `IsAuthenticated` (no usa `view_permission`). `vista` opcional: `"institucional"` (default, lee `subordinados`) o `"alineacion"` (fuerza recálculo desde el determinante, excluye nodos `Enlace` — ver §3). |
-| `organigrama-posicion-info/?posicion=` | `OrganigramaPosicionInfoView` (4322) | GET | Activa/vacante/ocupante de una plaza puntual. |
-| `organigrama-unidades/` | `OrganigramaUnidadesView` (4373) | GET | Catálogo dinámico de "unidades de negocio" (reemplazó un array estático que vivía en el frontend). |
-| `organigrama-crear-nodo/` | `OrganigramaCrearNodoView` (4404) | POST | Alta de nodos (raíz o hijo) — ver §6. |
-| `cat-organigrama-anam/` (+`<pk>/`) | `OrganigramaAnamViewSet` (4762) | CRUD | `LOCKED_UPDATE_FIELDS = (departamento, nivel_direccion, unidad_negocio)`; bloquea DELETE si hay hijos. PATCH a `subordinados` permitido pero validado como **permutación exacta** del valor actual (mismo conjunto de códigos, solo reordenados) — lo usa el drag-and-drop de reordenamiento de hermanos (§9-bis), rechaza con 400 cualquier intento de agregar/quitar códigos por esta vía. |
-| `plantilla/organigrama_search/` | `OrganigramaSearchView` (3852) | GET `?q=` | Búsqueda plana sobre la tabla cruda; el frontend precarga **todo** el catálogo una vez con esto para buscar en memoria. |
-| `empleados-search/` | `EmpleadosBusquedaView` (4583) | GET | Búsqueda de empleado para reasignar titular/superior. |
+| `organigrama-deptos/` | `OrganigramaDeptoView` (4234) | GET | Catálogo plano depto→descripción/nivel. Permiso `view_plantilla_catalogos`. |
+| `organigrama-tree/?unidad_negocio=&vista=` | `OrganigramaTreeView` (4258) | GET | **Endpoint principal**. Construye el árbol JSON anidado. `vista` opcional: `"institucional"` (default, lee `ORGANIGRAMA_ANAM.subordinados`, editable) — o dos vistas de solo lectura que **fuerzan recálculo puro desde el determinante** (`forzar_recalculo=True`, ignoran `subordinados`, ver §3): `"alineacion"` (recalcula sobre `ORGANIGRAMA_ANAM` completa, ya sin botón propio en la UI, ver §7/§11) y `"sig"` (recalcula sobre `ORGANIGRAMA_ANAM_SIG`, una **tabla completamente aparte**, foto fija/inmune a cualquier edición manual — ver §13-quater). **Permiso por vista** (agregado por un compañero): cada valor de `vista` exige su propio permiso (`view_organigrama_institucional`/`_alineacion`/`_sig`) vía `request.user.has_perm(...)`, devuelve 403 si falta — ya no es el antiguo permiso único `view_organigrama` (deprecado/reemplazado). |
+| `organigrama-posicion-info/?posicion=` | `OrganigramaPosicionInfoView` (4381) | GET | Activa/vacante/ocupante de una plaza puntual. |
+| `organigrama-unidades/` | `OrganigramaUnidadesView` (4436) | GET | Catálogo dinámico de "unidades de negocio" (reemplazó un array estático que vivía en el frontend). |
+| `organigrama-crear-nodo/` | `OrganigramaCrearNodoView` (4471) | POST | Alta de nodos (raíz o hijo) — ver §6. `edit_permission = "authentication.edit_organigrama"`. |
+| `cat-organigrama-anam/` (+`<pk>/`) | `OrganigramaAnamViewSet` (4825) | CRUD | `LOCKED_UPDATE_FIELDS = (departamento, nivel_direccion, unidad_negocio)`; bloquea DELETE si hay hijos. PATCH a `subordinados` permitido pero validado como **permutación exacta** del valor actual (mismo conjunto de códigos, solo reordenados) — lo usa el drag-and-drop de reordenamiento de hermanos (§9-bis), rechaza con 400 cualquier intento de agregar/quitar códigos por esta vía. `view_permission`/`edit_permission` son tuplas OR: `view_plantilla_catalogos` **o** `view_organigrama_institucional` para leer; `view_plantilla_catalogos` **o** `edit_organigrama` para escribir (se usa desde 2 superficies: tab Catálogos y el árbol — ver §10). |
+| `plantilla/organigrama_search/` | `OrganigramaSearchView` (3861) | GET `?q=` | Búsqueda plana sobre la tabla cruda; el frontend precarga **todo** el catálogo una vez con esto para buscar en memoria. Ahora también devuelve `isSIGInfo` por fila (para que el frontend filtre sugerencias de búsqueda según la vista activa, ver §7). |
+| `empleados-search/` | `EmpleadosBusquedaView` (4716) | GET | Búsqueda de empleado para reasignar titular/superior. |
 
 Endpoints relacionados pero **no** parte del árbol: `CadenaMandoView` (jerarquía paralela por `DependenciaDirecta` de empleado, CTE recursivo), `DesgloseJerarquicoView`/`Ocupados` (reportes tabulares, no árbol), `CuadroVacanciaView` (totalizador institucional).
 
 ### `OrganigramaTreeView` en detalle
-1. Query param obligatorio `unidad_negocio`.
-2. Trae todas las filas de esa unidad (SQL crudo).
-3. `_build_occupant_map` (4266-4319): 2 queries batch (no N+1) — `MOV_POS_LATEST` para activas + `EMPLEADOS_COMPLETOS_SIG` para el ocupante. Reglas:
+1. Query param obligatorio `unidad_negocio`; `vista` opcional (default `"institucional"`).
+2. Valida el permiso específico de la vista pedida (`VISTA_PERMISSIONS`) — 403 si falta.
+3. Trae las filas de esa unidad (SQL crudo); si `vista == "sig"`, la consulta apunta a `ORGANIGRAMA_ANAM_SIG` (tabla aparte, sin filtro adicional — ver §13-quater) en vez de `ORGANIGRAMA_ANAM`. SIG también fuerza `forzar_recalculo=True` (igual que Alineación).
+4. `_build_occupant_map`: 2 queries batch (no N+1) — `MOV_POS_LATEST` para activas + `EMPLEADOS_COMPLETOS_SIG` para el ocupante. Reglas:
    - No está en activas → `{activa: False, vacante: None}`.
    - Activa sin SMB/fila → `{activa: True, vacante: True}`.
    - Activa con ocupante → `{activa: True, vacante: False, nombre, nivel, smb}`.
-4. Llama a `build_tree()` de `organigrama_tree.py`.
+5. Llama a `build_tree(rows, occupant_map, forzar_recalculo=(vista == "alineacion"))` de `organigrama_tree.py`.
 
 ---
 
@@ -128,7 +129,7 @@ Distinto del anterior: **no recalcula relaciones padre-hijo**, solo reordena el 
 6. **`LOCKED_UPDATE_FIELDS`**: `departamento`, `nivel_direccion`, `unidad_negocio` no editables vía API una vez creado el nodo — para "mover"/"renivelar" hay que crear uno nuevo y eliminar el viejo. `subordinados` **sí es editable**, pero solo como permutación (ver §2) — es lo que habilita el reordenamiento manual de hermanos.
 7. **Protección de borrado**: no se puede eliminar un nodo con hijos (409); al eliminar hoja se limpia la referencia del padre.
 8. **Exclusiones no documentadas** en `DesgloseJerarquicoView`/`Ocupados`: plazas `LIKE '103L%'`, `LIKE '1039%'`, partida `'11401'` — sin comentario explicativo, a confirmar con negocio antes de replicar.
-9. **Permiso `view_organigrama` declarado pero no conectado**: existe en el catálogo RBAC (`authentication/models.py:53`) pero **ninguna vista backend lo usa** (usan `IsAuthenticated` genérico o `view_plantilla_catalogos`). Hoy el único gate real es el check de UI en frontend (ver §11).
+9. **~~Permiso `view_organigrama` declarado pero no conectado~~ — YA CORREGIDO**: un compañero reemplazó el permiso único `view_organigrama` por 4 permisos granulares (`authentication/models.py:53-56`): `view_organigrama_institucional`, `view_organigrama_alineacion`, `view_organigrama_sig`, `edit_organigrama`. Ahora sí están conectados server-side: `OrganigramaTreeView` valida el permiso específico de la `vista` pedida (403 si falta), `OrganigramaCrearNodoView`/`OrganigramaAnamViewSet` usan `edit_permission`/`view_permission` — ver §2/§11. El punto 2 de §14 (histórico) ya no aplica.
 10. **Dos jerarquías paralelas coexisten**: la departamental (`ORGANIGRAMA_ANAM`) y la de cadena de mando por empleado (`CadenaMandoView` vía `DependenciaDirecta`) — sin garantía de que coincidan.
 11. **`Enlace` es exclusivo de Vista Institucional**: nunca aparece en Vista Alineación (filtrado explícitamente en `build_tree`, ver §3) — es un nivel "manual" sin equivalente en el determinante oficial, por decisión de negocio explícita (no un accidente del algoritmo).
 
@@ -144,12 +145,13 @@ Rediseñado por completo (ya no es la recursión anidada original — ver histor
 - **`laneTopY`** (`useMemo`): posición Y acumulada de cada carril (`LABEL_ROW_HEIGHT` + `LANE_ROW_HEIGHT` + `LANE_GAP` por carril, en orden de `lanesToRender`). Junto con `treeLayout.centerX`, da un sistema de coordenadas **100% analítico** (calculado en JS, sin medir el DOM).
 - **`visibleNodes`** (`useMemo`, separado del memo estructural de `allNodes`/`parentsMap` porque depende de `expandedNodes`): recorrido DFS que respeta expand/collapse (colapsar sigue ocultando toda la rama) y, durante un drag activo, sustituye el orden de los hijos del padre afectado por `previewOrder` (ver §9-bis) sin tocar `organigramaData`.
 - **`lanesToRender`**: agrupa `visibleNodes` por carril (orden fijo de `LANE_CONFIG`, cada uno ordenado por el índice DFS), omitiendo carriles sin nodos visibles.
+- **Extraídas a funciones puras module-level** (`computeVisibleNodes`/`computeLanesToRender`/`computeTreeLayout`/`computeLaneTopY`/`computeConnectors`, 2026-07-17): los 5 `useMemo` de arriba son ahora wrappers de 1 línea sobre estas funciones (mismos parámetros, mismo cuerpo). Se extrajeron para que la exportación a PDF (ver §9-ter) pueda invocarlas directo con un `expandedNodes` arbitrario (p.ej. "todo desglosado") **sin pasar por `setState`+esperar un re-render** — evita el problema de que la función de exportación, si leyera los valores memoizados del componente justo después de un `setExpandedNodes`, seguiría viendo los de antes del cambio hasta el siguiente render (closure obsoleto). `computeConnectors` devuelve `segments` crudos (`[x1,y1,x2,y2][]`) en vez de un `path` de SVG ya armado — tanto el `<path>` en pantalla (vía `segmentsToSvgPath`) como el dibujo vectorial del PDF consumen la misma geometría sin duplicar lógica de trazado.
 - **`NodeCard`** (reemplaza al viejo `TreeNode`): tarjeta plana sin recursión, posicionada `absolute` dentro de su fila de carril según `treeLayout.centerX`. Cada carril es una fila horizontal continua (sin `flex-wrap`) que se desplaza con el scroll/drag del canvas.
 - **Conectores**: overlay `<svg>` con un `<path>` por padre (no por arista) — un tronco baja del padre, un bus horizontal une el rango de sus hijos, y una vertical por hijo baja hasta su tarjeta (como un organigrama clásico); tolera hijos en carriles no adyacentes (niveles saltados) pasando visualmente detrás de las tarjetas intermedias (`z-index`). Coordenadas 100% analíticas (mismo sistema que `treeLayout`/`laneTopY`) — **deliberadamente no usa `getBoundingClientRect`**: medir con eso dentro de un contenedor con CSS `zoom` produce doble escalado (el propio SVG vive dentro del contenedor con `zoom`, así que una coordenada ya afectada por el zoom se reescala una segunda vez al pintarse) — bug real encontrado y corregido durante esta implementación.
 - **Zoom**: CSS `zoom` (no `transform: scale`) sobre `#tree-capture-container`, rueda+Ctrl o botones +/-/reset, rango 0.3–2.0.
 - **Pan**: drag-to-scroll manual, ignorado si el target es botón/input/`.cursor-pointer`.
 - **Expand/collapse**: estado `expandedNodes`, toggle por doble clic o botón chevron; "Expandir/Colapsar Todo" en tarjeta flotante.
-- **Toggle Institucional/Alineación**: segmented control junto a "Colapsar Todo" — cambia `vistaModo` (`"institucional"`|`"alineacion"`), que se manda como `vista` al fetch de `organigrama-tree/`. En Alineación (`soloLectura = vistaModo === "alineacion"`), todas las acciones de edición quedan deshabilitadas (crear/editar/eliminar nodo, cambiar plaza, drag-and-drop) — mismo mecanismo `disabled`+`title` explicativo en cada botón, más un guard `if (soloLectura) return;` al inicio de cada handler real.
+- **Toggle Institucional/SIG**: segmented control junto a "Colapsar Todo" (solo visible si el usuario tiene permiso para más de una vista, ver §11) — cambia `vistaModo` (`"institucional"`|`"sig"`), que se manda como `vista` al fetch de `organigrama-tree/`. Fuera de Institucional (`soloLectura = vistaModo !== "institucional"`), todas las acciones de edición quedan deshabilitadas (crear/editar/eliminar nodo, cambiar plaza, drag-and-drop) — mismo mecanismo `disabled`+`title` explicativo en cada botón, más un guard `if (soloLectura) return;` al inicio de cada handler real. El botón de **"Alineación" se retiró de la UI** (decisión de negocio: la Vista SIG de un compañero cumple ese rol para el equipo) — el backend sigue soportando `vista=alineacion` y el permiso `VIEW_ORGANIGRAMA_ALINEACION` sigue existiendo, solo no hay forma de llegar ahí desde el toggle.
 - **Colores/badges por `nivel_direccion`**: definidos una sola vez en `LANE_CONFIG` (antes estaban triplicados en `TreeNode`/`SkeletonNode`/`OrganigramaSkeleton`, ya eliminados). Titular/General → `Building2` rosa; Central → `Network` rosa oscuro; Director → `Layers` ámbar; Subdir. → `Users` ámbar; Jefe Depto y el catch-all "Enlace" → `Briefcase` gris.
 - Nodo seleccionado: borde rosa+ring. Nodo resaltado por búsqueda: borde ámbar+scale. Nodo objetivo de drop (drag-and-drop): borde rosa+ring (ver §9-bis).
 - Skeleton de carga simplificado: unas pocas filas de tarjetas placeholder `animate-pulse` (ya no replica la lógica real de layout).
@@ -218,6 +220,36 @@ Fase 1 de una funcionalidad de reordenamiento planeada en dos fases (Fase 2 = re
 
 ---
 
+## 9-ter. Frontend — Exportación a PDF (100% vectorial, reescrita 2026-07-17)
+
+Un compañero había implementado una primera versión que **rasterizaba** el árbol completo (`html-to-image` → `toSvg`/`toCanvas` → recorte por franjas a pixelRatio 4 → `jsPDF.addImage(..., "PNG")`). Funcionaba pero seguía siendo una imagen de ancho de píxeles finito: por más que se subiera la resolución, en algún nivel de zoom siempre terminaba pixelándose (justo el problema que el usuario ya había descartado explícitamente antes, ver plan histórico de PDF). Se reescribió por completo, sin conservar nada de ese enfoque salvo el botón/modal que lo dispara.
+
+### Cómo funciona ahora
+`handleExportPdf(type)` **ya no toca el DOM ni captura nada**: llama directo a las funciones puras `computeVisibleNodes`/`computeLanesToRender`/`computeTreeLayout`/`computeLaneTopY`/`computeConnectors` (las mismas que usan los `useMemo` en pantalla, ver §7) con el `expandedNodes` que corresponda al alcance elegido —
+
+- **"Vista Actual"**: el `expandedNodes` real del componente.
+- **"Todo Desglosado"**: un objeto sintético con todos los códigos de `allNodes` en `true`, calculado al vuelo — **sin llamar `setExpandedNodes`**. Como las funciones de layout son puras (no hooks), no hace falta esperar un re-render ni medir nada; se evita por completo la vieja necesidad de `await` + doble `requestAnimationFrame` para "esperar a que React pinte".
+
+Con el layout resultante (`treeLayout`/`laneTopY`/`connectors`/`lanesToRender`), `buildOrganigramaPdf(...)` arma un `jsPDF` **dibujando directo con sus primitivas vectoriales** (`rect`/`roundedRect`/`text`/`line`/`setLineDashPattern`) — nunca genera ni pega una imagen. Cada tarjeta se dibuja con `drawOrganigramaCardPdf(...)`, reproduciendo el mismo contenido que `NodeCard` (badge de nivel, título con wrap a 2 líneas vía `splitTextToSize`, cascada ocupante/vacante/plaza inactiva idéntica a §7, footer con código+plaza), y los conectores/divisores de carril se trazan con los mismos `segments`/coordenadas que el `<svg>` en pantalla.
+
+- **Página única** dimensionada exactamente al contenido (`treeLayout.totalWidth`/`laneTopY.totalHeight` + margen, convertido px→pt a 96dpi). Si excede `PDF_MAX_DIM_PT` (~194in, techo práctico de compatibilidad de lectores PDF) se reduce la escala física **uniformemente** — al ser vectorial, achicar la página no pierde nitidez: el lector puede hacer zoom arbitrario sobre los mismos trazos.
+- **Nada de estados interactivos**: el PDF siempre dibuja las tarjetas en su estilo neutro (nunca reproduce selección/hover/drag-over) — es un documento, no una captura de pantalla.
+- El modal/botón ("Exportar PDF" → "Vista Actual"/"Todo Desglosado") no cambió; solo cambió qué hace `handleExportPdf` internamente.
+- Import `toSvg` de `html-to-image` eliminado de este archivo (ya no se usa aquí); el paquete sigue instalado porque `CuadrosVacanciaTab.jsx` lo usa para otra cosa (`toPng`, exportación de un tab no relacionado).
+
+Verificado con un smoke test standalone (árbol sintético de 9 nodos vía Node+jsPDF, fuera del navegador): conteo de nodos visibles, agrupado por carril, `centerX`/`totalWidth`, un conector por padre con sus segmentos, y generación real del PDF sin excepciones — más una inspección visual del PDF resultante confirmando tarjetas, badges por color de carril, conectores correctamente enrutados y divisores de carril con etiqueta, todo como texto/trazos vectoriales reales (no una imagen).
+
+### Bug encontrado y corregido el mismo día: texto amontonado en árboles grandes con "Todo Desglosado"
+Primera versión probada en real por el usuario contra la unidad `00900` (454 áreas): el PDF se generaba nítido, pero el contenido de cada tarjeta salía amontonado/ilegible (badge, título, ocupante, footer todos superpuestos), mientras que en árboles chicos (el smoke test de 9 nodos) se veía perfecto.
+
+**Causa**: `drawOrganigramaCardPdf` tenía un piso de tamaño de fuente (`fs = (px) => Math.max(T(px), 4)`, "nunca bajar de 4pt") pensado para que el texto no quedara ilegiblemente chico. El problema es que ese piso **no aplicaba al interlineado/separaciones** (`T(13)`, `T(12)`, `T(16)`, etc., sin piso) — en árboles grandes exportados como "Todo Desglosado" (~250+ tarjetas hoja), `scale` se reduce mucho para que la página quepa en el techo físico de un PDF (~194in/14000pt), y el interlineado encogía junto con `scale` mientras el tamaño de fuente se quedaba fijo en el piso de 4pt: el resultado eran líneas más altas que el espacio asignado entre ellas → texto superpuesto.
+
+**Fix**: se quitó el piso por completo (`fs = (px) => T(px)`, igual que en la etiqueta de carril) — tamaño de fuente e interlineado escalan siempre en la misma proporción, así nunca se amontonan, sin importar qué tan chico deba quedar `scale`. Al ser 100% vectorial esto no es una pérdida real de legibilidad: un tamaño nominal pequeño en el PDF sigue siendo trazos vectoriales reales, así que el lector puede acercar el zoom todo lo necesario sin perder nitidez — exactamente la razón por la que se pidió que fuera vectorial en primer lugar.
+
+Verificado reproduciendo el bug con un smoke test sintético de 284 nodos (41 direcciones × 6 jefaturas, aproximando la proporción real de `00900`) antes y después del fix — con `scale≈0.258` el título quedaba en ~1.8pt de fuente real (sin piso) y, al renderizar el PDF a 600dpi con `pdftoppm` y recortar sobre una tarjeta, el contenido se ve completamente legible y sin superposición.
+
+---
+
 ## 10. Frontend — Edición/eliminación (dos superficies no sincronizadas)
 
 ### a) Dentro del árbol
@@ -234,22 +266,30 @@ Esta tabla también permite crear/eliminar departamentos directo (POST/DELETE), 
 
 ---
 
-## 11. Frontend — Permisos
+## 11. Frontend — Permisos (rediseñado por un compañero — ya no es un único permiso)
 
-- `PERMISSIONS.VIEW_ORGANIGRAMA` (`'authentication.view_organigrama'`) — único permiso que gatea el árbol, aplicado en `page.jsx` vía `<RequirePermission permission={...}>`.
-- `RequirePermission` redirige silenciosamente a `/dashboard` si no hay permiso (no error 403 visible) — el propio componente aclara que "no reemplaza la protección real, que vive en el backend".
-- **Dado que el backend no conecta este permiso a ninguna vista (§6.9), hoy el único gate real es este check de UI** — llamando los endpoints directo (API/URL conocida) no hay bloqueo de permiso granular, solo `IsAuthenticated`.
-- El tab "Alineación Organizacional" usa un permiso completamente distinto (`VIEW_PLANTILLA_MOVIMIENTOS`), sin relación con `VIEW_ORGANIGRAMA`.
+El antiguo `PERMISSIONS.VIEW_ORGANIGRAMA` único se reemplazó por 4 permisos granulares (`src/config/permissions.js:29-32`, mapeados 1:1 a `authentication/models.py:53-56`):
+
+| Permiso frontend | Codename backend | Gatea |
+|---|---|---|
+| `VIEW_ORGANIGRAMA_INSTITUCIONAL` | `view_organigrama_institucional` | Ver Vista Institucional (árbol manual/curado, editable). |
+| `VIEW_ORGANIGRAMA_ALINEACION` | `view_organigrama_alineacion` | Ver Vista Alineación (recalculada desde el determinante) — **ya sin botón en la UI** (ver §7/§9-bis), pero el permiso y el backend siguen existiendo. |
+| `VIEW_ORGANIGRAMA_SIG` | `view_organigrama_sig` | Ver Vista SIG (filtrada a `isSIGInfo=1`, solo lectura). |
+| `EDIT_ORGANIGRAMA` | `edit_organigrama` | Crear/editar/eliminar nodos y cambiar plaza titular/superior (solo aplica en Vista Institucional). |
+
+- **Sí están conectados server-side** (a diferencia de lo que decía la versión anterior de este documento — ver §6.9): `OrganigramaTreeView.get()` valida `request.user.has_perm(VISTA_PERMISSIONS[vista])` y devuelve 403 si falta; `OrganigramaCrearNodoView`/`OrganigramaAnamViewSet` usan `edit_permission`/`view_permission` (tuplas OR con `view_plantilla_catalogos`, para no romper a quien ya editaba desde el tab Catálogos).
+- **Frontend**: `canViewInstitucional`/`canViewSig` (`hasPermission(...)`) deciden qué botones del toggle se muestran (`[canViewInstitucional, canViewSig].filter(Boolean).length > 1` — si el usuario solo tiene acceso a una vista, ni siquiera se muestra el selector). Un `useEffect` fuerza `vistaModo` a la única vista permitida en cuanto cargan los permisos (mismo patrón que `activeTab` en `plantilla_empleados`). `canEditOrganigrama` (`EDIT_ORGANIGRAMA`) se combina con `vistaModo !== "institucional"` para calcular `soloLectura`.
+- `<RequirePermission permission={[VIEW_ORGANIGRAMA_INSTITUCIONAL, VIEW_ORGANIGRAMA_ALINEACION, VIEW_ORGANIGRAMA_SIG]}>` sigue gateando la entrada a la página completa (basta con tener AL MENOS UNO de los 3) — redirige silenciosamente a `/dashboard` si no hay ninguno.
+- El tab "Alineación Organizacional" (el otro feature con "organigrama" en el nombre, ver nota al inicio del documento) usa un permiso completamente distinto (`VIEW_PLANTILLA_MOVIMIENTOS`), sin relación con estos 4.
 
 ---
 
 ## 12. Frontend — Lógica de UI no obvia
 
 - **Búsqueda de área**: en memoria sobre el catálogo global precargado (`organigrama_search/`, una vez) — no golpea el backend por tecla. Navegación con flechas+Enter. Si el resultado está en otra `unidad_negocio`, cambia de lienzo automáticamente y hace scroll al nodo una vez cargado.
-- **Exportar a PNG** (`html-to-image`): modo "Vista Actual" o "Todo Desglosado" (expande todo temporalmente, exporta, restaura estado previo). Detecta dark mode para el fondo del PNG.
+- **Exportar a PDF** (100% vectorial, ver §9-ter): modo "Vista Actual" o "Todo Desglosado" (recalcula el layout con todos los códigos expandidos, sin tocar el estado real del componente).
 - **Stats** (conteo por nivel): calculado client-side sobre el árbol completo cargado (aplanado memoizado), no solo lo visible.
 - **Drag-and-drop de reordenamiento** (fase 1, ver §9-bis): reordena hermanos del mismo padre con previsualización en vivo. **Re-parenteo** (mover un nodo a un padre distinto arrastrando) sigue sin implementar — mover a otro padre todavía requiere eliminar y recrear.
-- **Sin impresión** dedicada (solo exportar PNG); exportación a PDF vectorial quedó diseñada pero no implementada (reutilizaría `treeLayout`/conectores, que ya son coordenadas analíticas — ver plan histórico si se retoma).
 
 ---
 
@@ -260,14 +300,72 @@ Esta tabla también permite crear/eliminar departamentos directo (POST/DELETE), 
 
 ---
 
+## 13-bis. Incidente: nodos "huérfanos" en Vista Institucional (2026-07-17)
+
+**Síntoma reportado**: Vista Institucional mostraba exactamente lo mismo que Vista SIG (mismo conteo de nodos, mismo contenido) — los cambios manuales del equipo (nodos creados vía "Agregar subordinado") no aparecían en ningún lado.
+
+**Causa real**: no era un bug del toggle de vistas ni de caché — ambas vistas leen `subordinados` para armar el árbol (Institucional sin filtro, SIG filtrando a `isSIGInfo=1` antes de aplicar el mismo algoritmo, ver §3). El problema es que **154 filas de la unidad `00900`** (y unas pocas más en `00003`/`00700`) existían en `ORGANIGRAMA_ANAM` pero **nunca estaban referenciadas en el `subordinados` de ningún padre** — es decir, el algoritmo de árbol (camina desde la raíz siguiendo esos enlaces) nunca las alcanzaba, sin importar la vista. `modificado_por`/`fecha_modificacion` de esas filas apuntaban a ediciones reales y recientes del equipo (`sharon.leyva@anam.gob.mx` y otros), confirmando que eran los cambios manuales "perdidos".
+
+⚠️ **Causa raíz del enlace roto: no confirmada a nivel de código.** Se revisó `OrganigramaCrearNodoView._crear_hijo`/`_crear_enlace` (el flujo de "Agregar subordinado", que el usuario reportó como origen) y **sí actualiza correctamente** el `subordinados` del padre dentro de la misma transacción — no se encontró un bug reproducible en ese código. Cómo exactamente se perdieron esos enlaces queda como pregunta abierta (posible condición de carrera si se crearon varios hermanos muy rápido sin refrescar entre uno y otro, alguna edición previa que haya sobreescrito `subordinados`, u otra causa aún no identificada). Si vuelve a ocurrir, vale la pena revisar con más detalle el momento exacto en que se pierde el enlace (ej. agregando logging temporal a `_crear_hijo`/`_crear_enlace`).
+
+**Diagnóstico y reparación** (ver management command nuevo, no confundir con los otros dos que ya existían):
+- `reparar_huerfanos_organigrama` (`plantilla/management/commands/`): para cada `unidad_negocio`, encuentra las filas no alcanzables desde la raíz vía `subordinados`, identifica cuáles son "raíz de su propia rama" (nadie las referencia — las demás se resuelven solas en cuanto se reconecta esa raíz), resuelve su padre real con el mismo algoritmo de segmentación que usa Vista Alineación (`candidate_parents`/`resolve_by_position`), y **solo si ese padre ya es alcanzable**, agrega el código al `subordinados` de ese padre — nunca modifica un enlace que ya existe, solo agrega los que faltan. Seguro de re-correr (es idempotente: si ya no hay huérfanos, no hace nada).
+- Aplicado el 2026-07-17 sobre datos reales: `00900` (81 de 154 huérfanos reconectados directamente, el resto se resolvió solo) y `00003` (1 de 1) quedaron en 0 huérfanos, verificado contra el endpoint real (`institucional` pasó de 300 a 454 nodos en `00900`, coincidiendo con el total de filas de esa unidad).
+- **`00700` quedó pendiente**: tiene 40 filas huérfanas pero **ninguna es "raíz"** (todas están referenciadas por alguien) — es decir, forman una o más ramas cerradas sobre sí mismas (posible referencia circular, ej. A referencia a B y B referencia a A) que el comando detecta y **omite automáticamente** en vez de intentar resolver a ciegas. Requiere inspección manual antes de repararse (ver huérfanos de esa unidad con el mismo patrón de diagnóstico usado arriba: caminar desde la raíz, listar los no alcanzados, y en este caso además detectar el ciclo).
+
+---
+
+## 13-ter. Verificación final de integridad (2026-07-17) — 2 gaps encontrados y corregidos
+
+A pedido del usuario, se verificaron 4 garantías sobre el comportamiento del módulo, con pruebas reales (no solo lectura de código) contra la base de datos vía `APIRequestFactory`/`force_authenticate`. Dos de las cuatro tenían un gap real, ambos corregidos en el momento:
+
+1. **Institucional persiste todo (crear/editar/eliminar/reordenar)** — confirmado sin cambios: cada acción ya hacía su PATCH/POST propio (ver §8/§9/§9-bis), no se encontró ningún caso donde una escritura no se guardara.
+
+2. **SIG debe ser 100% inmune a cambios manuales — GAP ENCONTRADO Y CORREGIDO EN DOS PASADAS**:
+   - **Primera pasada**: se probó reordenar (drag-and-drop) dos hermanos que SÍ tenían `isSIGInfo=1` ("datos oficiales") y **la Vista SIG reflejó el reordenamiento manual** — porque `vista=sig` solo filtraba qué FILAS incluir (`WHERE isSIGInfo=1`), pero seguía leyendo el `subordinados` editable de esas filas. Fix inicial: `forzar_recalculo=(vista in ("alineacion", "sig"))` — esto blindó estructura/orden, pero **no el contenido** (editar `descripcion_larga` de un nodo `isSIGInfo=1` seguía viéndose en SIG, porque ambas vistas leían la MISMA fila).
+   - **Segunda pasada (definitiva, ver §13-quater)**: se creó una tabla completamente separada `ORGANIGRAMA_ANAM_SIG`, poblada una sola vez (foto fija) con los valores de hoy — Institucional y SIG ya no comparten ninguna fila ni columna. Confirmado con prueba real: reordenar hermanos Y editar `descripcion_larga` de un nodo oficial desde Institucional **no cambia absolutamente nada** en SIG, mientras Institucional refleja ambos cambios con normalidad.
+
+3. **Cambio de vista confiable, sin resultados a medias — GAP ENCONTRADO Y CORREGIDO**: el `useEffect` que hace fetch del árbol al cambiar `vistaModo`/`selectedUnidad` no tenía guard de cancelación — si el usuario cambiaba de vista muy rápido (ej. Institucional→SIG→Institucional), una respuesta lenta de un fetch viejo podía llegar después y pisar los datos de la vista ya seleccionada, dejando en pantalla contenido que no correspondía al botón resaltado. **Fix**: se agregó el mismo patrón `let cancelled = false` / `return () => { cancelled = true }` que ya usaban otros 2 efectos de este mismo archivo (carga de unidades, búsqueda de empleado) — cualquier respuesta que llegue después de que el efecto se haya "cancelado" (por un cambio posterior de vista/unidad) se descarta en vez de aplicarse.
+
+4. **Drag-and-drop no rompe la estructura (no desvincula padre-hijo)** — confirmado con una prueba de estrés: 5 reordenamientos consecutivos con orden aleatorio sobre el mismo padre (simulando arrastres rápidos seguidos) no perdieron ninguna fila (454 antes y después) ni desconectaron ningún nodo de la raíz (454 alcanzables antes y después). Esto se sostiene porque: (a) el frontend solo permite reordenar si `parentsMap[origen] === parentsMap[destino]` (mismo padre exacto, nunca re-parenta), y (b) el backend valida que el PATCH sea una permutación exacta del conjunto ya existente (§2/§6.8) — una reordenación nunca puede, por construcción, agregar/quitar/mover un código a otro padre, solo cambiar su posición dentro de la misma lista.
+   - Nota aparte (no es un incidente, es un riesgo conocido de concurrencia): si **dos personas** reordenan hermanos del **mismo padre** casi al mismo tiempo desde dos sesiones distintas, es un `read-modify-write` sin bloqueo — quien guarda último "gana" el orden completo de ese padre, pudiendo descartar silenciosamente la preferencia de orden de la otra persona. Esto **no rompe la estructura** (nunca se pierde un nodo ni se desvincula nada, ver punto 4), solo podría perderse *cuál de los dos órdenes* quedó guardado. No se corrigió porque no es lo que se preguntó (integridad estructural) y el caso de uso (edición simultánea del mismo padre en el mismo instante) es poco común hoy.
+
+---
+
+## 13-quater. Separación total Institucional/SIG: tabla `ORGANIGRAMA_ANAM_SIG` (2026-07-17)
+
+Para cerrar el límite que dejó pendiente §13-ter punto 2 (SIG inmune a estructura/orden, pero no a contenido), se creó una tabla nueva y completamente independiente, exclusiva de Vista SIG.
+
+### Investigación previa (importante para no repetir supuestos)
+- `isSIGInfo` **no tiene ningún proceso vivo que lo actualice** — no el pipeline ZAFIRO (`plantilla/tasks.py` no toca `ORGANIGRAMA_ANAM` en absoluto), no ningún management command, no ninguna señal. Es una foto fija fijada una vez, sin origen reconstruible desde el código.
+- **Tampoco tenía migración propia**: el campo se agregó al modelo (`models.py`) sin generar el `AddField` correspondiente — un bug de historial de migraciones pre-existente (no introducido por esta sesión). `makemigrations` lo detectó recién al crear la tabla nueva.
+- Se decidió (con el usuario) **acotar el alcance solo al árbol** (`OrganigramaTreeView`) — `OrganigramaDeptoView` (catálogo de decoración de Movimientos/Bajas) y `OrganigramaSearchView` (sugerencias de búsqueda) **siguen usando el `isSIGInfo` de `ORGANIGRAMA_ANAM` exactamente igual que antes**, sin cambios — no se tocaron para no arriesgar romper algo que ya funcionaba y no era parte de la queja.
+
+### Qué se creó
+- **Modelo `OrganigramaAnamSig`** (`plantilla/models.py`, junto a `OrganigramaAnam`) — tabla nueva `ORGANIGRAMA_ANAM_SIG`, 100% gestionada por Django (a diferencia de `OrganigramaAnam`, que es legacy adoptada). Campos: `departamento` (PK), `descripcion_larga`, `nivel_direccion`, `unidad_negocio`, `unidad_administrativa`, `doaf`, `num_posicion_gerente`, `posicion_director` — **sin `subordinados`** (SIG siempre recalcula desde el determinante, nunca necesita leer esa columna).
+- **Migración `0029_organigramaanamsig.py`**: `CreateModel` normal para la tabla nueva, más un `SeparateDatabaseAndState` (solo estado, sin DDL real) que registra formalmente `isSIGInfo` en el historial de Django — corrige el bug de migración faltante sin ejecutar ningún `ALTER TABLE` (la columna ya existe físicamente), mismo patrón que ya usa `0024_adopt_organigrama_anam.py` para esta misma tabla legacy. Verificado con `makemigrations --check --dry-run` → `No changes detected` tras aplicarla.
+- **Management command `congelar_organigrama_sig`** (mismo estilo que `poblar_subordinados_organigrama`/`reparar_huerfanos_organigrama`): copia las filas `ORGANIGRAMA_ANAM.isSIGInfo=1` de HOY a `ORGANIGRAMA_ANAM_SIG` (trunca y repuebla, no hace merge). Corrido una vez: **1365 filas congeladas** (todas las unidades de negocio, no solo `00900`). No hay pipeline vivo que lo re-dispare — si se necesita "resetear" la foto SIG en el futuro, hay que volver a correrlo a mano.
+- **`OrganigramaTreeView.get()`**: cuando `vista == "sig"`, el `SELECT` ya no apunta a `ORGANIGRAMA_ANAM` con `WHERE isSIGInfo=1` — apunta directo a `ORGANIGRAMA_ANAM_SIG` (tabla completa = conjunto SIG, sin filtro adicional). Sigue pasando `forzar_recalculo=True` para esa vista (por claridad/consistencia, aunque la tabla nueva ni siquiera tiene columna `subordinados` que pudiera leerse por error).
+
+### Qué NO cambió (deliberado)
+- `OrganigramaDeptoView`, `OrganigramaSearchView`, `OrganigramaAnamViewSet`, la columna `isSIGInfo` en `ORGANIGRAMA_ANAM` — intactos, siguen funcionando exactamente igual que antes de esta sesión.
+- El frontend (`page.jsx`) — **cero cambios**. El contrato del endpoint (`GET organigrama-tree/?unidad_negocio=&vista=sig`) no cambió de forma, solo de dónde saca los datos internamente.
+
+### Verificado con prueba real end-to-end
+Reordenar hermanos oficiales + editar `descripcion_larga` de un nodo oficial vía PATCH real sobre `ORGANIGRAMA_ANAM` → SIG no cambió ni el orden ni el contenido; Institucional reflejó ambos cambios de inmediato; se restauraron los valores de prueba al terminar. Conteos de nodos sin cambios respecto a antes de esta sesión: Institucional 454, SIG 300, Alineación 451 (unidad `00900`).
+
+---
+
 ## 14. Puntos a revisar antes de implementar cambios
 
 1. **Consistencia `subordinados` vs re-cómputo**: si se van a hacer cambios masivos a `ORGANIGRAMA_ANAM` fuera del flujo normal (import manual, script), recordar correr `poblar_subordinados_organigrama` — no hay hook automático.
-2. **Permiso `view_organigrama` sin aplicar en backend** — si el cambio toca seguridad/RBAC, conectar `HasModulePermission` (o equivalente) a las vistas de organigrama, ya que hoy solo la UI lo respeta.
+2. ~~Permiso `view_organigrama` sin aplicar en backend~~ — **YA RESUELTO** por un compañero (ver §6.9/§11): ahora hay 4 permisos granulares conectados server-side.
 3. **Discrepancia de campos editables** entre el modal del árbol (respeta `LOCKED_UPDATE_FIELDS`) y la tabla CRUD genérica de Catálogos (no los deshabilita) — decidir si se corrige el formulario genérico o se documenta como comportamiento aceptado.
 4. **Duplicación de SQL** entre `OrganigramaSearchView` (backend) y `ai_app/tools/organigrama.py` (tool IA) — si cambia una query, sincronizar la otra manualmente.
 5. **Mutación optimista en memoria**: cualquier cambio a la lógica de creación/edición debe considerar que el árbol en cliente no se resincroniza con el backend hasta cambiar de unidad o refrescar — bugs de estado divergente son fáciles de introducir aquí.
 6. **Dos taxonomías de nivel no mapeadas** (`nivel_direccion` textual del árbol vs `nivel_jerarquico` numérico de plaza) — si un cambio pretende unificarlas o cruzarlas, no hay mapeo existente en código a reutilizar.
 7. **No usar `getBoundingClientRect` dentro de `#tree-capture-container`** para nada relacionado al layout — ese contenedor tiene CSS `zoom` aplicado, y cualquier medición vía esa API ya viene post-zoom; si se vuelve a usar como coordenada para posicionar/dibujar algo DENTRO del mismo contenedor, el navegador la reescala una segunda vez (bug real, ya corregido: los conectores SVG ahora son 100% analíticos vía `treeLayout`/`laneTopY`, no medidos).
 8. **Reordenar hermanos (`subordinados`) es la única escritura que el backend valida como permutación** — cualquier endpoint/flujo nuevo que también escriba `subordinados` (ej. la futura Fase 2 de re-parenteo) debe decidir explícitamente si reutiliza esa validación o la reemplaza (re-parenteo SÍ necesita cambiar el conjunto, no solo el orden).
-9. **`poblar_subordinados_organigrama` vs `ordenar_subordinados_organigrama`**: nombres parecidos, comportamiento muy distinto (el primero recalcula estructura y destruye ediciones manuales/Enlaces; el segundo solo reordena sin tocar estructura) — confirmar cuál se necesita antes de correr cualquiera en un ambiente con datos manuales.
+9. **`poblar_subordinados_organigrama` vs `ordenar_subordinados_organigrama` vs `reparar_huerfanos_organigrama`**: tres comandos con nombres parecidos y comportamiento muy distinto (el primero recalcula estructura completa y destruye ediciones manuales/Enlaces; el segundo solo reordena sin tocar estructura; el tercero solo agrega enlaces faltantes sin tocar los existentes) — confirmar cuál se necesita antes de correr cualquiera en un ambiente con datos manuales. Ver §13-bis para el incidente que motivó el tercero.
+10. **`00700` sigue con 40 nodos huérfanos sin reparar** (ciclo/referencia circular, no resuelto por `reparar_huerfanos_organigrama` a propósito) — pendiente de diagnóstico manual, ver §13-bis.
+11. **Causa raíz de cómo se pierden enlaces en `subordinados` sigue sin confirmarse** (ver §13-bis) — si vuelve a aparecer el mismo síntoma (Institucional "igual" a SIG/con menos nodos de los esperados), correr `reparar_huerfanos_organigrama` como mitigación inmediata, pero seguiría pendiente encontrar la causa de fondo para prevenir que vuelva a pasar.

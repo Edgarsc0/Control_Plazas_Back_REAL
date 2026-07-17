@@ -1001,6 +1001,40 @@ class OrganigramaAnam(models.Model):
         return f"{self.departamento} - {self.descripcion_larga}"
 
 
+class OrganigramaAnamSig(models.Model):
+    """
+    Foto fija (snapshot) de ORGANIGRAMA_ANAM tomada el 2026-07-17 — usada
+    EXCLUSIVAMENTE por Vista SIG (organigrama-tree/?vista=sig) para que sea
+    100% inmune a cualquier edición manual hecha en Vista Institucional
+    (estructura, orden Y contenido). Antes, ambas vistas leían la misma fila
+    de ORGANIGRAMA_ANAM (filtrada por `isSIGInfo`), lo que dejaba filtrar
+    ediciones de contenido hechas desde Institucional.
+
+    No hay pipeline vivo que la resincronice (a diferencia de
+    EMPLEADOS_COMPLETOS_SIG/MOV_POS_LATEST, que sí se re-truncan en cada
+    import ZAFIRO) — para refrescar esta foto en el futuro, volver a correr
+    el management command `congelar_organigrama_sig`.
+
+    Sin `subordinados`: Vista SIG siempre recalcula la estructura en vivo
+    desde el determinante (`forzar_recalculo=True`), nunca la lee de una
+    columna editable — ver organigrama_tree.build_tree.
+    """
+    departamento = models.CharField(primary_key=True, max_length=255)
+    descripcion_larga = models.CharField(max_length=500)
+    nivel_direccion = models.CharField(max_length=255, blank=True, null=True)
+    unidad_negocio = models.CharField(max_length=255)
+    unidad_administrativa = models.CharField(max_length=255)
+    doaf = models.CharField(max_length=255)
+    num_posicion_gerente = models.CharField(max_length=255)
+    posicion_director = models.CharField(max_length=255)
+
+    class Meta:
+        db_table = "ORGANIGRAMA_ANAM_SIG"
+
+    def __str__(self):
+        return f"{self.departamento} - {self.descripcion_larga}"
+
+
 # Enum de negocio (NJ, Descripción). Nivel 3 tiene 2 descripciones válidas
 # ("Director" / "Titular de Aduana"), por eso la descripción -no el nivel- es
 # la clave única del enum: `nivel_jerarquico` se deriva de ella en save().
