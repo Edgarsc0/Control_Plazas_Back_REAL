@@ -4547,7 +4547,7 @@ class OrganigramaCrearNodoView(APIView):
         siblings = OrganigramaAnam.objects.filter(
             unidad_negocio=parent.unidad_negocio,
             departamento__startswith=prefix,
-        ).values_list("departamento", flat=True)
+        ).exclude(departamento=parent_code).values_list("departamento", flat=True)
 
         max_num = 0
         seg_start, seg_end = bounds[target_pos]
