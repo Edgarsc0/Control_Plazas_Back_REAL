@@ -10,6 +10,7 @@ from django.template.loader import render_to_string
 from django.utils.html import strip_tags
 from django.conf import settings
 from .models import ModulePermission, Whitelist, VerificationCode
+from .presence import get_active_sessions, set_presence
 from .serializers import GroupSerializer, PermissionSerializer, WhitelistSerializer
 
 
@@ -92,6 +93,45 @@ class MePermissionsView(views.APIView):
                 "permissions": permissions,
             }
         )
+
+
+class PresenceHeartbeatView(views.APIView):
+    """
+    Heartbeat de presencia: el front lo llama cada ~20s y en cada cambio de
+    ruta/tab para que el panel de Roles > Usuarios muestre quién está activo
+    y en qué página está, distinguiendo pestañas/dispositivos por `tab_id`
+    (generado y persistido en sessionStorage del lado del front).
+    """
+
+    def post(self, request):
+        tab_id = request.data.get("tab_id")
+        path = request.data.get("path")
+        if not tab_id or not path:
+            return Response(
+                {"error": "tab_id y path son requeridos"}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        user = request.user
+        whitelist_entry = getattr(user, "perfil", None)
+        set_presence(
+            email=user.email,
+            tab_id=tab_id,
+            rol=whitelist_entry.rol.name if whitelist_entry else None,
+            ua=whitelist_entry.ua.nombre if whitelist_entry and whitelist_entry.ua else None,
+            path=path,
+            title=request.data.get("title") or path,
+            subtab=request.data.get("subtab"),
+        )
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class PresenceListView(views.APIView):
+    """Usuarios activos ahora mismo + página/tab en la que están (tab Usuarios de Roles)."""
+
+    view_permission = "authentication.manage_roles"
+
+    def get(self, request):
+        return Response(get_active_sessions())
 
 
 class CheckEmailView(views.APIView):
