@@ -41,10 +41,15 @@ def registrar_y_aplicar_override_empleado(posicion, columna, valor_nuevo, usuari
       2. Bloquea (select_for_update) y lee la fila viva para capturar
          `valor_original` (lo que se está a punto de sobreescribir, sea el
          dato original de ZAFIRO o un override previo ya aplicado).
-      3. Desactiva el override activo previo de esa (tabla, clave, columna),
+      3. Si `valor_nuevo` es igual a `valor_original` (normalizando espacios
+         y tratando None/"" como equivalentes), no hace nada y devuelve
+         `None` — evita ruido en el historial (8.10 QA: entradas
+         "(vacío) → (vacío)" o el mismo texto re-guardado con un espacio de
+         más, registradas como cambio VIGENTE sin serlo).
+      4. Desactiva el override activo previo de esa (tabla, clave, columna),
          si existe — se conserva, no se borra.
-      4. Crea el nuevo CeldaOverride (activo=True).
-      5. Ejecuta el UPDATE sobre EMPLEADOS_COMPLETOS_SIG.
+      5. Crea el nuevo CeldaOverride (activo=True).
+      6. Ejecuta el UPDATE sobre EMPLEADOS_COMPLETOS_SIG.
 
     Lanza ValueError si la columna no es editable o la posición no existe.
 
@@ -74,6 +79,9 @@ def registrar_y_aplicar_override_empleado(posicion, columna, valor_nuevo, usuari
         valor_original = getattr(fila, columna)
         valor_original = None if valor_original is None else str(valor_original)
         valor_nuevo_str = None if valor_nuevo is None else str(valor_nuevo)
+
+        if (valor_original or "").strip() == (valor_nuevo_str or "").strip():
+            return None
 
         CeldaOverride.objects.filter(
             tabla=TABLA_EMPLEADOS,

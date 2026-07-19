@@ -1096,6 +1096,17 @@ class EmpleadosCompletosCeldaOverrideView(APIView):
         except ValueError as e:
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
+        if override is None:
+            # 8.10 QA: valor idéntico al actual — no se registró como cambio
+            # (ver registrar_y_aplicar_override_empleado), así que tampoco se
+            # invalida caché ni se notifica en tiempo real a otros usuarios.
+            return Response({
+                "posicion": posicion,
+                "columna": columna,
+                "valor_nuevo": valor_nuevo,
+                "sin_cambios": True,
+            })
+
         self._invalidar_cache_detalle()
         notificar_cambio_celda(
             posicion, columna, override.valor_nuevo, request.user, override.fecha_modificacion
@@ -5108,8 +5119,8 @@ class MovimientosPersonalStatsView(APIView):
         if cached_data is not None:
             return Response(cached_data, status=status.HTTP_200_OK)
 
-        from django.db.models import Count
-        from django.db.models.functions import ExtractYear
+        from django.db.models import Count, F, Value
+        from django.db.models.functions import Coalesce, ExtractYear, NullIf
 
         from .models import CpTblMovCompleto290526
 
@@ -5127,24 +5138,31 @@ class MovimientosPersonalStatsView(APIView):
         if accion_nombre:
             queryset = queryset.filter(accion_nombre=accion_nombre)
             group_field = "motivo_nombre"
+            fallback_label = "Sin motivo"
         else:
             group_field = "accion_nombre"
+            fallback_label = "Sin acción"
+
+        # BUG-08 QA: antes se excluían del agrupamiento los registros con
+        # `group_field` nulo/vacío (`.exclude(isnull=True).exclude(exact="")`),
+        # así que el total de esta gráfica quedaba 1 registro por debajo del
+        # total real de la tabla (que sí los cuenta). Se agrupan bajo un bucket
+        # explícito en vez de descartarlos, para que ambos totales coincidan.
+        queryset = queryset.annotate(
+            group_val=Coalesce(NullIf(F(group_field), Value("")), Value(fallback_label))
+        )
 
         # Fetch stats grouped by year and group_field
         stats_by_year = (
-            queryset.exclude(**{f"{group_field}__isnull": True})
-            .exclude(**{f"{group_field}__exact": ""})
-            .annotate(year=ExtractYear("fecha_efectiva"))
-            .values("year", group_field)
+            queryset.annotate(year=ExtractYear("fecha_efectiva"))
+            .values("year", "group_val")
             .annotate(total=Count("*"))
             .order_by("-year", "-total")
         )
 
         # Fetch stats for ALL years combined
         stats_all = (
-            queryset.exclude(**{f"{group_field}__isnull": True})
-            .exclude(**{f"{group_field}__exact": ""})
-            .values(group_field)
+            queryset.values("group_val")
             .annotate(total=Count("*"))
             .order_by("-total")
         )
@@ -5156,11 +5174,11 @@ class MovimientosPersonalStatsView(APIView):
             if year_str not in by_year_dict:
                 by_year_dict[year_str] = []
             by_year_dict[year_str].append(
-                {group_field: row[group_field], "total": row["total"]}
+                {group_field: row["group_val"], "total": row["total"]}
             )
 
         all_list = [
-            {group_field: row[group_field], "total": row["total"]} for row in stats_all
+            {group_field: row["group_val"], "total": row["total"]} for row in stats_all
         ]
 
         result = {"by_year": by_year_dict, "all": all_list}
