@@ -3363,15 +3363,36 @@ class CadenaMandoView(APIView):
         base_posicion = base_employee.posicion
 
         # 2. Ejecutar CTE recursivo (hacia arriba o hacia abajo)
-        if direction == "arriba":
-            sql = """
-                WITH RECURSIVE CadenaHaciaArriba AS (
-                    SELECT
+        # Columnas adicionales (Estado Nómina, UN/UA, departamento): permiten al
+        # front pintar el estado real de cada posición (no inferirlo por nombre
+        # vacío) y cruzar `Id_Departamento` con el catálogo de ORGANIGRAMA_ANAM
+        # (isSIGInfo=1) client-side vía useOrganigramaCatalog — sin JOIN aquí,
+        # que además truena por collations distintas entre ambas tablas.
+        _CAMPOS_NODO = """
                         `Posición` AS Posicion,
                         `Nombres` AS Empleado,
                         `Nombre Puesto Funcional` AS Puesto_Funcional,
                         `Nivel` AS Nivel,
+                        `Estado Nómina` AS Estado_Nomina,
+                        `Cd UN` AS Cd_UN,
+                        `Unidad de Negocio` AS Unidad_Negocio,
+                        `Cd UA` AS Cd_UA,
+                        `Unidad Administrativa` AS Unidad_Administrativa,
+                        `Id Departamento` AS Id_Departamento,
+                        `Departamento` AS Departamento,
                         `DependenciaDirecta` AS Jefe_Directo,
+        """
+        _CAMPOS_FINALES = (
+            "Posicion, Empleado, Puesto_Funcional, Nivel, Estado_Nomina, "
+            "Cd_UN, Unidad_Negocio, Cd_UA, Unidad_Administrativa, "
+            "Id_Departamento, Departamento, Jefe_Directo"
+        )
+
+        if direction == "arriba":
+            sql = """
+                WITH RECURSIVE CadenaHaciaArriba AS (
+                    SELECT
+                        {campos}
                         1 AS Nivel_Hacia_Arriba
                     FROM EMPLEADOS_COMPLETOS_SIG
                     WHERE `Posición` = %s
@@ -3383,6 +3404,13 @@ class CadenaMandoView(APIView):
                         jefe.`Nombres`,
                         jefe.`Nombre Puesto Funcional`,
                         jefe.`Nivel`,
+                        jefe.`Estado Nómina`,
+                        jefe.`Cd UN`,
+                        jefe.`Unidad de Negocio`,
+                        jefe.`Cd UA`,
+                        jefe.`Unidad Administrativa`,
+                        jefe.`Id Departamento`,
+                        jefe.`Departamento`,
                         jefe.`DependenciaDirecta`,
                         empleado.Nivel_Hacia_Arriba + 1
                     FROM EMPLEADOS_COMPLETOS_SIG jefe
@@ -3394,19 +3422,15 @@ class CadenaMandoView(APIView):
                       AND empleado.Nivel_Hacia_Arriba < %s
                 )
                 SELECT
-                    Posicion, Empleado, Puesto_Funcional, Nivel, Jefe_Directo, Nivel_Hacia_Arriba
+                    {finales}, Nivel_Hacia_Arriba
                 FROM CadenaHaciaArriba
                 ORDER BY Nivel_Hacia_Arriba ASC;
-            """
+            """.format(campos=_CAMPOS_NODO, finales=_CAMPOS_FINALES)
         else:
             sql = """
                 WITH RECURSIVE CadenaHaciaAbajo AS (
                     SELECT
-                        `Posición` AS Posicion,
-                        `Nombres` AS Empleado,
-                        `Nombre Puesto Funcional` AS Puesto_Funcional,
-                        `Nivel` AS Nivel,
-                        `DependenciaDirecta` AS Jefe_Directo,
+                        {campos}
                         0 AS Nivel_Hacia_Abajo
                     FROM EMPLEADOS_COMPLETOS_SIG
                     WHERE `Posición` = %s
@@ -3418,6 +3442,13 @@ class CadenaMandoView(APIView):
                         subordinado.`Nombres`,
                         subordinado.`Nombre Puesto Funcional`,
                         subordinado.`Nivel`,
+                        subordinado.`Estado Nómina`,
+                        subordinado.`Cd UN`,
+                        subordinado.`Unidad de Negocio`,
+                        subordinado.`Cd UA`,
+                        subordinado.`Unidad Administrativa`,
+                        subordinado.`Id Departamento`,
+                        subordinado.`Departamento`,
                         subordinado.`DependenciaDirecta`,
                         padre.Nivel_Hacia_Abajo + 1
                     FROM EMPLEADOS_COMPLETOS_SIG subordinado
@@ -3426,10 +3457,10 @@ class CadenaMandoView(APIView):
                       AND padre.Nivel_Hacia_Abajo < %s
                 )
                 SELECT
-                    Posicion, Empleado, Puesto_Funcional, Nivel, Jefe_Directo, Nivel_Hacia_Abajo
+                    {finales}, Nivel_Hacia_Abajo
                 FROM CadenaHaciaAbajo
                 ORDER BY Nivel_Hacia_Abajo ASC;
-            """
+            """.format(campos=_CAMPOS_NODO, finales=_CAMPOS_FINALES)
 
         try:
             with connection.cursor() as cursor:
