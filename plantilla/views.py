@@ -3310,8 +3310,19 @@ class MovPosExportExcelView(APIView):
 
 class CadenaMandoView(APIView):
     """
-    Vista para buscar la cadena de mando jerárquica (Bottom-Up) en EMPLEADOS_COMPLETOS_SIG.
-    Busca por posición, nombre completo o número de empleado, y usa un CTE recursivo para subir la jerarquía.
+    Vista para buscar la cadena de mando jerárquica en EMPLEADOS_COMPLETOS_SIG.
+    Busca por posición, nombre completo o número de empleado.
+
+    `direction` (query param, default "arriba"):
+      - "arriba": Bottom-Up clásico — sube de la posición buscada hasta la
+        cúspide, siguiendo `DependenciaDirecta` (un solo camino, 1 jefe por
+        nivel). Campo de profundidad: `Nivel_Hacia_Arriba`.
+      - "abajo" (8.5 QA): Top-Down — todos los subordinados directos e
+        indirectos de la posición buscada (árbol completo, N hijos por
+        nivel). Campo de profundidad: `Nivel_Hacia_Abajo`. Incluye la propia
+        posición base en `Nivel_Hacia_Abajo = 0` para que el front arme el
+        árbol completo (raíz + descendientes) a partir de un solo arreglo
+        plano, agrupando por `Jefe_Directo`.
     """
 
     view_permission = (
@@ -3319,15 +3330,26 @@ class CadenaMandoView(APIView):
         "authentication.view_organigrama_alineacion",
     )
 
+    # Tope defensivo de niveles: evita recursión sin fin si datos sucios
+    # generan un ciclo (p. ej. A depende de B y B depende de A por error de
+    # captura). Ningún organigrama real de ANAM tiene más de ~10 niveles.
+    MAX_PROFUNDIDAD = 20
+
     def get(self, request):
         query = request.query_params.get("q", "").strip()
+        direction = request.query_params.get("direction", "arriba").strip().lower()
         if not query:
             return Response(
                 {"error": "Se requiere el parámetro 'q' para buscar."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        if direction not in ("arriba", "abajo"):
+            return Response(
+                {"error": "direction debe ser 'arriba' o 'abajo'."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-        # 1. Buscar la posición base (la hoja/subordinado)
+        # 1. Buscar la posición base
         base_employee = EmpleadosCompletosSig.objects.filter(
             Q(posicion=query) | Q(nombres__icontains=query) | Q(id_empleado=query)
         ).first()
@@ -3340,44 +3362,78 @@ class CadenaMandoView(APIView):
 
         base_posicion = base_employee.posicion
 
-        # 2. Ejecutar CTE recursivo
-        sql = """
-            WITH RECURSIVE CadenaHaciaArriba AS (
-                SELECT 
-                    `Posición` AS Posicion,
-                    `Nombres` AS Empleado,
-                    `Nombre Puesto Funcional` AS Puesto_Funcional,
-                    `Nivel` AS Nivel,
-                    `DependenciaDirecta` AS Jefe_Directo,
-                    1 AS Nivel_Hacia_Arriba
-                FROM EMPLEADOS_COMPLETOS_SIG
-                WHERE `Posición` = %s
+        # 2. Ejecutar CTE recursivo (hacia arriba o hacia abajo)
+        if direction == "arriba":
+            sql = """
+                WITH RECURSIVE CadenaHaciaArriba AS (
+                    SELECT
+                        `Posición` AS Posicion,
+                        `Nombres` AS Empleado,
+                        `Nombre Puesto Funcional` AS Puesto_Funcional,
+                        `Nivel` AS Nivel,
+                        `DependenciaDirecta` AS Jefe_Directo,
+                        1 AS Nivel_Hacia_Arriba
+                    FROM EMPLEADOS_COMPLETOS_SIG
+                    WHERE `Posición` = %s
 
-                UNION ALL
+                    UNION ALL
 
-                SELECT 
-                    jefe.`Posición`,
-                    jefe.`Nombres`,
-                    jefe.`Nombre Puesto Funcional`,
-                    jefe.`Nivel`,
-                    jefe.`DependenciaDirecta`,
-                    empleado.Nivel_Hacia_Arriba + 1
-                FROM EMPLEADOS_COMPLETOS_SIG jefe
-                INNER JOIN CadenaHaciaArriba empleado ON jefe.`Posición` = empleado.Jefe_Directo
-                WHERE empleado.Jefe_Directo IS NOT NULL 
-                  AND empleado.Jefe_Directo != '' 
-                  AND empleado.Jefe_Directo != '0'
-                  AND jefe.`Posición` != empleado.Posicion
-            )
-            SELECT 
-                Posicion, Empleado, Puesto_Funcional, Nivel, Jefe_Directo, Nivel_Hacia_Arriba 
-            FROM CadenaHaciaArriba 
-            ORDER BY Nivel_Hacia_Arriba ASC;
-        """
+                    SELECT
+                        jefe.`Posición`,
+                        jefe.`Nombres`,
+                        jefe.`Nombre Puesto Funcional`,
+                        jefe.`Nivel`,
+                        jefe.`DependenciaDirecta`,
+                        empleado.Nivel_Hacia_Arriba + 1
+                    FROM EMPLEADOS_COMPLETOS_SIG jefe
+                    INNER JOIN CadenaHaciaArriba empleado ON jefe.`Posición` = empleado.Jefe_Directo
+                    WHERE empleado.Jefe_Directo IS NOT NULL
+                      AND empleado.Jefe_Directo != ''
+                      AND empleado.Jefe_Directo != '0'
+                      AND jefe.`Posición` != empleado.Posicion
+                      AND empleado.Nivel_Hacia_Arriba < %s
+                )
+                SELECT
+                    Posicion, Empleado, Puesto_Funcional, Nivel, Jefe_Directo, Nivel_Hacia_Arriba
+                FROM CadenaHaciaArriba
+                ORDER BY Nivel_Hacia_Arriba ASC;
+            """
+        else:
+            sql = """
+                WITH RECURSIVE CadenaHaciaAbajo AS (
+                    SELECT
+                        `Posición` AS Posicion,
+                        `Nombres` AS Empleado,
+                        `Nombre Puesto Funcional` AS Puesto_Funcional,
+                        `Nivel` AS Nivel,
+                        `DependenciaDirecta` AS Jefe_Directo,
+                        0 AS Nivel_Hacia_Abajo
+                    FROM EMPLEADOS_COMPLETOS_SIG
+                    WHERE `Posición` = %s
+
+                    UNION ALL
+
+                    SELECT
+                        subordinado.`Posición`,
+                        subordinado.`Nombres`,
+                        subordinado.`Nombre Puesto Funcional`,
+                        subordinado.`Nivel`,
+                        subordinado.`DependenciaDirecta`,
+                        padre.Nivel_Hacia_Abajo + 1
+                    FROM EMPLEADOS_COMPLETOS_SIG subordinado
+                    INNER JOIN CadenaHaciaAbajo padre ON subordinado.`DependenciaDirecta` = padre.Posicion
+                    WHERE subordinado.`Posición` != padre.Posicion
+                      AND padre.Nivel_Hacia_Abajo < %s
+                )
+                SELECT
+                    Posicion, Empleado, Puesto_Funcional, Nivel, Jefe_Directo, Nivel_Hacia_Abajo
+                FROM CadenaHaciaAbajo
+                ORDER BY Nivel_Hacia_Abajo ASC;
+            """
 
         try:
             with connection.cursor() as cursor:
-                cursor.execute(sql, [base_posicion])
+                cursor.execute(sql, [base_posicion, self.MAX_PROFUNDIDAD])
                 columns = [col[0] for col in cursor.description]
                 results = [dict(zip(columns, row)) for row in cursor.fetchall()]
 
@@ -3393,6 +3449,7 @@ class CadenaMandoView(APIView):
                             if hasattr(base_employee, "nivel")
                             else "",
                         },
+                        "direction": direction,
                         "cadena": results,
                     },
                     status=status.HTTP_200_OK,
