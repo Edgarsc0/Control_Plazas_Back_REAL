@@ -3468,6 +3468,39 @@ class CadenaMandoView(APIView):
                 columns = [col[0] for col in cursor.description]
                 results = [dict(zip(columns, row)) for row in cursor.fetchall()]
 
+                # 3. Posición activa (independiente del estado del empleado que la
+                # ocupa): una posición se considera activa cuando su movimiento MÁS
+                # RECIENTE en MOV_POS tiene `Estado Psn` = 'A'. Esto puede diferir
+                # de `Estado_Nomina` (EMPLEADOS_COMPLETOS_SIG) — p. ej. una posición
+                # puede seguir marcada como ocupada ahí sin que el catálogo de
+                # movimientos la reconozca como vigente. Restringido con IN a las
+                # posiciones de esta cadena (no escanea las ~53k filas de MOV_POS).
+                posiciones = [str(r["Posicion"]).strip() for r in results if r.get("Posicion")]
+                posiciones_activas = set()
+                if posiciones:
+                    placeholders = ",".join(["%s"] * len(posiciones))
+                    activas_sql = """
+                        SELECT DISTINCT TRIM(m.`Nº Pos Actual`) AS Posicion
+                        FROM MOV_POS m
+                        INNER JOIN (
+                            SELECT id FROM (
+                                SELECT id, ROW_NUMBER() OVER (
+                                    PARTITION BY `Nº Pos Actual`
+                                    ORDER BY `F Efva` DESC, `Fecha Captura` DESC, `F/H Últ Actz` DESC, id DESC
+                                ) as rn
+                                FROM MOV_POS
+                                WHERE `Nº Pos Actual` IN ({ph})
+                            ) ranked WHERE rn = 1
+                        ) latest ON m.id = latest.id
+                        WHERE m.`Estado Psn` = 'A';
+                    """.format(ph=placeholders)
+                    with connection.cursor() as cursor2:
+                        cursor2.execute(activas_sql, posiciones)
+                        posiciones_activas = {row[0] for row in cursor2.fetchall()}
+
+                for r in results:
+                    r["Posicion_Activa"] = str(r.get("Posicion", "")).strip() in posiciones_activas
+
                 return Response(
                     {
                         "empleado_base": {
