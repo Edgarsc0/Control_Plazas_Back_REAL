@@ -1380,11 +1380,13 @@ def importar_zafiro(self):
                 "bajas_historico",
                 "mov_pos_alineacion_dataset",
                 "mov_pos_alineacion_stats",
+                "estadisticas_globales",
+                "latest_mov_pos_ids",
             ]
             cache.delete_many(cache_keys)
 
             # Invalidar por patrón las claves hasheadas por parámetros de request
-            for pattern in ("*mov_stats_*", "*bajas_sig_list_*", "*empleados_completos_activos_detalle_*", "*excel_estatus_file_*"):
+            for pattern in ("*mov_stats_*", "*bajas_sig_list_*", "*empleados_completos_activos_detalle_*", "*excel_estatus_file_*", "*excel_task_result_*"):
                 for key in r.scan_iter(pattern):
                     r.delete(key)
         except Exception:
