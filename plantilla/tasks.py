@@ -1679,6 +1679,7 @@ def generar_excel_estatus_task(self, uas_param, levels_param, group_by):
             current_row += 1
 
             start_table_row = current_row
+            level_employees_shown = []
 
             for ua_name in uas_in_level:
                 ua_name_lower = ua_name.lower()
@@ -1690,6 +1691,7 @@ def generar_excel_estatus_task(self, uas_param, levels_param, group_by):
                 ua_level_employees = [
                     emp for emp in level_employees if emp["_ua_lower"] == ua_name_lower
                 ]
+                level_employees_shown.extend(ua_level_employees)
 
                 for status_idx, status_name in enumerate(status_list, 2):
                     subset = [
@@ -1753,7 +1755,7 @@ def generar_excel_estatus_task(self, uas_param, levels_param, group_by):
 
                 status_employees = [
                     emp
-                    for emp in level_employees
+                    for emp in level_employees_shown
                     if emp["_friendly_status"] == status_name
                 ]
                 status_count = len(status_employees)
@@ -1776,11 +1778,11 @@ def generar_excel_estatus_task(self, uas_param, levels_param, group_by):
             cell_grand_total.border = total_border
             cell_grand_total.fill = grand_total_fill
 
-            grand_total_count = len(level_employees)
+            grand_total_count = len(level_employees_shown)
             if grand_total_count > 0:
                 create_detail_sheet(
                     f"Nivel: {level} | UA: TODOS | Estatus: TODOS",
-                    level_employees,
+                    level_employees_shown,
                     cell_grand_total,
                     bold_link_font,
                 )
@@ -1833,6 +1835,7 @@ def generar_excel_estatus_task(self, uas_param, levels_param, group_by):
             current_row += 1
 
             start_table_row = current_row
+            ua_employees_shown = []
 
             for level_name in levels_in_ua:
                 lvl_lower = level_name.lower()
@@ -1849,6 +1852,7 @@ def generar_excel_estatus_task(self, uas_param, levels_param, group_by):
                     level_employees = [
                         emp for emp in ua_employees if emp["_level_lower"] == lvl_lower
                     ]
+                ua_employees_shown.extend(level_employees)
 
                 for status_idx, status_name in enumerate(status_list, 2):
                     subset = [
@@ -1912,7 +1916,7 @@ def generar_excel_estatus_task(self, uas_param, levels_param, group_by):
 
                 status_employees = [
                     emp
-                    for emp in ua_employees
+                    for emp in ua_employees_shown
                     if emp["_friendly_status"] == status_name
                 ]
                 status_count = len(status_employees)
@@ -1935,11 +1939,11 @@ def generar_excel_estatus_task(self, uas_param, levels_param, group_by):
             cell_grand_total.border = total_border
             cell_grand_total.fill = grand_total_fill
 
-            grand_total_count = len(ua_employees)
+            grand_total_count = len(ua_employees_shown)
             if grand_total_count > 0:
                 create_detail_sheet(
                     f"UA: {ua} | Nivel: TODOS | Estatus: TODOS",
-                    ua_employees,
+                    ua_employees_shown,
                     cell_grand_total,
                     bold_link_font,
                 )
