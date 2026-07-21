@@ -3733,6 +3733,16 @@ class IniciarSincronizacionZafiroView(APIView):
 
 from django.views import View
 
+# Vida máxima de un stream SSE antes de forzar el cierre (el cliente
+# reconecta solo vía EventSource.onerror con backoff, ver
+# ZafiroUpdatesContext.jsx / useCeldaUpdatesRealtime.js). Sin este tope, un
+# hilo de streaming vive mientras la pestaña siga abierta y Django nunca
+# libera su conexión MySQL (close_old_connections solo corre en
+# request_started/request_finished, que no disparan hasta que el generator
+# termina) — con varias pestañas/horas esto agota max_connections del
+# servidor compartido.
+SSE_MAX_LIFETIME_SECONDS = 300
+
 
 class ZafiroSSEView(View):
     """
@@ -3751,8 +3761,10 @@ class ZafiroSSEView(View):
     """
 
     def get(self, request):
+        import time
+
         import redis
-        from django.db import close_old_connections
+        from django.db import close_old_connections, connections
         from django.http import StreamingHttpResponse
 
         def event_stream():
@@ -3765,9 +3777,12 @@ class ZafiroSSEView(View):
 
             close_old_connections()
             last_sent, _ = _calcular_ultima_actualizacion_zafiro()
+            start = time.monotonic()
 
             try:
                 while True:
+                    if time.monotonic() - start > SSE_MAX_LIFETIME_SECONDS:
+                        break
                     # Esperar mensajes en el canal de redis con timeout de 20s
                     message = pubsub.get_message(
                         ignore_subscribe_messages=True, timeout=20.0
@@ -3786,12 +3801,16 @@ class ZafiroSSEView(View):
                             yield f"data: {current}\n\n"
                         else:
                             yield ": ping\n\n"
-            except GeneratorExit:
+            finally:
                 try:
                     pubsub.unsubscribe("zafiro_updates")
                     pubsub.close()
                 except Exception:
                     pass
+                # Cierre explícito: garantiza liberar la conexión MySQL de
+                # este hilo al terminar el stream, sin esperar a que
+                # CONN_MAX_AGE la marque como vieja en un próximo request.
+                connections.close_all()
 
         response = StreamingHttpResponse(
             event_stream(), content_type="text/event-stream"
@@ -3818,7 +3837,10 @@ class CeldaUpdatesSSEView(View):
     """
 
     def get(self, request):
+        import time
+
         import redis
+        from django.db import connections
         from django.http import HttpResponseForbidden, StreamingHttpResponse
         from rest_framework.authtoken.models import Token
 
@@ -3837,9 +3859,12 @@ class CeldaUpdatesSSEView(View):
             pubsub.subscribe("plantilla_celda_updates")
 
             yield "data: init\n\n"
+            start = time.monotonic()
 
             try:
                 while True:
+                    if time.monotonic() - start > SSE_MAX_LIFETIME_SECONDS:
+                        break
                     message = pubsub.get_message(
                         ignore_subscribe_messages=True, timeout=20.0
                     )
@@ -3848,12 +3873,16 @@ class CeldaUpdatesSSEView(View):
                         yield f"data: {data_str}\n\n"
                     else:
                         yield ": ping\n\n"
-            except GeneratorExit:
+            finally:
                 try:
                     pubsub.unsubscribe("plantilla_celda_updates")
                     pubsub.close()
                 except Exception:
                     pass
+                # Ver comentario equivalente en ZafiroSSEView: libera la
+                # conexión MySQL de este hilo (auth Token query) al terminar
+                # el stream, en vez de dejarla viva hasta que expire.
+                connections.close_all()
 
         response = StreamingHttpResponse(
             event_stream(), content_type="text/event-stream"
