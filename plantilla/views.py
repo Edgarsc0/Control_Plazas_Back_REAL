@@ -1239,6 +1239,24 @@ class EmpleadosPorNivelYEstatusView(APIView):
         }
         db_estado_nomina = estatus_map_reverse.get(estado_nomina, estado_nomina)
 
+        # Categorías del drill-down "Ocupadas vs Vacantes por familia de nivel"
+        # (DesgloseJerarquicoCharts.jsx, gráfica 3): mismas reglas de negocio de
+        # partida presupuestal que el resto del cuadro de vacancia, pero exactas
+        # (no la heurística por prefijo de Posición que usan las gráficas).
+        # Nueva Creación es subconjunto de Eventuales por partida, así que
+        # Eventuales la excluye para no duplicar registros entre categorías.
+        # Igual criterio para las 3 divisiones de Ocupadas, solo que con
+        # estado_nomina != ' ' en vez de = ' '.
+        CATEGORIAS_VACANCIA = {
+            "Ocupadas",
+            "Ocupadas Eventuales",
+            "Ocupadas Permanentes",
+            "Ocupadas Eventuales Nueva Creación",
+            "Vacantes Eventuales",
+            "Vacantes Permanentes",
+            "Vacantes Eventuales Nueva Creación",
+        }
+
         try:
             # 1. Obtener posiciones actualmente activas
             active_position_codes = obtener_posiciones_activas()
@@ -1253,7 +1271,42 @@ class EmpleadosPorNivelYEstatusView(APIView):
             else:
                 base_qs = base_qs.filter(nivel=nivel)
 
-            if estado_nomina == "Vacante":
+            if estado_nomina in CATEGORIAS_VACANCIA:
+                base_qs = base_qs.annotate(
+                    partida_trim=Trim("partida"), posicion_trim=Trim("posicion")
+                )
+                if estado_nomina == "Ocupadas":
+                    queryset = base_qs.exclude(estado_nomina=" ")
+                elif estado_nomina == "Ocupadas Permanentes":
+                    queryset = base_qs.exclude(estado_nomina=" ").filter(
+                        partida_trim="11301", posicion_trim__startswith="103"
+                    )
+                elif estado_nomina == "Ocupadas Eventuales Nueva Creación":
+                    queryset = base_qs.exclude(estado_nomina=" ").filter(
+                        partida_trim="12201",
+                        posicion_trim__startswith="2026",
+                    )
+                elif estado_nomina == "Ocupadas Eventuales":
+                    queryset = (
+                        base_qs.exclude(estado_nomina=" ")
+                        .filter(partida_trim="12201")
+                        .exclude(posicion_trim__startswith="2026")
+                    )
+                elif estado_nomina == "Vacantes Permanentes":
+                    queryset = base_qs.filter(
+                        estado_nomina=" ", partida_trim="11301"
+                    )
+                elif estado_nomina == "Vacantes Eventuales Nueva Creación":
+                    queryset = base_qs.filter(
+                        estado_nomina=" ",
+                        partida_trim="12201",
+                        posicion_trim__startswith="2026",
+                    )
+                else:  # "Vacantes Eventuales"
+                    queryset = base_qs.filter(
+                        estado_nomina=" ", partida_trim="12201"
+                    ).exclude(posicion_trim__startswith="2026")
+            elif estado_nomina == "Vacante":
                 # La UI agrupa bajo "Vacante" todo lo que no sea A, S, L, P
                 queryset = base_qs.exclude(
                     estado_nomina__in=["A", "a", "S", "s", "L", "l", "P", "p"]
