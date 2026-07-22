@@ -5438,6 +5438,7 @@ class DesgloseJerarquicoView(APIView):
             e.`Nivel`,
             e.`Posición`,
             m.`FECHA VACANCIA` AS `Fecha Vacancia`,
+            m.id AS mov_pos_id,
             e.`Unidad de Negocio`,
             e.`Cd UA`,
             COALESCE(u.nombre, e.`Cd UA`) AS `nombre_ua`,
