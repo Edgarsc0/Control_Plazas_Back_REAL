@@ -5416,6 +5416,12 @@ class DesgloseJerarquicoView(APIView):
         if cached_data is not None:
             return Response(cached_data, status=status.HTTP_200_OK)
 
+        # SELECT amplía todas las columnas de EMPLEADOS_COMPLETOS_SIG expuestas
+        # en ALL_AVAILABLE_COLUMNS del front (EmployeesModal.jsx) — antes solo
+        # traía 19, y el botón "Columnas" del modal ofrecía ~60, generando un
+        # mismatch (columnas seleccionables que siempre salían vacías porque
+        # el backend nunca las mandaba). Si el front agrega una columna nueva
+        # a ALL_AVAILABLE_COLUMNS, hay que sumarla aquí también.
         query = """
         SELECT
             e.NJ,
@@ -5436,7 +5442,49 @@ class DesgloseJerarquicoView(APIView):
             e.`Id Departamento`,
             e.`Departamento`,
             e.`SMB`,
-            e.`SMN`
+            e.`SMN`,
+            e.`Id Empleado`,
+            e.`Nombres`,
+            e.`RFC`,
+            e.`CURP`,
+            e.`Fecha de ingreso`,
+            e.`Estado Nómina`,
+            e.`Aduana`,
+            e.`Tipo de Aduana`,
+            e.`municipio`,
+            e.`Ubicación`,
+            e.`Descripción ubicación`,
+            e.`tipo`,
+            e.`Val_estat`,
+            e.`Estado en nomina`,
+            e.`UA Validación`,
+            e.`Validando de posición por documento`,
+            e.`Status Jefe Inm Posición`,
+            e.`numeral`,
+            e.`OBSERVACIONES`,
+            e.`Personal Militar o Civil`,
+            e.`Rango`,
+            e.`Posición _Civil / SEDENA / SEMAR`,
+            e.`Tipo de personal SEDENA / SEMAR`,
+            e.`DG o Aduana compactada`,
+            e.`Proyecto 2024 Reducción de plazas Eventuales`,
+            e.`Fecha efectiva (Personal)`,
+            e.`Fecha de captura`,
+            e.`Qna`,
+            e.`Fecha prevista de salida`,
+            e.`DependenciaDirecta`,
+            e.`Numempleado`,
+            e.`Id_campo`,
+            e.`cent`,
+            e.`dir`,
+            e.`subd`,
+            e.`jd`,
+            e.`depto`,
+            e.`id tipo`,
+            e.`ua2`,
+            e.`latitud`,
+            e.`longitud`,
+            e.`Cd Pto Funcional`
         FROM EMPLEADOS_COMPLETOS_SIG e
         INNER JOIN MOV_POS m
             ON e.`Posición` = m.`Nº Pos Actual`
@@ -5476,6 +5524,9 @@ class DesgloseJerarquicoOcupadosView(APIView):
         if cached_data is not None:
             return Response(cached_data, status=status.HTTP_200_OK)
 
+        # SELECT amplía todas las columnas de EMPLEADOS_COMPLETOS_SIG expuestas
+        # en ALL_AVAILABLE_COLUMNS del front (EmployeesModal.jsx) — ver mismo
+        # comentario en DesgloseJerarquicoView arriba.
         query = """
         SELECT
             e.NJ,
@@ -5493,10 +5544,52 @@ class DesgloseJerarquicoOcupadosView(APIView):
             e.`Sindicato`,
             e.`Entidad Federativa`,
             e.`nombreNJ`,
+            e.`Id Departamento`,
+            e.`Departamento`,
+            e.`SMB`,
+            e.`SMN`,
             e.`Id Empleado`,
             e.`Nombres`,
             e.`RFC`,
-            e.`CURP`
+            e.`CURP`,
+            e.`Fecha de ingreso`,
+            e.`Estado Nómina`,
+            e.`Aduana`,
+            e.`Tipo de Aduana`,
+            e.`municipio`,
+            e.`Ubicación`,
+            e.`Descripción ubicación`,
+            e.`tipo`,
+            e.`Val_estat`,
+            e.`Estado en nomina`,
+            e.`UA Validación`,
+            e.`Validando de posición por documento`,
+            e.`Status Jefe Inm Posición`,
+            e.`numeral`,
+            e.`OBSERVACIONES`,
+            e.`Personal Militar o Civil`,
+            e.`Rango`,
+            e.`Posición _Civil / SEDENA / SEMAR`,
+            e.`Tipo de personal SEDENA / SEMAR`,
+            e.`DG o Aduana compactada`,
+            e.`Proyecto 2024 Reducción de plazas Eventuales`,
+            e.`Fecha efectiva (Personal)`,
+            e.`Fecha de captura`,
+            e.`Qna`,
+            e.`Fecha prevista de salida`,
+            e.`DependenciaDirecta`,
+            e.`Numempleado`,
+            e.`Id_campo`,
+            e.`cent`,
+            e.`dir`,
+            e.`subd`,
+            e.`jd`,
+            e.`depto`,
+            e.`id tipo`,
+            e.`ua2`,
+            e.`latitud`,
+            e.`longitud`,
+            e.`Cd Pto Funcional`
         FROM EMPLEADOS_COMPLETOS_SIG e
         INNER JOIN MOV_POS m
             ON e.`Posición` = m.`Nº Pos Actual`
