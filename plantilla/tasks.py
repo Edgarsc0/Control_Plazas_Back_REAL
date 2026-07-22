@@ -1446,6 +1446,7 @@ def generar_excel_estatus_task(self, uas_param, levels_param, group_by):
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     from openpyxl.utils import get_column_letter
 
+    from .excel_letterhead import add_excel_letterhead
     from .views import obtener_posiciones_activas
 
     self.update_state(
@@ -1574,9 +1575,14 @@ def generar_excel_estatus_task(self, uas_param, levels_param, group_by):
         det_ws = wb.create_sheet(title=sheet_name)
         det_ws.sheet_view.showGridLines = True
 
-        back_cell = det_ws.cell(row=1, column=1, value="← Volver al Resumen")
+        # HYPERLINK() en vez de cell.hyperlink=...: openpyxl escribe los enlaces
+        # internos con una relación r:id apuntando a TargetMode="External" cuyo
+        # Target es el propio texto "#'Hoja'!Celda" (no una URL) — Excel no
+        # puede resolverlo y marca "Referencia no válida" en TODOS los
+        # enlaces. La fórmula HYPERLINK() no depende de relaciones externas.
+        back_cell = det_ws.cell(row=1, column=1)
+        back_cell.value = f"=HYPERLINK(\"#'Resumen'!{parent_cell.coordinate}\",\"← Volver al Resumen\")"
         back_cell.font = link_font
-        back_cell.hyperlink = f"#'Resumen'!{parent_cell.coordinate}"
 
         det_ws.merge_cells(f"A3:{last_col_letter}3")
         det_title = det_ws.cell(row=3, column=1, value=title_text)
@@ -1616,10 +1622,21 @@ def generar_excel_estatus_task(self, uas_param, levels_param, group_by):
             col_letter = get_column_letter(c_idx)
             det_ws.column_dimensions[col_letter].width = max(max_len + 3, 11)
 
-        parent_cell.hyperlink = f"#'{sheet_name}'!A1"
+        existing_value = parent_cell.value
+        if isinstance(existing_value, str) and existing_value.startswith("="):
+            display_expr = existing_value[1:]
+        elif isinstance(existing_value, str):
+            display_expr = f'"{existing_value}"'
+        else:
+            display_expr = existing_value if existing_value is not None else '""'
+        parent_cell.value = f"=HYPERLINK(\"#'{sheet_name}'!A1\",{display_expr})"
         parent_cell.font = parent_font
 
-    current_row = 1
+    # Membretado solo en "Resumen" (hoja de entrada) — las hojas Det_N
+    # (creadas al vuelo, ver create_detail_sheet) no lo llevan: su fila 1 ya
+    # se usa para el hipervínculo "Volver al Resumen" y pueden ser cientos.
+    letterhead_off = add_excel_letterhead(ws, 8)
+    current_row = letterhead_off + 1
 
     if group_by == "level":
         ws.column_dimensions["A"].width = 30

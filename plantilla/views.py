@@ -532,7 +532,7 @@ def _categoria_vacancia_stats(resultados):
     return stats
 
 
-def _write_vacancia_report_cover(ws, visible_keys, resultados):
+def _write_vacancia_report_cover(ws, visible_keys, resultados, row_offset=0):
     """Escribe, solo para el export de solo-"Vacantes", la portada del reporte:
     - Filas 1-5, columnas E-H: leyenda de categorías de vacancia + cantidad de
       plazas y cantidad con insubsistencia por categoría, con fila de totales.
@@ -543,6 +543,9 @@ def _write_vacancia_report_cover(ws, visible_keys, resultados):
     Las filas 6-8 se ubican dinámicamente según la posición real de cada
     columna en `visible_keys`, ya que el usuario puede ocultar columnas del
     resto de la tabla (no. de posición, estado, etc.) desde la UI.
+
+    `row_offset` corre todas las filas hacia abajo (usado cuando el membretado
+    institucional ya ocupa las primeras filas de la hoja).
     """
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
@@ -567,14 +570,15 @@ def _write_vacancia_report_cover(ws, visible_keys, resultados):
         return cell
 
     # ── Leyenda de categorías (E1:H4) + fila de totales (E5:H5) ─────────────
+    o = row_offset
     stats = _categoria_vacancia_stats(resultados)
-    _cell(1, 5, "CATEGORIA DE LA VACANCIA", legend_header_fill, font_label)
-    _cell(1, 6, "Descripción", legend_header_fill, font_label)
-    _cell(1, 7, "Cantidad de Plazas", legend_header_fill, font_label)
-    _cell(1, 8, "Cantidad de Plazas que Tuvieron Insubsistencia", legend_header_fill, font_label)
+    _cell(o + 1, 5, "CATEGORIA DE LA VACANCIA", legend_header_fill, font_label)
+    _cell(o + 1, 6, "Descripción", legend_header_fill, font_label)
+    _cell(o + 1, 7, "Cantidad de Plazas", legend_header_fill, font_label)
+    _cell(o + 1, 8, "Cantidad de Plazas que Tuvieron Insubsistencia", legend_header_fill, font_label)
 
     for offset, categoria in enumerate(("A", "B", "C")):
-        row = 2 + offset
+        row = o + 2 + offset
         _cell(row, 5, categoria, legend_cat_fill, font_bold_black)
         _cell(row, 6, VACANCIA_CATEGORIA_DESCRIPCIONES[categoria])
         _cell(row, 7, stats[categoria]["total"])
@@ -582,11 +586,11 @@ def _write_vacancia_report_cover(ws, visible_keys, resultados):
 
     total_plazas = sum(s["total"] for s in stats.values())
     total_insub = sum(s["insub"] for s in stats.values())
-    _cell(5, 5, "TOTAL", legend_total_fill, font_bold_black)
-    ws.merge_cells(start_row=5, start_column=5, end_row=5, end_column=6)
-    _cell(5, 6, None, legend_total_fill, font_bold_black)
-    _cell(5, 7, total_plazas, legend_total_fill, font_bold_black)
-    _cell(5, 8, total_insub, legend_total_fill, font_bold_black)
+    _cell(o + 5, 5, "TOTAL", legend_total_fill, font_bold_black)
+    ws.merge_cells(start_row=o + 5, start_column=5, end_row=o + 5, end_column=6)
+    _cell(o + 5, 6, None, legend_total_fill, font_bold_black)
+    _cell(o + 5, 7, total_plazas, legend_total_fill, font_bold_black)
+    _cell(o + 5, 8, total_insub, legend_total_fill, font_bold_black)
 
     # ── Fila 6 (grupos) y filas 7-8 (notas explicativas) ────────────────────
     col_index = {key: idx for idx, key in enumerate(visible_keys, start=1)}
@@ -600,9 +604,9 @@ def _write_vacancia_report_cover(ws, visible_keys, resultados):
             group_fill_by_key[k] = group_fill
         start_col, end_col = cols[0], cols[-1]
         black_fill = PatternFill(start_color="FF000000", end_color="FF000000", fill_type="solid")
-        _cell(6, start_col, group_title, black_fill, font_label)
+        _cell(o + 6, start_col, group_title, black_fill, font_label)
         if end_col > start_col:
-            ws.merge_cells(start_row=6, start_column=start_col, end_row=6, end_column=end_col)
+            ws.merge_cells(start_row=o + 6, start_column=start_col, end_row=o + 6, end_column=end_col)
 
     yellow_fill = PatternFill(start_color="FFFFFF38", end_color="FFFFFF38", fill_type="solid")
     for key, (line1, line2) in VACANCIA_EXPORT_COLUMN_NOTES.items():
@@ -614,8 +618,8 @@ def _write_vacancia_report_cover(ws, visible_keys, resultados):
         # el blanco quedaba invisible sobre amarillo.
         note_font = font_label if fill else font_bold_black
         fill = fill or yellow_fill
-        _cell(7, col, line1, fill, note_font)
-        _cell(8, col, line2, fill, note_font)
+        _cell(o + 7, col, line1, fill, note_font)
+        _cell(o + 8, col, line2, fill, note_font)
 
     # ── Título + fecha/hora de descarga (A1:D2) ─────────────────────────────
     from django.utils import timezone
@@ -635,8 +639,8 @@ def _write_vacancia_report_cover(ws, visible_keys, resultados):
         for col in range(2, 5):
             _cell(row, col, None, title_fill, font_label)
 
-    _merge_box(1, "Reporte generado por el Sistema de Control de Plazas (SCP)")
-    _merge_box(2, f"Fecha y hora de descarga: {fecha_str}")
+    _merge_box(o + 1, "Reporte generado por el Sistema de Control de Plazas (SCP)")
+    _merge_box(o + 2, f"Fecha y hora de descarga: {fecha_str}")
 
 
 # Antes recalculaba ROW_NUMBER() OVER sobre toda MOV_POS en cada request
@@ -719,6 +723,7 @@ import pandas as pd
 from django.http import HttpResponse
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from .excel_letterhead import add_excel_letterhead, LETTERHEAD_ROWS
 
 
 class ExportExcelView(APIView):
@@ -751,10 +756,12 @@ class ExportExcelView(APIView):
                     df[col] = df[col].fillna("")
 
             with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                df.to_excel(writer, index=False, sheet_name="Plantilla")
+                df.to_excel(writer, index=False, sheet_name="Plantilla", startrow=LETTERHEAD_ROWS)
 
                 workbook = writer.book
                 worksheet = writer.sheets["Plantilla"]
+                add_excel_letterhead(worksheet, len(df.columns))
+                header_row_num = LETTERHEAD_ROWS + 1
 
                 # --- ESTILOS ROBUSTOS ---
                 # Usamos códigos ARGB completos (FF + Hex) para máxima compatibilidad
@@ -779,7 +786,7 @@ class ExportExcelView(APIView):
 
                 # --- PROCESAR ENCABEZADOS ---
                 for col_num, column_title in enumerate(df.columns, 1):
-                    cell = worksheet.cell(row=1, column=col_num)
+                    cell = worksheet.cell(row=header_row_num, column=col_num)
                     cell.fill = header_fill
                     cell.font = header_font
                     cell.border = thin_border
@@ -812,7 +819,7 @@ class ExportExcelView(APIView):
                 max_styled_rows = 5000
                 rows_to_process = min(len(df), max_styled_rows)
 
-                for row_num in range(2, rows_to_process + 2):
+                for row_num in range(header_row_num + 1, header_row_num + 1 + rows_to_process):
                     is_zebra = row_num % 2 == 0
                     for col_num in range(1, len(df.columns) + 1):
                         cell = worksheet.cell(row=row_num, column=col_num)
@@ -823,7 +830,7 @@ class ExportExcelView(APIView):
                             cell.fill = zebra_fill
 
                 # Congelar paneles
-                worksheet.freeze_panes = "B2"
+                worksheet.freeze_panes = f"B{header_row_num + 1}"
 
             output.seek(0)
             file_data = output.read()
@@ -3286,11 +3293,13 @@ class MovPosExportExcelView(APIView):
             align_center = Alignment(horizontal="center", vertical="center")
             align_left = Alignment(horizontal="left", vertical="center")
 
+            letterhead_off = add_excel_letterhead(ws, len(visible_keys))
+
             # Export de solo "Vacantes": portada con leyenda de categorías +
             # conteos y grupos de columnas explicados, encima del header real.
             if is_vacantes_only:
-                _write_vacancia_report_cover(ws, visible_keys, resultados)
-            header_row = 9 if is_vacantes_only else 1
+                _write_vacancia_report_cover(ws, visible_keys, resultados, row_offset=letterhead_off)
+            header_row = letterhead_off + (9 if is_vacantes_only else 1)
             data_start_row = header_row + 1
 
             # Header row
@@ -5428,6 +5437,7 @@ class DesgloseJerarquicoView(APIView):
             e.`Nombre Puesto Funcional`,
             e.`Nivel`,
             e.`Posición`,
+            m.`FECHA VACANCIA` AS `Fecha Vacancia`,
             e.`Unidad de Negocio`,
             e.`Cd UA`,
             COALESCE(u.nombre, e.`Cd UA`) AS `nombre_ua`,

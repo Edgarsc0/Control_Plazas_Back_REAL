@@ -43,6 +43,7 @@ numpy
 openpyxl==3.1.5
 packaging==26.2
 pandas
+Pillow==12.3.0
 prompt_toolkit==3.0.52
 protobuf==7.35.0
 pyasn1==0.6.3
