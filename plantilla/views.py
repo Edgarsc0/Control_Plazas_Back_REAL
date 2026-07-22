@@ -5434,7 +5434,9 @@ class DesgloseJerarquicoView(APIView):
             e.`Entidad Federativa`,
             e.`nombreNJ`,
             e.`Id Departamento`,
-            e.`Departamento`
+            e.`Departamento`,
+            e.`SMB`,
+            e.`SMN`
         FROM EMPLEADOS_COMPLETOS_SIG e
         INNER JOIN MOV_POS m
             ON e.`Posición` = m.`Nº Pos Actual`
