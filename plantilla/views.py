@@ -1,5 +1,7 @@
+import datetime
 import json
 import logging
+from zoneinfo import ZoneInfo
 
 from django.conf import settings
 from django.core import exceptions
@@ -9,6 +11,8 @@ from django.db.models import (
     Case,
     CharField,
     Count,
+    DateTimeField,
+    ExpressionWrapper,
     F,
     IntegerField,
     Q,
@@ -16,7 +20,7 @@ from django.db.models import (
     When,
 )
 from django.db import transaction
-from django.db.models.functions import ExtractHour, Trim
+from django.db.models.functions import ExtractHour, Substr, Trim, TruncDate
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
@@ -206,14 +210,32 @@ def apply_advanced_filters(queryset, request, model, computed_resolver=None):
         for f in model._meta.get_fields()
         if f.get_internal_type() in ("CharField", "TextField")
     }
+    # Columnas de fecha "reales" del modelo (DateField/DateTimeField). Se
+    # comparan por fecha truncada, no por texto, para que "igual"/"no igual"
+    # funcionen sobre un DateTimeField sin que la hora embebida tumbe el match
+    # (BUG-F04).
+    date_fields = {
+        f.name
+        for f in model._meta.get_fields()
+        if f.get_internal_type() in ("DateField", "DateTimeField")
+    }
+    datetime_fields = {
+        f.name
+        for f in model._meta.get_fields()
+        if f.get_internal_type() == "DateTimeField"
+    }
+    # CharField que en realidad guarda fecha+hora como texto plano
+    # (`YYYY-MM-DD-HH.MM.SS.ffffff`, p. ej. `MovPosBase.fh_ult_actz`), a
+    # diferencia del resto de columnas de fecha del mismo modelo que son
+    # `YYYY-MM-DD` puro. Se compara por los primeros 10 caracteres, no por el
+    # texto completo (BUG-F03).
+    TEXT_DATETIME_FIELDS = {"fh_ult_actz"}
 
     date_lookup_by_condition = {
         "before": "lt",
         "after": "gt",
         "before_or_equal": "lte",
         "after_or_equal": "gte",
-        "equals": None,
-        "not_equals": None,
     }
     text_lookup_by_condition = {
         "contains": ("icontains", False),
@@ -232,6 +254,32 @@ def apply_advanced_filters(queryset, request, model, computed_resolver=None):
             target = f"trimmed_{field_name}"
             if target not in queryset.query.annotations:
                 queryset = queryset.annotate(**{target: Trim(field_name)})
+            return target
+        return field_name
+
+    def resolve_date_field(field_name):
+        """Campo anotado apto para comparar contra un valor `YYYY-MM-DD`."""
+        nonlocal queryset
+        if field_name in TEXT_DATETIME_FIELDS:
+            target = f"date10_{field_name}"
+            if target not in queryset.query.annotations:
+                queryset = queryset.annotate(**{target: Substr(field_name, 1, 10)})
+            return target
+        if field_name in datetime_fields:
+            target = f"trunc_{field_name}"
+            if target not in queryset.query.annotations:
+                # `TruncDate(field_name)` nativo compila a
+                # `CONVERT_TZ(field, 'UTC', 'America/Mexico_City')` (USE_TZ=True):
+                # el MySQL de este entorno tiene `mysql.time_zone_name` vacía (sin
+                # `mysql_tzinfo_to_sql` cargado), así que CONVERT_TZ con nombre de
+                # zona devuelve NULL para TODAS las filas — truncaba a NULL
+                # siempre, dejando `equals`/`not_equals` en 0/0. Se calcula el
+                # offset con `zoneinfo` (Python puro, no depende de las tablas de
+                # MySQL), se resta como intervalo, y se trunca forzando
+                # `tzinfo=UTC` para que Django nunca emita CONVERT_TZ.
+                offset = datetime.datetime.now(ZoneInfo(settings.TIME_ZONE)).utcoffset()
+                shifted = ExpressionWrapper(F(field_name) + offset, output_field=DateTimeField())
+                queryset = queryset.annotate(**{target: TruncDate(shifted, tzinfo=datetime.timezone.utc)})
             return target
         return field_name
 
@@ -284,16 +332,32 @@ def apply_advanced_filters(queryset, request, model, computed_resolver=None):
             return None
         value = str(value).strip()
 
-        if condition in ("before", "after", "before_or_equal", "after_or_equal"):
+        is_date_like = column in date_fields or column in TEXT_DATETIME_FIELDS
+        if is_date_like:
+            date_target = resolve_date_field(column)
             lookup = date_lookup_by_condition.get(condition)
-            if not lookup:
-                return None
-            return Q(**{f"{target_field}__{lookup}": value})
+            if lookup:
+                return Q(**{f"{date_target}__{lookup}": value})
+            if condition == "equals":
+                return Q(**{date_target: value})
+            if condition == "not_equals":
+                # Una fecha NULL nunca es igual a `value`: debe contar como "no
+                # es igual a", no desaparecer por "NOT (NULL = x)" = NULL en SQL
+                # (mismo patrón que BUG-F06, aquí invertido: NULL sí debe pasar).
+                return Q(**{f"{date_target}__isnull": True}) | ~Q(**{date_target: value})
+            return None
 
         if is_text and condition in text_lookup_by_condition:
             lookup, negate = text_lookup_by_condition[condition]
             q = Q(**{f"{target_field}__{lookup}": value})
-            return ~q if negate else q
+            if not negate:
+                return q
+            # "NOT (NULL LIKE ...)" es NULL en SQL, no TRUE: sin este OR las
+            # filas con el campo vacío desaparecían tanto de "Contiene" como
+            # de "No contiene" (BUG-F06). Los filtros `__in` (checkbox) ya
+            # son NULL-aware vía EMPTY_VALUE_TOKEN; esto iguala el
+            # comportamiento en Filtros Avanzados.
+            return Q(**{f"{target_field}__isnull": True}) | ~q
 
         if condition == "equals":
             return Q(**{target_field: value})
