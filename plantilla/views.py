@@ -2320,9 +2320,33 @@ class MovPosDetalleView(APIView):
                         **{f"{target_distinct_field}__icontains": distinct_search}
                     )
                 else:
+                    # DateTimeField guarda hora exacta: un match exacto contra
+                    # solo "YYYY-MM-DD" (lo unico que manda el front) nunca
+                    # coincide salvo que la hora sea 00:00:00. `__date` no
+                    # sirve: convierte a TIME_ZONE local (America/Mexico_City,
+                    # UTC-6) antes de truncar, y estos timestamps casi siempre
+                    # se guardaron como medianoche UTC -> se corren un dia
+                    # hacia atras (mismo bug de -1 dia documentado en todo el
+                    # front para columnas de fecha). Se trunca en UTC, sin
+                    # conversion de zona horaria, para comparar la fecha tal
+                    # cual esta guardada.
+                    field_internal_type = MovPos._meta.get_field(
+                        distinct_field
+                    ).get_internal_type()
+                    if field_internal_type == "DateTimeField":
+                        utc_date_field = f"{target_distinct_field}__utc_date"
+                        if utc_date_field not in queryset.query.annotations:
+                            queryset = queryset.annotate(
+                                **{utc_date_field: TruncDate(
+                                    distinct_field, tzinfo=datetime.timezone.utc
+                                )}
+                            )
+                        search_lookup = utc_date_field
+                    else:
+                        search_lookup = target_distinct_field
                     try:
                         queryset = queryset.filter(
-                            **{target_distinct_field: distinct_search}
+                            **{search_lookup: distinct_search}
                         )
                     except (ValueError, exceptions.ValidationError):
                         queryset = queryset.none()
@@ -4455,9 +4479,33 @@ class MovimientosPersonalListView(APIView):
                         **{f"{target_distinct_field}__icontains": distinct_search}
                     )
                 else:
+                    # DateTimeField guarda hora exacta: un match exacto contra
+                    # solo "YYYY-MM-DD" (lo unico que manda el front) nunca
+                    # coincide salvo que la hora sea 00:00:00. `__date` no
+                    # sirve: convierte a TIME_ZONE local (America/Mexico_City,
+                    # UTC-6) antes de truncar, y estos timestamps casi siempre
+                    # se guardaron como medianoche UTC -> se corren un dia
+                    # hacia atras (mismo bug de -1 dia documentado en todo el
+                    # front para columnas de fecha). Se trunca en UTC, sin
+                    # conversion de zona horaria, para comparar la fecha tal
+                    # cual esta guardada.
+                    field_internal_type = CpTblMovCompleto290526._meta.get_field(
+                        distinct_field
+                    ).get_internal_type()
+                    if field_internal_type == "DateTimeField":
+                        utc_date_field = f"{target_distinct_field}__utc_date"
+                        if utc_date_field not in queryset.query.annotations:
+                            queryset = queryset.annotate(
+                                **{utc_date_field: TruncDate(
+                                    distinct_field, tzinfo=datetime.timezone.utc
+                                )}
+                            )
+                        search_lookup = utc_date_field
+                    else:
+                        search_lookup = target_distinct_field
                     try:
                         queryset = queryset.filter(
-                            **{target_distinct_field: distinct_search}
+                            **{search_lookup: distinct_search}
                         )
                     except (ValueError, exceptions.ValidationError):
                         queryset = queryset.none()
