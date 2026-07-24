@@ -30,22 +30,29 @@ class RequestUserLogFilter(logging.Filter):
     def filter(self, record):
         request = _current_request.get()
         email = None
+        endpoint = "-"
         if request is not None:
             user = getattr(request, "user", None)
             if user is not None and getattr(user, "is_authenticated", False):
                 email = getattr(user, "email", None) or getattr(user, "username", None)
+            endpoint = f"{request.method} {request.path}"
         record.user_email = email or "anon"
+        record.endpoint = endpoint
         return True
 
 
 _MAGENTA = "\033[1;35m"
+_CYAN = "\033[1;36m"
 _RESET = "\033[0m"
 
 
 class UserEmailColorFormatter(logging.Formatter):
-    """Resalta [user_email] en magenta para distinguirlo del resto de la línea."""
+    """Resalta [user_email] en magenta y el endpoint en cyan para distinguirlos del resto de la línea."""
 
     def format(self, record):
         formatted = super().format(record)
-        highlight = f"[{record.user_email}]"
-        return formatted.replace(highlight, f"{_MAGENTA}{highlight}{_RESET}", 1)
+        user_highlight = f"[{record.user_email}]"
+        formatted = formatted.replace(user_highlight, f"{_MAGENTA}{user_highlight}{_RESET}", 1)
+        endpoint_highlight = f"[{record.endpoint}]"
+        formatted = formatted.replace(endpoint_highlight, f"{_CYAN}{endpoint_highlight}{_RESET}", 1)
+        return formatted

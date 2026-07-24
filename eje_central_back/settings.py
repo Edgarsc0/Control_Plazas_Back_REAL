@@ -130,7 +130,7 @@ LOGGING = {
     "formatters": {
         "simple": {
             "()": "authentication.log_context.UserEmailColorFormatter",
-            "format": "{levelname} {asctime} {name} [{user_email}] {message}",
+            "format": "{levelname} {asctime} {name} [{user_email}] [{endpoint}] {message}",
             "style": "{",
         },
     },
