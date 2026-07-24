@@ -206,7 +206,6 @@ def corregir_fecha_anuencia_row(row, pos, posiciones_ocupadas, overrides=None):
     row["fecha_anuencia_override"] = bool(overrides) and pos in overrides
 
 
-def apply_dynamic_column_filters(queryset, request, model, skip_params=FILTER_SKIP_PARAMS, extra_valid_fields=None):
 def _annotate_full_name(queryset, alias="full_name", fields=("nombre", "ap_pat", "ap_mat")):
     """Anota ``alias`` = concatenación de ``fields`` unidos por espacio y recortados.
 
@@ -233,6 +232,7 @@ def apply_dynamic_column_filters(
     skip_params=FILTER_SKIP_PARAMS,
     full_name_column=None,
     full_name_fields=("nombre", "ap_pat", "ap_mat"),
+    extra_valid_fields=None,
 ):
     """Aplica los filtros dinámicos de columna del frontend.
 
