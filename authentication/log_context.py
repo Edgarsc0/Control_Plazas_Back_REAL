@@ -36,3 +36,16 @@ class RequestUserLogFilter(logging.Filter):
                 email = getattr(user, "email", None) or getattr(user, "username", None)
         record.user_email = email or "anon"
         return True
+
+
+_MAGENTA = "\033[1;35m"
+_RESET = "\033[0m"
+
+
+class UserEmailColorFormatter(logging.Formatter):
+    """Resalta [user_email] en magenta para distinguirlo del resto de la línea."""
+
+    def format(self, record):
+        formatted = super().format(record)
+        highlight = f"[{record.user_email}]"
+        return formatted.replace(highlight, f"{_MAGENTA}{highlight}{_RESET}", 1)

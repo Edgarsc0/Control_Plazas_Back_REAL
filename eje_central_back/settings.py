@@ -129,6 +129,7 @@ LOGGING = {
     "disable_existing_loggers": False,
     "formatters": {
         "simple": {
+            "()": "authentication.log_context.UserEmailColorFormatter",
             "format": "{levelname} {asctime} {name} [{user_email}] {message}",
             "style": "{",
         },
