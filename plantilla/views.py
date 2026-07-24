@@ -17,10 +17,11 @@ from django.db.models import (
     IntegerField,
     Q,
     Sum,
+    Value,
     When,
 )
 from django.db import transaction
-from django.db.models.functions import ExtractHour, Substr, Trim, TruncDate
+from django.db.models.functions import Coalesce, Concat, ExtractHour, Substr, Trim, TruncDate
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
@@ -113,7 +114,33 @@ def apply_text_search(queryset, query, fields):
     return queryset.filter(q)
 
 
-def apply_dynamic_column_filters(queryset, request, model, skip_params=FILTER_SKIP_PARAMS):
+def _annotate_full_name(queryset, alias="full_name", fields=("nombre", "ap_pat", "ap_mat")):
+    """Anota ``alias`` = concatenación de ``fields`` unidos por espacio y recortados.
+
+    El front unificó nombre + ap. paterno + ap. materno en una sola columna
+    "Nombre Completo" (ver ``buildFullName`` en ``MovimientosPersonalTab.jsx``),
+    pero el modelo no tiene ese campo combinado en BD. Este helper reproduce
+    esa concatenación en el ORM para que filtros/sugerencias sobre esa columna
+    unificada busquen en los tres campos reales a la vez.
+    """
+    if alias in queryset.query.annotations:
+        return queryset
+    parts = []
+    for i, field in enumerate(fields):
+        if i:
+            parts.append(Value(" "))
+        parts.append(Coalesce(Trim(field), Value("")))
+    return queryset.annotate(**{alias: Trim(Concat(*parts, output_field=CharField()))})
+
+
+def apply_dynamic_column_filters(
+    queryset,
+    request,
+    model,
+    skip_params=FILTER_SKIP_PARAMS,
+    full_name_column=None,
+    full_name_fields=("nombre", "ap_pat", "ap_mat"),
+):
     """Aplica los filtros dinámicos de columna del frontend.
 
     Soporta ``?campo=val``, selección múltiple (``val1,val2`` -> ``__in``),
@@ -122,6 +149,11 @@ def apply_dynamic_column_filters(queryset, request, model, skip_params=FILTER_SK
     ``Trim(campo)`` (anotando ``trimmed_<campo>``), que es lo que aprovechan los
     índices funcionales. Lógica única compartida por MovPosDetalleView y
     MovimientosPersonalListView (antes estaba duplicada).
+
+    ``full_name_column``: si se da, ese nombre de columna (no es un campo real
+    del modelo) se trata como texto sobre la concatenación de
+    ``full_name_fields`` (ver `_annotate_full_name`) en vez de exigir que sea
+    un campo válido del modelo.
     """
     valid_fields = {f.name for f in model._meta.get_fields()}
     text_fields = {
@@ -137,13 +169,20 @@ def apply_dynamic_column_filters(queryset, request, model, skip_params=FILTER_SK
         is_exclude = param.startswith("exclude__")
         actual_param = param[9:] if is_exclude else param
         base_field = actual_param.split("__")[0]
-        if base_field not in valid_fields or not val:
+        is_full_name = full_name_column is not None and base_field == full_name_column
+        if not is_full_name and (base_field not in valid_fields or not val):
+            continue
+        if is_full_name and not val:
             continue
 
-        is_text = base_field in text_fields
-        target_field = f"trimmed_{base_field}" if is_text else base_field
-        if is_text and target_field not in queryset.query.annotations:
-            queryset = queryset.annotate(**{target_field: Trim(base_field)})
+        is_text = True if is_full_name else base_field in text_fields
+        if is_full_name:
+            target_field = "full_name"
+            queryset = _annotate_full_name(queryset, target_field, full_name_fields)
+        else:
+            target_field = f"trimmed_{base_field}" if is_text else base_field
+            if is_text and target_field not in queryset.query.annotations:
+                queryset = queryset.annotate(**{target_field: Trim(base_field)})
 
         if "__" in actual_param:
             suffix = actual_param.split("__", 1)[1]
@@ -180,7 +219,14 @@ def apply_dynamic_column_filters(queryset, request, model, skip_params=FILTER_SK
     return queryset
 
 
-def apply_advanced_filters(queryset, request, model, computed_resolver=None):
+def apply_advanced_filters(
+    queryset,
+    request,
+    model,
+    computed_resolver=None,
+    full_name_column=None,
+    full_name_fields=("nombre", "ap_pat", "ap_mat"),
+):
     """Aplica las condiciones del modal "Filtros Avanzados" (``?advanced_filters=``).
 
     JSON array de: ``{ column, condition, compareType, compareColumn, value, logic }``.
@@ -190,6 +236,10 @@ def apply_advanced_filters(queryset, request, model, computed_resolver=None):
     (p. ej. "ocupacion"/"total_movimientos" en MovPos). Lógica única compartida
     por MovPosDetalleView y MovimientosPersonalListView (antes solo vivía,
     inline, en MovPosDetalleView).
+
+    ``full_name_column``: si se da (p. ej. ``"nombre"`` en Movimientos), las
+    condiciones de texto sobre esa columna buscan sobre la concatenación de
+    ``full_name_fields`` en vez de sólo el campo real (ver `_annotate_full_name`).
     """
     advanced_filters_raw = request.query_params.get("advanced_filters", "").strip()
     if not advanced_filters_raw:
@@ -302,8 +352,14 @@ def apply_advanced_filters(queryset, request, model, computed_resolver=None):
 
         condition = cond.get("condition", "contains")
         compare_type = cond.get("compareType", "valor")
-        target_field = resolve_target_field(column)
-        is_text = column in text_fields
+        if full_name_column is not None and column == full_name_column:
+            nonlocal queryset
+            target_field = "full_name"
+            queryset = _annotate_full_name(queryset, target_field, full_name_fields)
+            is_text = True
+        else:
+            target_field = resolve_target_field(column)
+            is_text = column in text_fields
 
         if compare_type == "campo":
             compare_column = cond.get("compareColumn")
@@ -4452,24 +4508,41 @@ class MovimientosPersonalListView(APIView):
         ]
         from django.db.models.functions import Trim
 
-        queryset = apply_dynamic_column_filters(queryset, request, CpTblMovCompleto290526)
+        # full_name_column="nombre": el front unificó nombre + ap_pat + ap_mat
+        # en una sola columna "Nombre Completo" (columna key `nombre`, ver
+        # `buildFullName` en MovimientosPersonalTab.jsx); la BD no tiene ese
+        # campo combinado, así que filtros/sugerencias sobre `nombre` deben
+        # buscar en los tres campos reales a la vez.
+        queryset = apply_dynamic_column_filters(
+            queryset, request, CpTblMovCompleto290526, full_name_column="nombre"
+        )
 
         # Advanced filters (built from the "Filtros Avanzados" modal). Se aplica
         # ANTES de la rama distinct_field: si no, "Vista actual" en el dropdown
         # de columna ignoraría las condiciones del modal (bug reportado: el
         # dropdown de Motivo mostraba valores fuera del rango filtrado).
-        queryset = apply_advanced_filters(queryset, request, CpTblMovCompleto290526)
+        queryset = apply_advanced_filters(
+            queryset, request, CpTblMovCompleto290526, full_name_column="nombre"
+        )
 
         # If distinct_field requested, return distinct values directly
         if distinct_field in valid_fields:
             is_text = distinct_field in text_fields
-            target_distinct_field = (
-                f"trimmed_{distinct_field}" if is_text else distinct_field
-            )
-            if is_text and target_distinct_field not in queryset.query.annotations:
-                queryset = queryset.annotate(
-                    **{target_distinct_field: Trim(distinct_field)}
+            # "nombre" es la columna unificada "Nombre Completo" en el front
+            # (nombre + ap_pat + ap_mat, sin campo combinado en BD): las
+            # sugerencias de autocompletado deben listar el nombre completo,
+            # no sólo el campo `nombre` (primer nombre).
+            if distinct_field == "nombre":
+                target_distinct_field = "full_name"
+                queryset = _annotate_full_name(queryset, target_distinct_field)
+            else:
+                target_distinct_field = (
+                    f"trimmed_{distinct_field}" if is_text else distinct_field
                 )
+                if is_text and target_distinct_field not in queryset.query.annotations:
+                    queryset = queryset.annotate(
+                        **{target_distinct_field: Trim(distinct_field)}
+                    )
 
             # Apply search filter on the distinct field if present
             distinct_search = request.query_params.get("distinct_search", "").strip()
