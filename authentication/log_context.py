@@ -5,6 +5,8 @@ import logging
 
 _current_request = contextvars.ContextVar("current_request", default=None)
 
+_access_logger = logging.getLogger("controlplazas.request")
+
 
 class RequestUserLogMiddleware:
     """Guarda la request en un contextvar mientras dura, para que RequestUserLogFilter
@@ -13,6 +15,9 @@ class RequestUserLogMiddleware:
     DRF autentica (TokenAuthentication) dentro del dispatch de la vista y sincroniza
     el usuario resultante de vuelta a request.user, así que basta con envolver
     get_response para que los logs de la vista ya vean el usuario correcto.
+
+    También emite un log propio por request (el access log de gunicorn no pasa por
+    el logging de Django, así que no lleva el correo ni el color resaltado).
     """
 
     def __init__(self, get_response):
@@ -21,7 +26,9 @@ class RequestUserLogMiddleware:
     def __call__(self, request):
         token = _current_request.set(request)
         try:
-            return self.get_response(request)
+            response = self.get_response(request)
+            _access_logger.info("-> %s", getattr(response, "status_code", "-"))
+            return response
         finally:
             _current_request.reset(token)
 
