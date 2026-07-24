@@ -12,6 +12,7 @@ from django.db.models import (
     CharField,
     Count,
     DateField,
+    DateTimeField,
     ExpressionWrapper,
     F,
     IntegerField,
@@ -21,7 +22,7 @@ from django.db.models import (
     When,
 )
 from django.db import transaction
-from django.db.models.functions import Cast, ExtractHour, Trim
+from django.db.models.functions import Cast, Coalesce, Concat, ExtractHour, Substr, Trim, TruncDate
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
@@ -319,6 +320,7 @@ def apply_advanced_filters(
     computed_resolver=None,
     full_name_column=None,
     full_name_fields=("nombre", "ap_pat", "ap_mat"),
+    extra_valid_fields=None,
 ):
     """Aplica las condiciones del modal "Filtros Avanzados" (``?advanced_filters=``).
 
