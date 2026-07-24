@@ -4432,8 +4432,12 @@ class ExportarEstatusExcelView(APIView):
 
 class OrganigramaSearchView(APIView):
     """
-    Busca sobre la tabla cruda ORGANIGRAMA_ANAM por descripcion_larga o departamento.
-    Si no se envía query, retorna todo el catálogo (útil para caché en memoria).
+    Retorna el catálogo completo de ORGANIGRAMA_ANAM (útil para caché en
+    memoria) para que el frontend filtre en cliente por descripcion_larga,
+    departamento u ocupante (ver búsqueda "Nombre o código" en
+    organigrama/page.jsx). El parámetro `q`, si se envía, filtra también
+    server-side por los mismos tres campos (no lo usa el front hoy, que
+    siempre pide el catálogo entero).
     Retorna la unidad_negocio para que el frontend sepa qué JSON cargar.
     """
 
@@ -4447,22 +4451,40 @@ class OrganigramaSearchView(APIView):
         query = request.GET.get("q", "").strip()
 
         with connection.cursor() as cursor:
-            if not query:
-                sql = """
-                    SELECT departamento, descripcion_larga, unidad_negocio, nivel_direccion, isSIGInfo
-                    FROM ORGANIGRAMA_ANAM
+            cursor.execute(
                 """
-                cursor.execute(sql)
-            else:
-                sql = """
-                    SELECT departamento, descripcion_larga, unidad_negocio, nivel_direccion, isSIGInfo
-                    FROM ORGANIGRAMA_ANAM
-                    WHERE descripcion_larga LIKE %s OR departamento LIKE %s
-                    LIMIT 50
+                SELECT departamento, descripcion_larga, unidad_negocio, nivel_direccion, isSIGInfo, num_posicion_gerente
+                FROM ORGANIGRAMA_ANAM
                 """
-                cursor.execute(sql, [f"%{query}%", f"%{query}%"])
-
+            )
             rows = cursor.fetchall()
+
+        # Nombre del ocupante de la plaza titular de cada depto: cruce de
+        # posiciones activas (MOV_POS_LATEST, que ya es la materialización
+        # de "última fila de MOV_POS por Nº Pos Actual", ver
+        # _materializar_mov_pos_latest en tasks.py) contra EMPLEADOS_COMPLETOS_SIG
+        # por Posición — mismo dataset/join que el reporte de referencia
+        # (CRUZA LAS POSICIONES ACTIVAS CON EMPLEADOS COMPLETOS SIG), sin
+        # filtrar por Estado Nómina.
+        posiciones = sorted({
+            r[5] for r in rows if r[5] and r[5] != "(en blanco)"
+        })
+        ocupante_por_posicion = {}
+        if posiciones:
+            placeholders = ", ".join(["%s"] * len(posiciones))
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""
+                    SELECT e.`Posición`, e.`Nombres`
+                    FROM EMPLEADOS_COMPLETOS_SIG e
+                    INNER JOIN MOV_POS_LATEST m ON e.`Posición` = m.`Nº Pos Actual`
+                    WHERE m.`Estado Psn` = 'A' AND e.`Posición` IN ({placeholders})
+                    """,
+                    posiciones,
+                )
+                for posicion, nombre in cursor.fetchall():
+                    if posicion not in ocupante_por_posicion:
+                        ocupante_por_posicion[posicion] = nombre
 
         # isSIGInfo se incluye para que el front pueda filtrar el catálogo
         # global de búsqueda según la vista activa (Vista SIG solo debe
@@ -4474,9 +4496,20 @@ class OrganigramaSearchView(APIView):
                 "unidad_negocio": r[2],
                 "nivel_direccion": r[3],
                 "isSIGInfo": bool(r[4]),
+                "ocupante_nombre": ocupante_por_posicion.get(r[5]),
             }
             for r in rows
         ]
+
+        if query:
+            q = query.lower()
+            results = [
+                r for r in results
+                if q in r["departamento"].lower()
+                or q in (r["descripcion_larga"] or "").lower()
+                or q in (r["ocupante_nombre"] or "").lower()
+            ][:50]
+
         return Response(results)
 
 
