@@ -1129,6 +1129,49 @@ def _calcular_y_actualizar_vacancias(bitacora):
         )
 
 
+def _invalidar_cache_ocupacion_vacancia(bitacora=None):
+    """
+    Invalida cuanto antes los caches que determinan "¿está esta posición
+    ocupada?" y "¿cuál es su fecha de vacancia?" — se llama justo después del
+    swap Blue-Green + `_calcular_y_actualizar_vacancias`, en vez de esperar a
+    que termine TODA la tarea (los pasos que corren después —
+    sincronización/prioridad de nivel jerárquico, reaplicación de
+    CeldaOverride, cuadro de vacancia, histórico de alineación — no tocan
+    ocupación ni fecha de vacancia, así que no hace falta esperarlos).
+
+    Bug real reportado por el usuario: una posición aparecía "Vacante" (sin
+    fecha de vacancia) en Mov. Posiciones mientras Plantilla Detalle ya la
+    mostraba correctamente ocupada. Causa: el swap ya había dejado las
+    tablas frescas, pero `mov_pos_ocupadas_set` (TTL 600s) seguía sirviendo
+    el valor cacheado de ANTES del import — la única invalidación corría al
+    final de la tarea completa, que tarda 7-13 minutos (ver ZafiroBitacora),
+    dejando esa ventana de inconsistencia abierta todo ese tiempo. La
+    invalidación final (más abajo, al terminar la tarea) sigue existiendo
+    para los caches que sí dependen de los pasos posteriores.
+    """
+    try:
+        from django.core.cache import cache
+
+        cache.delete_many([
+            "mov_pos_ocupadas_set",
+            "active_position_codes",
+            "latest_movpos_sub_ids",
+            "mov_pos_detalle",
+            "mov_pos_card_stats",
+            "empleados_completos_activos_detalle",
+        ])
+        import redis as redis_lib
+
+        r = redis_lib.Redis.from_url(settings.CELERY_BROKER_URL)
+        for key in r.scan_iter("*empleados_completos_activos_detalle_*"):
+            r.delete(key)
+    except Exception:
+        logger.exception("Error al invalidar cache de ocupación/vacancia tras el swap")
+        return
+    if bitacora is not None:
+        _append_log(bitacora, "Cache de ocupación/fecha de vacancia invalidado (datos frescos disponibles de inmediato).")
+
+
 def _actualizar_historico_alineacion_general(bitacora=None):
     """Recalcula el % de Alineación General (mismo cruce MOV_POS x
     EMPLEADOS_COMPLETOS_SIG que MovPosAlineacionView, ver plantilla/views.py)
@@ -1318,6 +1361,10 @@ def importar_zafiro(self):
 
         # ── 8. Calcular y Actualizar Fechas de Vacancia ─────────────────────
         _calcular_y_actualizar_vacancias(bitacora)
+
+        # Invalida YA los caches de ocupación/fecha de vacancia — no esperar
+        # a que termine toda la tarea (ver _invalidar_cache_ocupacion_vacancia).
+        _invalidar_cache_ocupacion_vacancia(bitacora)
 
         # ── 9. Sincronizar cat_nivel_jerarquico_plaza desde MOV_POS ────────
         _sincronizar_plazas_nivel_jerarquico(bitacora)

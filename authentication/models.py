@@ -35,6 +35,7 @@ class ModulePermission(models.Model):
             ("view_plantilla_detalle", "Plantilla de Empleados: ver tab Detalle"),
             ("view_plantilla_estatus_nomina", "Plantilla de Empleados: ver tab Estatus Nómina"),
             ("view_plantilla_mov_posiciones", "Plantilla de Empleados: ver tab Mov. Posiciones"),
+            ("edit_plantilla_mov_posiciones", "Plantilla de Empleados: editar Fecha de Anuencia en tab Mov. Posiciones"),
             ("view_plantilla_movimientos", "Plantilla de Empleados: ver tab Movimientos"),
             ("view_plantilla_bajas", "Plantilla de Empleados: ver tab Empleados Bajas"),
             ("view_plantilla_geografia", "Plantilla de Empleados: ver tab Distribución Geográfica"),

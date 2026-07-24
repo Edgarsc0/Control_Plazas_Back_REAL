@@ -11,12 +11,14 @@ patrón que `tasks._reaplicar_prioridad_nivel_jerarquico`).
 
 import hashlib
 import json
+import re
+from datetime import datetime, timedelta
 
 from django.conf import settings
 from django.db import transaction
 from django.db.models import Count, Q
 
-from .models import CeldaOverride, EmpleadosCompletosSig, EmpleadosCompletosSigBase
+from .models import CeldaOverride, EmpleadosCompletosSig, EmpleadosCompletosSigBase, MovPos
 
 TABLA_EMPLEADOS = "EMPLEADOS_COMPLETOS_SIG"
 
@@ -265,3 +267,136 @@ def obtener_estadisticas_overrides_empleados():
         "total_usuarios": total_usuarios,
         "columnas_mas_editadas": top_columnas,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# MOV_POS · fecha_anuencia (override manual sobre un valor calculado, no
+# sobre una columna física)
+#
+# Diferencia clave con el patrón de EMPLEADOS_COMPLETOS_SIG de arriba:
+# `fecha_anuencia` NUNCA existe como columna real en MOV_POS — se calcula al
+# vuelo en cada request (fecha_vacancia + 30 días, ver
+# plantilla.views.annotate_fecha_anuencia). Por eso aquí NO hay UPDATE sobre
+# la tabla viva ni un job de "reaplicar tras cada import": el override se
+# consulta directo desde CeldaOverride en cada consulta, así que basta con
+# registrarlo/desactivarlo — sobrevive el truncado/recarga (blue-green swap,
+# ver tasks._swap_blue_green_tables) de MOV_POS sin ningún trabajo extra,
+# porque nunca dependió de esa tabla para persistir.
+# ─────────────────────────────────────────────────────────────────────────
+
+TABLA_MOV_POS = "MOV_POS"
+COLUMNA_FECHA_ANUENCIA = "fecha_anuencia"
+
+
+def _fecha_anuencia_default(no_pos_actual):
+    """Calcula fecha_vacancia + 30 días para una posición, en Python (para
+    detectar "sin cambios reales" al registrar el primer override — mismo
+    espíritu que la comparación de `registrar_y_aplicar_override_empleado`,
+    solo que aquí no hay un valor "original" real que leer de la tabla)."""
+    row = MovPos.objects.filter(no_pos_actual=no_pos_actual).values("fecha_vacancia").first()
+    fv = (row or {}).get("fecha_vacancia") or ""
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", fv):
+        return None
+    return (datetime.strptime(fv, "%Y-%m-%d").date() + timedelta(days=30)).isoformat()
+
+
+def registrar_override_fecha_anuencia(no_pos_actual, valor_nuevo, usuario):
+    """
+    Registra (reemplazando cualquier override previo) la fecha de anuencia
+    manual de una posición. Lanza ValueError si la posición no existe en
+    MOV_POS o si `valor_nuevo` no es una fecha 'YYYY-MM-DD' válida. Devuelve
+    `None` (sin crear nada) si el valor coincide con el vigente — evita ruido
+    en el historial (mismo criterio 8.10 QA que Empleados).
+    """
+    if not MovPos.objects.filter(no_pos_actual=no_pos_actual).exists():
+        raise ValueError(f"La posición '{no_pos_actual}' no existe en MOV_POS.")
+
+    try:
+        fecha_nueva = datetime.strptime(str(valor_nuevo), "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        raise ValueError("La fecha debe tener el formato 'YYYY-MM-DD'.")
+
+    clave_negocio = {"no_pos_actual": no_pos_actual}
+    clave_hash = compute_clave_hash(clave_negocio)
+    valor_nuevo_str = fecha_nueva.isoformat()
+
+    with transaction.atomic():
+        activo_previo = (
+            CeldaOverride.objects.select_for_update()
+            .filter(
+                tabla=TABLA_MOV_POS,
+                clave_negocio_hash=clave_hash,
+                columna=COLUMNA_FECHA_ANUENCIA,
+                activo=True,
+            )
+            .first()
+        )
+        valor_original = (
+            activo_previo.valor_nuevo if activo_previo else _fecha_anuencia_default(no_pos_actual)
+        )
+
+        if valor_original == valor_nuevo_str:
+            return None
+
+        if activo_previo:
+            activo_previo.activo = False
+            activo_previo.save(update_fields=["activo"])
+
+        override = CeldaOverride.objects.create(
+            tabla=TABLA_MOV_POS,
+            clave_negocio=clave_negocio,
+            clave_negocio_hash=clave_hash,
+            columna=COLUMNA_FECHA_ANUENCIA,
+            valor_original=valor_original,
+            valor_nuevo=valor_nuevo_str,
+            usuario=usuario,
+            activo=True,
+        )
+
+    return override
+
+
+def borrar_override_fecha_anuencia(no_pos_actual):
+    """
+    Revierte al cálculo automático (fecha_vacancia + 30 días): desactiva el
+    override activo de esa posición SIN borrar el historial. A diferencia de
+    `borrar_contenido_celda` (que sí hace hard-delete porque si no,
+    `aplicar_overrides_empleados_completos` reaplicaría el valor viejo tras
+    el siguiente import): `fecha_anuencia` no tiene ese job de reaplicación,
+    así que desactivar basta y conserva la auditoría completa.
+
+    Devuelve `True` si había un override activo (y quedó desactivado), o
+    `False` si la posición ya estaba en automático.
+    """
+    clave_hash = compute_clave_hash({"no_pos_actual": no_pos_actual})
+    updated = CeldaOverride.objects.filter(
+        tabla=TABLA_MOV_POS,
+        clave_negocio_hash=clave_hash,
+        columna=COLUMNA_FECHA_ANUENCIA,
+        activo=True,
+    ).update(activo=False)
+    return updated > 0
+
+
+def get_fecha_anuencia_overrides_map():
+    """
+    ``{no_pos_actual: date}`` de todos los overrides activos de
+    `fecha_anuencia` — consumido por `plantilla.views.annotate_fecha_anuencia`
+    en cada request para dar prioridad a la fecha manual sobre el cálculo
+    automático. Query única y barata (tabla CeldaOverride es chica y solo
+    unos pocos overrides estarán activos a la vez).
+    """
+    overrides = CeldaOverride.objects.filter(
+        tabla=TABLA_MOV_POS, columna=COLUMNA_FECHA_ANUENCIA, activo=True
+    ).values_list("clave_negocio", "valor_nuevo")
+
+    mapa = {}
+    for clave_negocio, valor_nuevo in overrides:
+        pos = clave_negocio.get("no_pos_actual") if clave_negocio else None
+        if not pos or not valor_nuevo:
+            continue
+        try:
+            mapa[pos] = datetime.strptime(valor_nuevo, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+    return mapa

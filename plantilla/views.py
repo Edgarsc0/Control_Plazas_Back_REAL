@@ -11,7 +11,7 @@ from django.db.models import (
     Case,
     CharField,
     Count,
-    DateTimeField,
+    DateField,
     ExpressionWrapper,
     F,
     IntegerField,
@@ -21,7 +21,7 @@ from django.db.models import (
     When,
 )
 from django.db import transaction
-from django.db.models.functions import Coalesce, Concat, ExtractHour, Substr, Trim, TruncDate
+from django.db.models.functions import Cast, ExtractHour, Trim
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
@@ -49,9 +49,12 @@ from .models import (
 )
 from .celda_override import (
     borrar_contenido_celda,
+    borrar_override_fecha_anuencia,
+    get_fecha_anuencia_overrides_map,
     notificar_cambio_celda,
     obtener_estadisticas_overrides_empleados,
     obtener_historial_overrides_empleados,
+    registrar_override_fecha_anuencia,
     registrar_y_aplicar_override_empleado,
     serializar_override,
 )
@@ -114,6 +117,96 @@ def apply_text_search(queryset, query, fields):
     return queryset.filter(q)
 
 
+def annotate_fecha_anuencia(queryset, source_field="fecha_vacancia", overrides=None):
+    """Anota ``fecha_anuencia`` = ``source_field`` + 30 días, calculada al
+    vuelo en cada consulta (nunca persistida en BD, nunca toca el SP
+    ``sp_obtener_todas_vacancias``): es una simple suma de días sobre un
+    valor que ese SP ya calcula con una lógica mucho más compleja (recorre
+    historial de movimientos, detecta insubsistencias, etc.) — duplicar esa
+    lógica solo para sumarle 30 días sería reinventar algo que ya existe, y
+    persistirla en una columna aparte obligaría a mantener dos columnas
+    sincronizadas para siempre.
+
+    ``source_field`` es un varchar con fechas ISO ('YYYY-MM-DD') o vacío/NULL
+    (nunca se llena para posiciones ocupadas) — el regex en el ``When``
+    descarta cualquier valor que no sea una fecha real (vacío, NULL, el
+    sentinel histórico '1900-01-01' se deja pasar tal cual, igual que ya
+    ocurre con ``fecha_vacancia``) devolviendo NULL en vez de reventar el
+    CAST. Al ser una expresión SQL (no un post-proceso en Python), participa
+    igual que un campo real en filtros/orden/`distinct_field` — mismo
+    tratamiento que ya recibe `fecha_vacancia` (campo real del modelo).
+
+    ``overrides``: dict opcional ``{no_pos_actual: date}`` (ver
+    ``celda_override.get_fecha_anuencia_overrides_map``) — el usuario puede
+    editar manualmente la fecha sugerida (+30 días es solo el default); un
+    override activo tiene prioridad absoluta sobre el cálculo automático. Se
+    resuelve con un ``Case`` adicional (una rama ``When`` por override activo,
+    comparando contra el campo real e indexado ``no_pos_actual``) en vez de un
+    ``Subquery`` correlacionado contra ``CeldaOverride`` — más simple y más
+    barato ya que en la práctica son pocos overrides activos a la vez.
+    """
+    from datetime import timedelta
+
+    computed_default = Case(
+        When(
+            **{f"{source_field}__regex": r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+            then=ExpressionWrapper(
+                Cast(source_field, output_field=DateField()) + timedelta(days=30),
+                output_field=DateField(),
+            ),
+        ),
+        default=Value(None),
+        output_field=DateField(),
+    )
+
+    if not overrides:
+        return queryset.annotate(fecha_anuencia=computed_default)
+
+    whens = [
+        When(no_pos_actual=pos, then=Value(fecha, output_field=DateField()))
+        for pos, fecha in overrides.items()
+    ]
+    return queryset.annotate(
+        fecha_anuencia=Case(*whens, default=computed_default, output_field=DateField())
+    )
+
+
+def corregir_fecha_anuencia_row(row, pos, posiciones_ocupadas, overrides=None):
+    """Aplica a ``row["fecha_anuencia"]`` la MISMA regla que ya aplica
+    ``fecha_vacancia`` en estas vistas (vacío si la posición está ocupada —
+    el SP nunca limpia `FECHA VACANCIA` al volver a ocuparse, así que esta
+    corrección en Python es la única barrera contra una fecha de vacancia/
+    anuencia obsoleta) y la formatea como 'YYYY-MM-DD' (la anotación declara
+    ``output_field=DateField()``, pero el driver de MySQL no siempre lo
+    entrega como objeto `date`/`datetime` — para ~7.6% de las filas lo
+    devuelve ya como string 'YYYY-MM-DD HH:MM:SS.ffffff'; como los strings no
+    tienen `.strftime`, antes se colaban tal cual. El frontend calcula los
+    días restantes parseando por '-' un valor que asume 'YYYY-MM-DD' — con
+    el sufijo de hora, ese parseo fallaba silenciosamente, y como el
+    semáforo de color Y el tooltip de días restantes dependen del mismo
+    cálculo, ambos desaparecían juntos exactamente en esas filas. Cortar en
+    el primer espacio o 'T' normaliza cualquier variante que llegue.
+
+    También agrega ``row["fecha_anuencia_override"]`` (bool): si la posición
+    tiene un override manual activo (ver ``overrides``, el mismo dict que ya
+    se le pasó a ``annotate_fecha_anuencia``) — el frontend lo usa para
+    resaltar en azul las fechas editadas manualmente. `False` si la posición
+    está ocupada (el override deja de aplicar junto con la fecha misma)."""
+    if pos in posiciones_ocupadas:
+        row["fecha_anuencia"] = ""
+        row["fecha_anuencia_override"] = False
+        return
+    fa = row.get("fecha_anuencia")
+    if hasattr(fa, "strftime"):
+        row["fecha_anuencia"] = fa.strftime("%Y-%m-%d")
+    elif fa:
+        row["fecha_anuencia"] = str(fa).split(" ")[0].split("T")[0]
+    else:
+        row["fecha_anuencia"] = ""
+    row["fecha_anuencia_override"] = bool(overrides) and pos in overrides
+
+
+def apply_dynamic_column_filters(queryset, request, model, skip_params=FILTER_SKIP_PARAMS, extra_valid_fields=None):
 def _annotate_full_name(queryset, alias="full_name", fields=("nombre", "ap_pat", "ap_mat")):
     """Anota ``alias`` = concatenación de ``fields`` unidos por espacio y recortados.
 
@@ -155,7 +248,7 @@ def apply_dynamic_column_filters(
     ``full_name_fields`` (ver `_annotate_full_name`) en vez de exigir que sea
     un campo válido del modelo.
     """
-    valid_fields = {f.name for f in model._meta.get_fields()}
+    valid_fields = {f.name for f in model._meta.get_fields()} | set(extra_valid_fields or ())
     text_fields = {
         f.name
         for f in model._meta.get_fields()
@@ -254,7 +347,7 @@ def apply_advanced_filters(
         return queryset
     advanced_conditions = advanced_conditions[:20]  # sanity cap
 
-    valid_fields = {f.name for f in model._meta.get_fields()}
+    valid_fields = {f.name for f in model._meta.get_fields()} | set(extra_valid_fields or ())
     text_fields = {
         f.name
         for f in model._meta.get_fields()
@@ -445,6 +538,7 @@ MOV_POS_COLUMN_LABELS = {
     "total_movimientos": "Histórico",
     "ocupacion": "Ocupación",
     "fecha_vacancia": "Fecha de Vacancia",
+    "fecha_anuencia": "Fecha de Anuencia",
     "estado_psn": "Estado (A/I)",
     "f_efva": "Fecha Efectiva",
     "cd_motivo": "Cod. Motivo",
@@ -2074,6 +2168,15 @@ class MovPosDetalleView(APIView):
         from .models import MovPos, Plantilla1800Plazas
 
         queryset = MovPos.objects.all()
+        # `fecha_anuencia` = fecha_vacancia + 30 días por default, salvo que el
+        # usuario haya editado manualmente esa fecha para la posición (ver
+        # celda_override.get_fecha_anuencia_overrides_map) — se anota desde el
+        # inicio para que participe en filtros/orden/distinct_field igual que
+        # un campo real. Se guarda en una variable (no solo inline) para
+        # reusarla más abajo en corregir_fecha_anuencia_row, que necesita el
+        # mismo mapa para marcar `fecha_anuencia_override` por fila.
+        fecha_anuencia_overrides = get_fecha_anuencia_overrides_map()
+        queryset = annotate_fecha_anuencia(queryset, overrides=fecha_anuencia_overrides)
 
         oficio = request.query_params.get("oficio")
         nivel = request.query_params.get("nivel")
@@ -2125,14 +2228,17 @@ class MovPosDetalleView(APIView):
         )
 
         # Dynamic Column Filters
-        valid_fields = [f.name for f in MovPos._meta.get_fields()]
+        # "fecha_anuencia" no es un campo real del modelo (es la anotación de
+        # annotate_fecha_anuencia) — se suma aquí para que filtros/orden/
+        # distinct_field más abajo la traten igual que un campo real.
+        valid_fields = [f.name for f in MovPos._meta.get_fields()] + ["fecha_anuencia"]
         text_fields = [
             f.name
             for f in MovPos._meta.get_fields()
             if f.get_internal_type() in ["CharField", "TextField"]
         ]
 
-        queryset = apply_dynamic_column_filters(queryset, request, MovPos)
+        queryset = apply_dynamic_column_filters(queryset, request, MovPos, extra_valid_fields={"fecha_anuencia"})
 
         # "ocupacion" is a computed column (not a real model field), so the
         # generic Dynamic Column Filters loop above silently skips it.
@@ -2312,7 +2418,8 @@ class MovPosDetalleView(APIView):
             return None
 
         queryset = apply_advanced_filters(
-            queryset, request, MovPos, computed_resolver=mov_pos_computed_resolver
+            queryset, request, MovPos, computed_resolver=mov_pos_computed_resolver,
+            extra_valid_fields={"fecha_anuencia"},
         )
 
         # If distinct_field requested, return distinct values directly
@@ -2416,6 +2523,12 @@ class MovPosDetalleView(APIView):
             results = []
             for item in distinct_qs:
                 val = item[target_distinct_field]
+                # `fecha_anuencia` (anotación DateField) llega como
+                # date/datetime, no como el string plano que ya son los demás
+                # campos (varchar) — se homologa al mismo formato que se
+                # muestra en la tabla ('YYYY-MM-DD').
+                if hasattr(val, "strftime"):
+                    val = val.strftime("%Y-%m-%d")
                 results.append(
                     {"value": val if val is not None else "", "count": item["count"]}
                 )
@@ -2480,6 +2593,7 @@ class MovPosDetalleView(APIView):
                 r["fecha_vacancia"] = (
                     "" if pos in posiciones_ocupadas else r.get("fecha_vacancia", "")
                 )
+                corregir_fecha_anuencia_row(r, pos, posiciones_ocupadas, fecha_anuencia_overrides)
 
             is_excel_mode = (
                 request.query_params.get("no_pagination", "false").strip().lower()
@@ -2527,6 +2641,7 @@ class MovPosDetalleView(APIView):
                 r["fecha_vacancia"] = (
                     "" if pos in posiciones_ocupadas else r.get("fecha_vacancia", "")
                 )
+                corregir_fecha_anuencia_row(r, pos, posiciones_ocupadas, fecha_anuencia_overrides)
             return paginator.get_paginated_response(resultados)
 
         resultados = list(queryset.values())
@@ -2555,7 +2670,91 @@ class MovPosDetalleView(APIView):
             r["fecha_vacancia"] = (
                 "" if pos in posiciones_ocupadas else r.get("fecha_vacancia", "")
             )
+            corregir_fecha_anuencia_row(r, pos, posiciones_ocupadas, fecha_anuencia_overrides)
         return Response(resultados)
+
+
+def _recalcular_fecha_anuencia_actual(no_pos_actual):
+    """Recalcula el valor VIGENTE de `fecha_anuencia` para UNA posición
+    (fecha_vacancia + 30 días, o vacío si está ocupada) reusando las mismas
+    `annotate_fecha_anuencia`/`corregir_fecha_anuencia_row` que ya arman el
+    listado — usado por `MovPosFechaAnuenciaOverrideView.delete()` para que
+    el frontend pueda repintar la celda de inmediato al revertir a
+    automático, sin esperar a que el usuario recargue la página (antes el
+    DELETE devolvía `None` a secas, dejando la celda en blanco hasta el
+    siguiente GET)."""
+    row = {"fecha_anuencia": None}
+    obj = annotate_fecha_anuencia(MovPos.objects.filter(no_pos_actual=no_pos_actual)).values("fecha_anuencia").first()
+    if obj:
+        row["fecha_anuencia"] = obj["fecha_anuencia"]
+
+    posiciones_ocupadas = cache.get("mov_pos_ocupadas_set")
+    if posiciones_ocupadas is None:
+        with connection.cursor() as cursor:
+            cursor.execute(OCUPADAS_RAW_SQL)
+            posiciones_ocupadas = set(r[0] for r in cursor.fetchall() if r[0])
+        cache.set("mov_pos_ocupadas_set", posiciones_ocupadas, 600)
+
+    corregir_fecha_anuencia_row(row, no_pos_actual, posiciones_ocupadas)
+    return row["fecha_anuencia"]
+
+
+class MovPosFechaAnuenciaOverrideView(APIView):
+    """
+    Edición manual de `fecha_anuencia` (sugerida por default como
+    fecha_vacancia + 30 días, ver `annotate_fecha_anuencia`) desde el tab
+    Mov. Posiciones. A diferencia de `EmpleadosCompletosCeldaOverrideView`:
+    no hay tabla viva que actualizar ni caché que invalidar — el valor se
+    calcula (override o default) en cada request. `delete()` además
+    devuelve el valor automático recién recalculado (ver
+    `_recalcular_fecha_anuencia_actual`) para que el frontend pinte la
+    celda de inmediato al revertir, sin esperar a un GET/recarga nueva.
+    """
+
+    edit_permission = "authentication.edit_plantilla_mov_posiciones"
+
+    def post(self, request):
+        no_pos_actual = request.data.get("no_pos_actual")
+        valor_nuevo = request.data.get("valor_nuevo")
+        if not no_pos_actual or not valor_nuevo:
+            return Response(
+                {"detail": "no_pos_actual y valor_nuevo son requeridos."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            override = registrar_override_fecha_anuencia(
+                no_pos_actual, valor_nuevo, request.user
+            )
+        except ValueError as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        if override is None:
+            return Response({
+                "no_pos_actual": no_pos_actual,
+                "fecha_anuencia": valor_nuevo,
+                "sin_cambios": True,
+            })
+
+        return Response({
+            "no_pos_actual": no_pos_actual,
+            "fecha_anuencia": override.valor_nuevo,
+            "valor_original": override.valor_original,
+            "usuario": request.user.username,
+            "fecha_modificacion": override.fecha_modificacion,
+        })
+
+    def delete(self, request):
+        no_pos_actual = request.data.get("no_pos_actual")
+        if not no_pos_actual:
+            return Response(
+                {"detail": "no_pos_actual es requerido."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        borrar_override_fecha_anuencia(no_pos_actual)
+        fecha_anuencia = _recalcular_fecha_anuencia_actual(no_pos_actual)
+        return Response({"no_pos_actual": no_pos_actual, "fecha_anuencia": fecha_anuencia})
 
 
 class MovPosHistoriaView(APIView):
@@ -3204,6 +3403,8 @@ class MovPosExportExcelView(APIView):
 
         # ── 2. Construir queryset con los mismos filtros que MovPosDetalleView ──
         queryset = MovPos.objects.all()
+        fecha_anuencia_overrides = get_fecha_anuencia_overrides_map()
+        queryset = annotate_fecha_anuencia(queryset, overrides=fecha_anuencia_overrides)
 
         oficio = request.query_params.get("oficio")
         nivel = request.query_params.get("nivel")
@@ -3240,7 +3441,7 @@ class MovPosExportExcelView(APIView):
              "puesto_ptal", "descr", "nombre_puesto"],
         )
 
-        queryset = apply_dynamic_column_filters(queryset, request, MovPos)
+        queryset = apply_dynamic_column_filters(queryset, request, MovPos, extra_valid_fields={"fecha_anuencia"})
 
         # ocupacion computed column
         ocupacion_param_key = None
@@ -3364,10 +3565,13 @@ class MovPosExportExcelView(APIView):
                 return Q(no_pos_actual__in=match_pos) if match_pos else Q(pk__in=[])
             return None
 
-        queryset = apply_advanced_filters(queryset, request, MovPos, computed_resolver=_computed_resolver)
+        queryset = apply_advanced_filters(
+            queryset, request, MovPos, computed_resolver=_computed_resolver,
+            extra_valid_fields={"fecha_anuencia"},
+        )
 
         # Sorting
-        valid_fields = [f.name for f in MovPos._meta.get_fields()]
+        valid_fields = [f.name for f in MovPos._meta.get_fields()] + ["fecha_anuencia"]
         text_fields_set = {
             f.name for f in MovPos._meta.get_fields()
             if f.get_internal_type() in ("CharField", "TextField")
@@ -3400,6 +3604,7 @@ class MovPosExportExcelView(APIView):
             r["total_movimientos"] = counts.get(pos, 1)
             r["ocupacion"] = "Ocupada" if pos in posiciones_ocupadas else "Vacante"
             r["fecha_vacancia"] = "" if pos in posiciones_ocupadas else r.get("fecha_vacancia", "")
+            corregir_fecha_anuencia_row(r, pos, posiciones_ocupadas, fecha_anuencia_overrides)
 
         # Export de solo "Vacantes": desglosa el registro decisivo (baja o
         # traslado) y la insubsistencia de cada posición vacante en columnas
