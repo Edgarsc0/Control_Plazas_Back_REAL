@@ -2,19 +2,8 @@
 
 import contextvars
 import logging
-import re
 
 _current_request = contextvars.ContextVar("current_request", default=None)
-
-_ID_SEGMENT_RE = re.compile(r"^\d+$")
-
-
-def normalize_path(path):
-    """Colapsa segmentos numéricos (ids) para que /plantilla/empleados/42/ y
-    /plantilla/empleados/57/ cuenten como la misma "página" en las agregaciones."""
-    segments = [seg for seg in path.split("/") if seg]
-    normalized = [":id" if _ID_SEGMENT_RE.match(seg) else seg for seg in segments]
-    return "/" + "/".join(normalized) + "/"
 
 _access_logger = logging.getLogger("controlplazas.request")
 
@@ -39,18 +28,6 @@ class RequestUserLogMiddleware:
         try:
             response = self.get_response(request)
             _access_logger.info("-> %s", getattr(response, "status_code", "-"))
-
-            user = getattr(request, "user", None)
-            if user is not None and getattr(user, "is_authenticated", False):
-                from .models import RequestVisit
-
-                RequestVisit.objects.create(
-                    email=user.email,
-                    method=request.method,
-                    path=request.path,
-                    status_code=getattr(response, "status_code", 0),
-                )
-
             return response
         finally:
             _current_request.reset(token)

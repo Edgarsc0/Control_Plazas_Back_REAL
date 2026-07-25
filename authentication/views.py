@@ -15,8 +15,7 @@ from django.template.loader import render_to_string
 from django.utils import timezone
 from django.utils.html import strip_tags
 from django.conf import settings
-from .log_context import normalize_path
-from .models import ModulePermission, RequestVisit, Whitelist, VerificationCode
+from .models import ModulePermission, PresenceLog, Whitelist, VerificationCode
 from .presence import get_active_sessions, set_presence
 from .serializers import GroupSerializer, PermissionSerializer, WhitelistSerializer
 
@@ -120,15 +119,20 @@ class PresenceHeartbeatView(views.APIView):
 
         user = request.user
         whitelist_entry = getattr(user, "perfil", None)
+        title = request.data.get("title") or path
+        subtab = request.data.get("subtab")
         set_presence(
             email=user.email,
             tab_id=tab_id,
             rol=whitelist_entry.rol.name if whitelist_entry else None,
             ua=whitelist_entry.ua.nombre if whitelist_entry and whitelist_entry.ua else None,
             path=path,
-            title=request.data.get("title") or path,
-            subtab=request.data.get("subtab"),
+            title=title,
+            subtab=subtab,
         )
+        # Persiste el histórico (presence.py solo vive en Redis con TTL de
+        # 45s) para alimentar el histograma de actividad de Roles > Usuarios.
+        PresenceLog.objects.create(email=user.email, path=path, title=title, subtab=subtab or "")
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -141,24 +145,27 @@ class PresenceListView(views.APIView):
         return Response(get_active_sessions())
 
 
-def _top_page(queryset):
-    """Top de páginas normalizadas sobre las 200 rutas crudas más frecuentes
-    (evita traer todo el historial a Python; con 200 rutas crudas sobra para
-    capturar el top real tras colapsar ids)."""
-    raw_counts = queryset.values("path").annotate(count=Count("id")).order_by("-count")[:200]
-    collapsed = Counter()
-    for row in raw_counts:
-        collapsed[normalize_path(row["path"])] += row["count"]
-    if not collapsed:
-        return None
-    path, count = collapsed.most_common(1)[0]
-    return {"path": path, "count": count}
+# El front manda un heartbeat cada 20s (HEARTBEAT_INTERVAL_MS en
+# PresenceHeartbeat.jsx) mientras la pestaña está abierta, y además en cada
+# cambio de ruta/tab/subtab.
+HEARTBEAT_INTERVAL_SECONDS = 20
+
+# Huecos entre heartbeats de hasta esto se consideran parte de la misma
+# "visita" (tolera un par de beats perdidos por red/reconexión); un hueco
+# mayor cierra la sesión y el siguiente heartbeat abre una nueva.
+SESSION_GAP_SECONDS = 90
+
+
+def _view_label(title, subtab):
+    return f"{title} › {subtab}" if subtab else title
 
 
 class UserVisitsView(views.APIView):
-    """Actividad histórica de un usuario: distribución horaria del día
-    seleccionado, promedio histórico por hora, página más visitada y detalle
-    de cada visita del día. Alimenta el histograma de Roles > Usuarios."""
+    """Actividad histórica de un usuario a partir de su heartbeat de
+    presencia: sesiones del día (con duración y páginas vistas en cada una),
+    distribución de tiempo activo en las 24 horas, promedio histórico por
+    hora y vista (página › subtab) más visitada. Alimenta el histograma de
+    Roles > Usuarios."""
 
     view_permission = "authentication.manage_roles"
 
@@ -182,9 +189,66 @@ class UserVisitsView(views.APIView):
         day_start = timezone.make_aware(datetime.combine(day, dt_time.min), tz)
         day_end = day_start + timedelta(days=1)
 
-        # ExtractHour/TruncDate con conversión de huso horario dependen de las
-        # tablas mysql.time_zone_* (CONVERT_TZ), que no están cargadas en este
-        # servidor y devuelven NULL en silencio. Se extrae en UTC crudo
+        all_qs = PresenceLog.objects.filter(email=email)
+        day_qs = all_qs.filter(created_at__gte=day_start, created_at__lt=day_end)
+
+        # --- Día seleccionado: se trae completo a Python (acotado a un día,
+        # nunca son muchas filas) para poder agrupar por sesión con precisión. ---
+        day_rows = list(day_qs.order_by("created_at").values("created_at", "title", "subtab"))
+
+        sessions = []
+        hourly_active_seconds_day = [0] * 24
+        top_view_day_counter = Counter()
+        current = None
+        for row in day_rows:
+            ts = row["created_at"].astimezone(tz)
+            label = _view_label(row["title"], row["subtab"])
+            top_view_day_counter[label] += 1
+
+            if current is not None:
+                gap = (ts - current["end"]).total_seconds()
+                if gap > SESSION_GAP_SECONDS:
+                    sessions.append(current)
+                    current = None
+                else:
+                    hourly_active_seconds_day[current["end"].hour] += gap
+
+            if current is None:
+                current = {"start": ts, "end": ts, "views": Counter()}
+
+            current["end"] = ts
+            current["views"][label] += 1
+
+        if current is not None:
+            sessions.append(current)
+
+        total_active_seconds_day = sum(int((s["end"] - s["start"]).total_seconds()) for s in sessions)
+
+        top_view_day = None
+        if top_view_day_counter:
+            label, count = top_view_day_counter.most_common(1)[0]
+            top_view_day = {"label": label, "count": count}
+
+        sessions_payload = [
+            {
+                "start": s["start"].strftime("%H:%M:%S"),
+                "end": s["end"].strftime("%H:%M:%S"),
+                "duration_seconds": int((s["end"] - s["start"]).total_seconds()),
+                "views": [{"label": lbl, "count": c} for lbl, c in s["views"].most_common()],
+            }
+            for s in sessions
+        ]
+
+        # --- Histórico completo: agregación en la BD (nunca se trae todo el
+        # historial a Python). Tiempo activo por hora se aproxima como
+        # cantidad_de_heartbeats × HEARTBEAT_INTERVAL_SECONDS: dado que el
+        # heartbeat late a intervalo fijo mientras hay pestaña abierta, es
+        # una aproximación razonable sin tener que reconstruir sesiones de
+        # meses de historial en cada request. ---
+        #
+        # ExtractHour/TruncDate con conversión de huso horario dependen de
+        # las tablas mysql.time_zone_* (CONVERT_TZ), que no están cargadas en
+        # este servidor y devuelven NULL en silencio. Se extrae en UTC crudo
         # (tzinfo=utc evita el CONVERT_TZ) y se desplaza el bucket a mano con
         # el offset del huso horario configurado (America/Mexico_City = -6,
         # sin horario de verano desde 2022).
@@ -193,45 +257,39 @@ class UserVisitsView(views.APIView):
         def bucket_hour(utc_hour):
             return (utc_hour + offset_hours) % 24
 
-        all_qs = RequestVisit.objects.filter(email=email)
-        day_qs = all_qs.filter(created_at__gte=day_start, created_at__lt=day_end)
-
-        hourly_distribution_day = [0] * 24
-        for row in (
-            day_qs.annotate(hour=ExtractHour("created_at", tzinfo=dt_timezone.utc))
-            .values("hour")
-            .annotate(count=Count("id"))
-        ):
-            hourly_distribution_day[bucket_hour(row["hour"])] = row["count"]
-
-        active_days = all_qs.annotate(day=TruncDate("created_at", tzinfo=dt_timezone.utc)).values("day").distinct().count()
-        hourly_average_all_time = [0.0] * 24
+        active_days = (
+            all_qs.annotate(day=TruncDate("created_at", tzinfo=dt_timezone.utc)).values("day").distinct().count()
+        )
+        hourly_average_active_seconds_all_time = [0.0] * 24
         if active_days:
             for row in (
                 all_qs.annotate(hour=ExtractHour("created_at", tzinfo=dt_timezone.utc))
                 .values("hour")
                 .annotate(count=Count("id"))
             ):
-                hourly_average_all_time[bucket_hour(row["hour"])] = round(row["count"] / active_days, 2)
+                seconds = row["count"] * HEARTBEAT_INTERVAL_SECONDS
+                hourly_average_active_seconds_all_time[bucket_hour(row["hour"])] = round(seconds / active_days, 1)
 
-        visits = [
-            {
-                "time": v["created_at"].astimezone(tz).strftime("%H:%M:%S"),
-                "method": v["method"],
-                "path": normalize_path(v["path"]),
+        top_view_all_time = None
+        top_row = (
+            all_qs.values("title", "subtab").annotate(count=Count("id")).order_by("-count").first()
+        )
+        if top_row:
+            top_view_all_time = {
+                "label": _view_label(top_row["title"], top_row["subtab"]),
+                "count": top_row["count"],
             }
-            for v in day_qs.order_by("created_at").values("created_at", "method", "path")
-        ]
 
         return Response(
             {
                 "date": day.isoformat(),
-                "total_visits_day": day_qs.count(),
-                "hourly_distribution_day": hourly_distribution_day,
-                "hourly_average_all_time": hourly_average_all_time,
-                "top_page_all_time": _top_page(all_qs),
-                "top_page_day": _top_page(day_qs),
-                "visits": visits,
+                "sessions_count_day": len(sessions),
+                "total_active_seconds_day": total_active_seconds_day,
+                "hourly_active_seconds_day": hourly_active_seconds_day,
+                "hourly_average_active_seconds_all_time": hourly_average_active_seconds_all_time,
+                "top_view_all_time": top_view_all_time,
+                "top_view_day": top_view_day,
+                "sessions": sessions_payload,
             }
         )
 

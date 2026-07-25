@@ -69,15 +69,17 @@ class ModulePermission(models.Model):
         return Permission.objects.filter(content_type=ContentType.objects.get_for_model(cls))
 
 
-class RequestVisit(models.Model):
-    """Una fila por cada request autenticado que llega al backend (ver
-    RequestUserLogMiddleware). Alimenta el histograma de actividad del tab
-    Roles > Usuarios."""
+class PresenceLog(models.Model):
+    """Una fila por cada heartbeat de presencia (ver PresenceHeartbeatView /
+    PresenceHeartbeat.jsx en el front, que ya resuelve página + subtab).
+    A diferencia de presence.py (que solo vive en Redis con TTL de 45s), esto
+    persiste el histórico para alimentar el histograma de actividad del tab
+    Roles > Usuarios: sesiones, tiempo activo y vista más visitada."""
 
     email = models.EmailField(db_index=True)
-    method = models.CharField(max_length=8)
     path = models.CharField(max_length=255)
-    status_code = models.PositiveSmallIntegerField()
+    title = models.CharField(max_length=255)
+    subtab = models.CharField(max_length=255, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
     class Meta:
