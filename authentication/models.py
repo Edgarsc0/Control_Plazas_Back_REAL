@@ -69,6 +69,21 @@ class ModulePermission(models.Model):
         return Permission.objects.filter(content_type=ContentType.objects.get_for_model(cls))
 
 
+class RequestVisit(models.Model):
+    """Una fila por cada request autenticado que llega al backend (ver
+    RequestUserLogMiddleware). Alimenta el histograma de actividad del tab
+    Roles > Usuarios."""
+
+    email = models.EmailField(db_index=True)
+    method = models.CharField(max_length=8)
+    path = models.CharField(max_length=255)
+    status_code = models.PositiveSmallIntegerField()
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["email", "created_at"])]
+
+
 class VerificationCode(models.Model):
     email = models.EmailField()
     code = models.CharField(max_length=6)

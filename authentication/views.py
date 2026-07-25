@@ -1,3 +1,6 @@
+from collections import Counter
+from datetime import datetime, time as dt_time, timedelta, timezone as dt_timezone
+
 from rest_framework import generics, status, views, viewsets
 from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import AllowAny
@@ -6,10 +9,14 @@ from rest_framework.authtoken.models import Token
 from django.contrib.auth.models import Group, User
 from django.contrib.auth import login
 from django.core.mail import send_mail
+from django.db.models import Count
+from django.db.models.functions import ExtractHour, TruncDate
 from django.template.loader import render_to_string
+from django.utils import timezone
 from django.utils.html import strip_tags
 from django.conf import settings
-from .models import ModulePermission, Whitelist, VerificationCode
+from .log_context import normalize_path
+from .models import ModulePermission, RequestVisit, Whitelist, VerificationCode
 from .presence import get_active_sessions, set_presence
 from .serializers import GroupSerializer, PermissionSerializer, WhitelistSerializer
 
@@ -132,6 +139,101 @@ class PresenceListView(views.APIView):
 
     def get(self, request):
         return Response(get_active_sessions())
+
+
+def _top_page(queryset):
+    """Top de páginas normalizadas sobre las 200 rutas crudas más frecuentes
+    (evita traer todo el historial a Python; con 200 rutas crudas sobra para
+    capturar el top real tras colapsar ids)."""
+    raw_counts = queryset.values("path").annotate(count=Count("id")).order_by("-count")[:200]
+    collapsed = Counter()
+    for row in raw_counts:
+        collapsed[normalize_path(row["path"])] += row["count"]
+    if not collapsed:
+        return None
+    path, count = collapsed.most_common(1)[0]
+    return {"path": path, "count": count}
+
+
+class UserVisitsView(views.APIView):
+    """Actividad histórica de un usuario: distribución horaria del día
+    seleccionado, promedio histórico por hora, página más visitada y detalle
+    de cada visita del día. Alimenta el histograma de Roles > Usuarios."""
+
+    view_permission = "authentication.manage_roles"
+
+    def get(self, request):
+        email = request.query_params.get("email")
+        if not email:
+            return Response({"error": "email es requerido"}, status=status.HTTP_400_BAD_REQUEST)
+
+        date_str = request.query_params.get("date")
+        if date_str:
+            try:
+                day = datetime.strptime(date_str, "%Y-%m-%d").date()
+            except ValueError:
+                return Response(
+                    {"error": "date inválida, usa YYYY-MM-DD"}, status=status.HTTP_400_BAD_REQUEST
+                )
+        else:
+            day = timezone.localtime().date()
+
+        tz = timezone.get_current_timezone()
+        day_start = timezone.make_aware(datetime.combine(day, dt_time.min), tz)
+        day_end = day_start + timedelta(days=1)
+
+        # ExtractHour/TruncDate con conversión de huso horario dependen de las
+        # tablas mysql.time_zone_* (CONVERT_TZ), que no están cargadas en este
+        # servidor y devuelven NULL en silencio. Se extrae en UTC crudo
+        # (tzinfo=utc evita el CONVERT_TZ) y se desplaza el bucket a mano con
+        # el offset del huso horario configurado (America/Mexico_City = -6,
+        # sin horario de verano desde 2022).
+        offset_hours = int(timezone.localtime().utcoffset().total_seconds() // 3600)
+
+        def bucket_hour(utc_hour):
+            return (utc_hour + offset_hours) % 24
+
+        all_qs = RequestVisit.objects.filter(email=email)
+        day_qs = all_qs.filter(created_at__gte=day_start, created_at__lt=day_end)
+
+        hourly_distribution_day = [0] * 24
+        for row in (
+            day_qs.annotate(hour=ExtractHour("created_at", tzinfo=dt_timezone.utc))
+            .values("hour")
+            .annotate(count=Count("id"))
+        ):
+            hourly_distribution_day[bucket_hour(row["hour"])] = row["count"]
+
+        active_days = all_qs.annotate(day=TruncDate("created_at", tzinfo=dt_timezone.utc)).values("day").distinct().count()
+        hourly_average_all_time = [0.0] * 24
+        if active_days:
+            for row in (
+                all_qs.annotate(hour=ExtractHour("created_at", tzinfo=dt_timezone.utc))
+                .values("hour")
+                .annotate(count=Count("id"))
+            ):
+                hourly_average_all_time[bucket_hour(row["hour"])] = round(row["count"] / active_days, 2)
+
+        visits = [
+            {
+                "time": v["created_at"].astimezone(tz).strftime("%H:%M:%S"),
+                "method": v["method"],
+                "path": normalize_path(v["path"]),
+            }
+            for v in day_qs.order_by("created_at").values("created_at", "method", "path")
+        ]
+
+        return Response(
+            {
+                "date": day.isoformat(),
+                "total_visits_day": day_qs.count(),
+                "hourly_distribution_day": hourly_distribution_day,
+                "hourly_average_all_time": hourly_average_all_time,
+                "top_page_all_time": _top_page(all_qs),
+                "top_page_day": _top_page(day_qs),
+                "visits": visits,
+            }
+        )
 
 
 class CheckEmailView(views.APIView):

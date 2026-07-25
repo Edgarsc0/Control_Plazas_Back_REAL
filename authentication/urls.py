@@ -7,6 +7,7 @@ from .views import (
     PresenceHeartbeatView,
     PresenceListView,
     RoleViewSet,
+    UserVisitsView,
     VerifyCodeView,
     WhitelistViewSet,
 )
@@ -23,4 +24,5 @@ urlpatterns = [
     path('me/permissions/', MePermissionsView.as_view(), name='me-permissions'),
     path('presence/heartbeat/', PresenceHeartbeatView.as_view(), name='presence-heartbeat'),
     path('presence/active/', PresenceListView.as_view(), name='presence-active'),
+    path('visits/', UserVisitsView.as_view(), name='user-visits'),
 ]
