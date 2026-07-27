@@ -1430,3 +1430,30 @@ class CeldaOverride(models.Model):
                 name="uniq_override_activo",
             ),
         ]
+
+
+class EmpleadoFotoAlias(models.Model):
+    """
+    Mapeo numempleado -> nombre real del archivo en media/empleados_fotos/,
+    SOLO para fotos cuyo nombre no sigue la convención estándar
+    ``<numempleado>.<ext>`` (ver FOTOS_EMPLEADOS_ANALISIS.md — la carga
+    histórica trajo ~831 fotos nombradas por RFC en vez de número de
+    empleado). El caso estándar se resuelve en vivo por convención de
+    nombre, sin tocar esta tabla — así una foto nueva subida con el nombre
+    correcto se ve de inmediato, sin depender de ningún proceso de
+    sincronización. Esta tabla se llena una vez con el management command
+    `cargar_fotos_empleados` y solo debería crecer si en el futuro alguien
+    vuelve a subir una foto con un nombre no estándar (caso excepcional que
+    se resolvería igual, a mano).
+    """
+
+    # OJO: EmpleadosCompletosSigBase.numempleado declara max_length=10, pero
+    # los valores reales en BD tienen 11 caracteres (verificado: los 10,538
+    # numempleado con RFC real miden 11) — ese max_length está desactualizado
+    # respecto al dato real. Aquí se usa un margen mayor a propósito.
+    numempleado = models.CharField(max_length=20, primary_key=True)
+    nombre_archivo = models.CharField(max_length=255)
+    fecha_registro = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "EMPLEADO_FOTO_ALIAS"

@@ -1,4 +1,4 @@
-#!/bin/bash
+
 # =============================================================================
 # Script de arranque para Celery Worker + Beat
 # Ubicación: /home/edgar/ANAM/EjeCentral/eje_central_back/

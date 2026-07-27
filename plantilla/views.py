@@ -1,6 +1,7 @@
 import datetime
 import json
 import logging
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from django.conf import settings
@@ -231,9 +232,9 @@ def apply_dynamic_column_filters(
     request,
     model,
     skip_params=FILTER_SKIP_PARAMS,
+    extra_valid_fields=None,
     full_name_column=None,
     full_name_fields=("nombre", "ap_pat", "ap_mat"),
-    extra_valid_fields=None,
 ):
     """Aplica los filtros dinámicos de columna del frontend.
 
@@ -243,6 +244,11 @@ def apply_dynamic_column_filters(
     ``Trim(campo)`` (anotando ``trimmed_<campo>``), que es lo que aprovechan los
     índices funcionales. Lógica única compartida por MovPosDetalleView y
     MovimientosPersonalListView (antes estaba duplicada).
+
+    ``extra_valid_fields``: nombres de columnas calculadas (no campos reales
+    del modelo, ej. ``fecha_anuencia``) que de todas formas deben aceptarse
+    para filtrar — el caller ya se aseguró de anotarlas en el queryset antes
+    de llamar esta función (ver ``annotate_fecha_anuencia``).
 
     ``full_name_column``: si se da, ese nombre de columna (no es un campo real
     del modelo) se trata como texto sobre la concatenación de
@@ -318,9 +324,9 @@ def apply_advanced_filters(
     request,
     model,
     computed_resolver=None,
+    extra_valid_fields=None,
     full_name_column=None,
     full_name_fields=("nombre", "ap_pat", "ap_mat"),
-    extra_valid_fields=None,
 ):
     """Aplica las condiciones del modal "Filtros Avanzados" (``?advanced_filters=``).
 
@@ -331,6 +337,12 @@ def apply_advanced_filters(
     (p. ej. "ocupacion"/"total_movimientos" en MovPos). Lógica única compartida
     por MovPosDetalleView y MovimientosPersonalListView (antes solo vivía,
     inline, en MovPosDetalleView).
+
+    ``extra_valid_fields``: nombres de columnas calculadas ya anotadas en el
+    queryset (ej. ``fecha_anuencia``, ver ``annotate_fecha_anuencia``) que se
+    tratan como campo real para condiciones simples (no de fecha con
+    before/after — esas siguen resolviéndose vía ``computed_resolver`` si
+    hace falta ese detalle).
 
     ``full_name_column``: si se da (p. ej. ``"nombre"`` en Movimientos), las
     condiciones de texto sobre esa columna buscan sobre la concatenación de
@@ -1290,6 +1302,336 @@ class EmpleadosCompletosActivosDetalleView(APIView):
             return Response(
                 {"error": "Error interno del servidor"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+
+FOTOS_EMPLEADOS_CONTENT_TYPES = {
+    "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+}
+
+
+class EmpleadoFotoView(APIView):
+    """
+    Sirve la fotografía de un empleado, cargada bajo demanda desde el tab
+    Detalle (botón "Ver") — no se precarga para toda la tabla a propósito,
+    para no pagar miles de lecturas de disco en cada carga de la tabla (ver
+    discusión de diseño: prioriza que ESTE endpoint sea rápido, ya que si se
+    pide es porque el usuario ya está esperando verla).
+
+    Resuelve en este orden (ver FOTOS_EMPLEADOS_ANALISIS.md):
+      1. Archivo ``<numempleado>.<ext>`` directo en disco — convención
+         estándar, cubre toda foto nueva sin ningún paso extra ni tabla de
+         por medio (nunca queda desactualizado). Se prueban varias
+         VARIANTES del número (ver ``_variantes_numempleado``): verificado
+         contra datos reales que el archivo casi nunca está guardado con el
+         mismo padding de ceros que trae `numempleado` en BD (de una
+         muestra de 2000, 0 coincidían exacto — el 83% solo coincidía
+         quitando los ceros a la izquierda), igual que ya contemplaba
+         `excel_fotos_vba_guide.md` para el export a Excel.
+      2. Alias en `EmpleadoFotoAlias` (excepciones históricas nombradas por
+         RFC u otra variante) — se llena una vez con el management command
+         `cargar_fotos_empleados`.
+      3. 404 si ninguna de las dos resuelve.
+    """
+
+    # Un solo endpoint compartido por todos los tabs que muestran fotografía
+    # (Detalle, Estatus Nómina, Mov. Posiciones, Movimientos, Bajas,
+    # Distribución Geográfica) — cada uno tiene su propio permiso "ver
+    # fotografía" independiente del permiso de ver el tab en sí, así que
+    # aquí basta con tener CUALQUIERA de ellos (OR, ya soportado por
+    # HasModulePermission cuando view_permission es una tupla).
+    view_permission = (
+        "authentication.view_plantilla_detalle_foto",
+        "authentication.view_plantilla_estatus_nomina_foto",
+        "authentication.view_plantilla_mov_posiciones_foto",
+        "authentication.view_plantilla_movimientos_foto",
+        "authentication.view_plantilla_bajas_foto",
+        "authentication.view_plantilla_geografia_foto",
+    )
+
+    def get(self, request, numempleado):
+        from django.http import FileResponse, HttpResponseNotFound
+        from .excel_fotos import resolver_foto_empleado
+
+        numempleado = str(numempleado).strip()
+        if not numempleado:
+            return HttpResponseNotFound()
+
+        ruta = resolver_foto_empleado(numempleado)
+        if ruta is None:
+            return HttpResponseNotFound()
+
+        # ETag barato (mtime+tamaño, sin leer/hashear el archivo completo)
+        # para que el navegador no vuelva a pedir la misma foto dos veces.
+        stat = ruta.stat()
+        etag = f'"{stat.st_mtime_ns:x}-{stat.st_size:x}"'
+        if request.headers.get("If-None-Match") == etag:
+            return HttpResponse(status=304)
+
+        ext_lower = ruta.suffix.lower().lstrip(".")
+        response = FileResponse(
+            open(ruta, "rb"),
+            content_type=FOTOS_EMPLEADOS_CONTENT_TYPES.get(ext_lower, "application/octet-stream"),
+        )
+        response["ETag"] = etag
+        response["Cache-Control"] = "private, max-age=86400"
+        return response
+
+
+def _mapear_estado_nomina_excel(val):
+    """Réplica exacta de ``mapEstadoNomina`` (frontend, PlantillaDetalleTab.jsx)
+    para que el export server-side muestre las mismas etiquetas que la tabla."""
+    if not val or not str(val).strip():
+        return "Vacante"
+    codigo = str(val).strip().upper()
+    return {"A": "Activo", "S": "Suspendido", "L": "Licencia", "P": "Licencia Médica"}.get(codigo, "Vacante")
+
+
+_EXCEL_CON_FOTOS_CONTENT_TYPE_XLSM = "application/vnd.ms-excel.sheet.macroEnabled.12"
+_EXCEL_CON_FOTOS_CONTENT_TYPE_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def _excel_con_fotos_response(buffer, incluir_fotos, nombre_base):
+    from .excel_fotos import VBA_HABILITADO
+
+    es_xlsm = incluir_fotos and VBA_HABILITADO
+    extension = "xlsm" if es_xlsm else "xlsx"
+    content_type = _EXCEL_CON_FOTOS_CONTENT_TYPE_XLSM if es_xlsm else _EXCEL_CON_FOTOS_CONTENT_TYPE_XLSX
+    sufijo = "_ConFotos" if incluir_fotos else ""
+    response = HttpResponse(buffer.read(), content_type=content_type)
+    response["Content-Disposition"] = f'attachment; filename="{nombre_base}{sufijo}.{extension}"'
+    return response
+
+
+class ExportarPlantillaDetalleConFotosView(APIView):
+    """
+    Genera el Excel de Plantilla Detalle, opcionalmente con fotografías de
+    empleados embebidas en la celda (ver excel_fotos_vba_guide.md). Camino
+    NUEVO y opt-in: el export normal (sin fotos) sigue siendo 100%
+    client-side (ExcelJS) en PlantillaDetalleTab.jsx — este endpoint solo se
+    llama cuando el usuario, con permiso view_plantilla_detalle_foto, elige
+    incluir fotos en el modal de confirmación.
+
+    PlantillaDetalleTab filtra/ordena 100% client-side (no hay equivalente
+    server-side de sus filtros), así que el frontend manda las claves de
+    negocio (`posicion`) de las filas ya filtradas, en su orden actual, más
+    la lista de columnas visibles ({key,label}) tal como las tiene el usuario.
+    """
+
+    view_permission = "authentication.view_plantilla_detalle"
+
+    def post(self, request):
+        from .excel_fotos import generar_workbook_excel_con_fotos
+
+        posiciones = request.data.get("posiciones") or []
+        columnas = request.data.get("columnas") or []
+        incluir_fotos = bool(request.data.get("incluir_fotos")) and request.user.has_perm(
+            "authentication.view_plantilla_detalle_foto"
+        )
+
+        if not posiciones or not columnas:
+            return Response({"error": "Faltan 'posiciones' o 'columnas'."}, status=status.HTTP_400_BAD_REQUEST)
+
+        rows_by_posicion = {
+            str(r["posicion"]): r
+            for r in EmpleadosCompletosSig.objects.filter(posicion__in=posiciones).values()
+        }
+        rows = [rows_by_posicion[str(p)] for p in posiciones if str(p) in rows_by_posicion]
+
+        # Tope de seguridad: la plantilla activa completa son ~13,300 filas
+        # hoy (medido) — con margen. Sin este tope, "sin querer" no hay
+        # riesgo real aquí (a diferencia de Movimientos, un log histórico sin
+        # límite natural), pero se deja por consistencia con las otras vistas.
+        if incluir_fotos and len(rows) > 15000:
+            return Response(
+                {"error": f"El conjunto tiene {len(rows)} filas — el máximo para incluir fotografías es 15,000."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        buffer = generar_workbook_excel_con_fotos(
+            columnas=columnas, rows=rows, incluir_fotos=incluir_fotos,
+            sheet_name="Plantilla_Empleados", numero_empleado_key="numempleado",
+            mono_keys=["posicion", "id_empleado", "rfc", "curp", "nivel", "codigo_presupuestal",
+                       "ua", "cent", "dir", "subd", "jd", "depto", "numeral"],
+            estado_nomina_key="estado_nomina", mapear_estado_nomina=_mapear_estado_nomina_excel,
+        )
+        return _excel_con_fotos_response(buffer, incluir_fotos, "Plantilla_Empleados")
+
+
+class ExportarMovimientosPersonalConFotosView(APIView):
+    """
+    Genera el Excel de Movimientos (personal, tab "Movimientos" —
+    MovimientosPersonalTab.jsx), opcionalmente con fotografías embebidas.
+
+    A diferencia de Detalle, MovimientosPersonalListView YA filtra/ordena
+    server-side vía query params (apply_dynamic_column_filters,
+    apply_advanced_filters, search, sort_by) — este endpoint reusa esa MISMA
+    lógica llamándola internamente con no_pagination forzado, en vez de
+    reimplementar los filtros (evita que ambas implementaciones diverjan).
+    """
+
+    view_permission = "authentication.view_plantilla_movimientos"
+
+    def get(self, request):
+        from .excel_fotos import generar_workbook_excel_con_fotos
+
+        try:
+            columnas = json.loads(request.query_params.get("columnas", "") or "[]")
+        except (ValueError, TypeError):
+            columnas = []
+        incluir_fotos = (
+            request.query_params.get("incluir_fotos", "false").strip().lower() == "true"
+            and request.user.has_perm("authentication.view_plantilla_movimientos_foto")
+        )
+
+        if not columnas:
+            return Response({"error": "Falta 'columnas'."}, status=status.HTTP_400_BAD_REQUEST)
+
+        request._request.GET = request._request.GET.copy()
+        request._request.GET["no_pagination"] = "true"
+        inner_response = MovimientosPersonalListView().get(request)
+        rows = list(inner_response.data) if inner_response.status_code == 200 else []
+
+        # Tope de seguridad: a diferencia de Detalle (censo actual, acotado
+        # por el tamaño de la plantilla), esta tabla es un LOG histórico sin
+        # límite natural — medido en ~152,160 filas hoy, y solo crece. Sin
+        # filtro, incluir fotos aquí sería una operación desproporcionada
+        # (confirmado: una prueba sin filtros nunca terminó en varios
+        # minutos). Se exige que el usuario acote antes de incluir fotos.
+        if incluir_fotos and len(rows) > 5000:
+            return Response(
+                {"error": f"El conjunto filtrado tiene {len(rows)} filas — el máximo para incluir fotografías es 5,000. Aplica un filtro más específico."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        for row in rows:
+            row["nombre"] = " ".join(filter(None, [row.get("nombre"), row.get("ap_pat"), row.get("ap_mat")]))
+
+        buffer = generar_workbook_excel_con_fotos(
+            columnas=columnas, rows=rows, incluir_fotos=incluir_fotos,
+            sheet_name="Movimientos_Personal", numero_empleado_key="num_empleado",
+            mono_keys=["posicion", "num_empleado", "rfc", "curp", "nv_jerarquico", "un", "id_persona"],
+        )
+        return _excel_con_fotos_response(buffer, incluir_fotos, "Movimientos_Personal")
+
+
+class ExportarBajasConFotosView(APIView):
+    """
+    Genera el Excel de Empleados Bajas, opcionalmente con fotografías
+    embebidas. BajasTab filtra 100% client-side sobre `bajasData` (sin
+    refetch), así que el frontend manda la lista de `id` (PK de BajasSig)
+    de las filas visibles tras su filtro/orden actual.
+    """
+
+    view_permission = "authentication.view_plantilla_bajas"
+
+    def post(self, request):
+        from .excel_fotos import generar_workbook_excel_con_fotos
+
+        ids = request.data.get("ids") or []
+        columnas = request.data.get("columnas") or []
+        incluir_fotos = bool(request.data.get("incluir_fotos")) and request.user.has_perm(
+            "authentication.view_plantilla_bajas_foto"
+        )
+
+        if not ids or not columnas:
+            return Response({"error": "Faltan 'ids' o 'columnas'."}, status=status.HTTP_400_BAD_REQUEST)
+
+        rows_by_id = {r["id"]: r for r in BajasSig.objects.filter(id__in=ids).values()}
+        rows = [rows_by_id[i] for i in ids if i in rows_by_id]
+
+        # Tope de seguridad — histórico de bajas medido en ~5,710 filas hoy;
+        # margen razonable para su crecimiento (ver mismo criterio en Detalle
+        # y Movimientos).
+        if incluir_fotos and len(rows) > 8000:
+            return Response(
+                {"error": f"El conjunto tiene {len(rows)} filas — el máximo para incluir fotografías es 8,000."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        buffer = generar_workbook_excel_con_fotos(
+            columnas=columnas, rows=rows, incluir_fotos=incluir_fotos,
+            sheet_name="Empleados_Bajas", numero_empleado_key="no_empleado",
+            mono_keys=["posicion", "no_empleado", "partida", "grado", "escala", "nivel"],
+        )
+        return _excel_con_fotos_response(buffer, incluir_fotos, "Empleados_Bajas")
+
+
+# Whitelist de permisos "ver fotografía" aceptados por
+# ExportarEmpleadosPorPosicionConFotosView — el frontend manda cuál aplica
+# (el mismo que ya usa para decidir `canViewPhoto` en EmployeesModal), pero
+# se valida contra esta lista fija antes de usarlo en has_perm(...) para que
+# el cliente no pueda pedir la verificación de un permiso arbitrario.
+PERMISOS_FOTO_VALIDOS = {
+    "view_plantilla_detalle_foto",
+    "view_plantilla_estatus_nomina_foto",
+    "view_plantilla_mov_posiciones_foto",
+    "view_plantilla_movimientos_foto",
+    "view_plantilla_bajas_foto",
+    "view_plantilla_geografia_foto",
+}
+
+
+class ExportarEmpleadosPorPosicionConFotosView(APIView):
+    """
+    Genera un Excel, opcionalmente con fotografías, para las filas
+    actualmente mostradas en el componente compartido `EmployeesModal.jsx`
+    (listado de empleados por nivel/estatus o por UA) — usado tanto por
+    Estatus Nómina (drill-down de un donut) como por Cuadros de Vacancia
+    (drill-down "Ocupación por Nivel Jerárquico"/"por Nivel Tabular").
+
+    Proceso NUEVO y aislado — NO toca los exports complejos ya existentes
+    de esos dos tabs (ExportarEstatusExcelView/generar_excel_estatus_task,
+    generateCuadroVacanciaExcel), que siguen intactos.
+
+    Ambas fuentes de EmployeesModal comparten la misma clave de negocio
+    (`posicion`) contra EMPLEADOS_COMPLETOS_SIG (ver EmpleadosPorNivelYEstatusView
+    y mapVacanteRowToEmployeeRow), así que se reutiliza el mismo query y el
+    mismo generador de Fase 1 (ExportarPlantillaDetalleConFotosView) — las
+    filas vacantes simplemente no tienen `numempleado` resoluble y no llevan
+    foto, sin necesitar lógica extra de "ocupada vs vacante".
+    """
+
+    view_permission = (
+        "authentication.view_plantilla_estatus_nomina",
+        "authentication.view_plantilla_mov_posiciones",
+    )
+
+    def post(self, request):
+        from .excel_fotos import generar_workbook_excel_con_fotos
+
+        posiciones = request.data.get("posiciones") or []
+        columnas = request.data.get("columnas") or []
+        permiso_foto = request.data.get("permiso_foto") or ""
+
+        incluir_fotos = (
+            bool(request.data.get("incluir_fotos"))
+            and permiso_foto in PERMISOS_FOTO_VALIDOS
+            and request.user.has_perm(f"authentication.{permiso_foto}")
+        )
+
+        if not posiciones or not columnas:
+            return Response({"error": "Faltan 'posiciones' o 'columnas'."}, status=status.HTTP_400_BAD_REQUEST)
+
+        rows_by_posicion = {
+            str(r["posicion"]): r
+            for r in EmpleadosCompletosSig.objects.filter(posicion__in=posiciones).values()
+        }
+        rows = [rows_by_posicion[str(p)] for p in posiciones if str(p) in rows_by_posicion]
+
+        if incluir_fotos and len(rows) > 15000:
+            return Response(
+                {"error": f"El conjunto tiene {len(rows)} filas — el máximo para incluir fotografías es 15,000."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        buffer = generar_workbook_excel_con_fotos(
+            columnas=columnas, rows=rows, incluir_fotos=incluir_fotos,
+            sheet_name="Listado_Empleados", numero_empleado_key="numempleado",
+            mono_keys=["posicion", "id_empleado", "rfc", "curp", "nivel", "codigo_presupuestal",
+                       "ua", "cent", "dir", "subd", "jd", "depto", "numeral"],
+            estado_nomina_key="estado_nomina", mapear_estado_nomina=_mapear_estado_nomina_excel,
+        )
+        return _excel_con_fotos_response(buffer, incluir_fotos, "Listado_Empleados")
 
 
 class EmpleadosCompletosCeldaOverrideView(APIView):

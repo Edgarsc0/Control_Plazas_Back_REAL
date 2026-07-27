@@ -12,6 +12,11 @@ from .views import (
     RegistrosPorOficio1800PlazasView,
     EmpleadosCompletosEstatusNominaResumenView,
     EmpleadosCompletosActivosDetalleView,
+    EmpleadoFotoView,
+    ExportarPlantillaDetalleConFotosView,
+    ExportarMovimientosPersonalConFotosView,
+    ExportarBajasConFotosView,
+    ExportarEmpleadosPorPosicionConFotosView,
     EmpleadosCompletosCeldaOverrideView,
     EmpleadosCompletosCeldaHistorialView,
     EmpleadosEstatusPorNivelUaView,
@@ -258,6 +263,31 @@ urlpatterns = [
         "empleados_completos_activos_detalle/",
         EmpleadosCompletosActivosDetalleView.as_view(),
         name="empleados_completos_activos_detalle",
+    ),
+    path(
+        "empleado_foto/<str:numempleado>/",
+        EmpleadoFotoView.as_view(),
+        name="empleado_foto",
+    ),
+    path(
+        "exportar_plantilla_detalle_con_fotos/",
+        ExportarPlantillaDetalleConFotosView.as_view(),
+        name="exportar_plantilla_detalle_con_fotos",
+    ),
+    path(
+        "exportar_movimientos_personal_con_fotos/",
+        ExportarMovimientosPersonalConFotosView.as_view(),
+        name="exportar_movimientos_personal_con_fotos",
+    ),
+    path(
+        "exportar_bajas_con_fotos/",
+        ExportarBajasConFotosView.as_view(),
+        name="exportar_bajas_con_fotos",
+    ),
+    path(
+        "exportar_empleados_por_posicion_con_fotos/",
+        ExportarEmpleadosPorPosicionConFotosView.as_view(),
+        name="exportar_empleados_por_posicion_con_fotos",
     ),
     path(
         "empleados_completos_sig/override/",
