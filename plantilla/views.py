@@ -6111,23 +6111,6 @@ class MovimientosPersonalStatsView(APIView):
         accion_nombre = request.query_params.get("accion_nombre")
         fecha_captura__in = request.query_params.get("fecha_captura__in")
 
-        import hashlib
-
-        from django.core.cache import cache
-
-        cache_key_base = "movimientos_personal_stats"
-        if accion_nombre:
-            cache_key_base += f"_{accion_nombre}"
-        if fecha_captura__in:
-            cache_key_base += f"_fc_{fecha_captura__in}"
-
-        name_hash = hashlib.md5(cache_key_base.encode("utf-8")).hexdigest()
-        cache_key = f"mov_stats_{name_hash}"
-
-        cached_data = cache.get(cache_key)
-        if cached_data is not None:
-            return Response(cached_data, status=status.HTTP_200_OK)
-
         from django.db.models import Count, F, Value
         from django.db.models.functions import Coalesce, ExtractYear, NullIf
 
@@ -6192,7 +6175,6 @@ class MovimientosPersonalStatsView(APIView):
 
         result = {"by_year": by_year_dict, "all": all_list}
 
-        cache.set(cache_key, result, 1200)
         return Response(result, status=status.HTTP_200_OK)
 
 
