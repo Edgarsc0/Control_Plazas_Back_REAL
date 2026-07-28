@@ -23,6 +23,7 @@ from .views import (
     EmpleadosDistribucionGeograficaView,
     MovPosAlineacionView,
     MovPosAlineacionHistoricoView,
+    MovPosCeldaHistorialView,
     MovPosDetalleView,
     MovPosExportExcelView,
     MovPosFechaAnuenciaOverrideView,
@@ -358,6 +359,11 @@ urlpatterns = [
         "mov_pos_detalle/fecha_anuencia_override/",
         MovPosFechaAnuenciaOverrideView.as_view(),
         name="mov_pos_fecha_anuencia_override",
+    ),
+    path(
+        "mov_pos_detalle/override/historial/",
+        MovPosCeldaHistorialView.as_view(),
+        name="mov_pos_override_historial",
     ),
     path(
         "mov_pos_vacancia_detalle/",

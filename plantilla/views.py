@@ -50,12 +50,14 @@ from .models import (
     RcCatCodPresupuestal,
 )
 from .celda_override import (
+    TABLA_EMPLEADOS,
+    TABLA_MOV_POS,
     borrar_contenido_celda,
     borrar_override_fecha_anuencia,
     get_fecha_anuencia_overrides_map,
     notificar_cambio_celda,
-    obtener_estadisticas_overrides_empleados,
-    obtener_historial_overrides_empleados,
+    obtener_estadisticas_overrides,
+    obtener_historial_overrides,
     registrar_override_fecha_anuencia,
     registrar_y_aplicar_override_empleado,
     serializar_override,
@@ -1723,15 +1725,19 @@ class EmpleadosCompletosCeldaOverrideView(APIView):
             logger.exception("Error al invalidar cache filtrada tras override de celda")
 
 
-class EmpleadosCompletosCeldaHistorialView(APIView):
+class _CeldaHistorialBaseView(APIView):
     """
-    Historial completo de ediciones manuales (CeldaOverride) sobre
-    EMPLEADOS_COMPLETOS_SIG, para el modal "Historial de Cambios" del tab
-    Detalle. Solo lectura — no reaplica ni modifica nada (ver
-    plantilla.celda_override.obtener_historial_overrides_empleados).
+    Base del modal "Historial de Cambios": historial de ediciones manuales
+    (CeldaOverride) de UNA tabla. Solo lectura — no reaplica ni modifica nada
+    (ver plantilla.celda_override.obtener_historial_overrides).
+
+    Las subclases fijan `tabla` (valor de la columna `tabla` por el que se
+    filtra), `clave_key` (campo de `clave_negocio` que identifica la fila) y su
+    propio `view_permission`.
     """
 
-    view_permission = "authentication.view_plantilla_detalle"
+    tabla = None
+    clave_key = "posicion"
 
     def get(self, request):
         search = (request.query_params.get("search") or "").strip() or None
@@ -1754,7 +1760,9 @@ class EmpleadosCompletosCeldaHistorialView(APIView):
         except (TypeError, ValueError):
             offset = 0
 
-        resultados, total = obtener_historial_overrides_empleados(
+        resultados, total = obtener_historial_overrides(
+            tabla=self.tabla,
+            clave_key=self.clave_key,
             search=search,
             columna=columna,
             posicion=posicion,
@@ -1768,11 +1776,33 @@ class EmpleadosCompletosCeldaHistorialView(APIView):
                 "count": total,
                 "limit": limit,
                 "offset": offset,
-                "resultados": [serializar_override(o) for o in resultados],
-                "estadisticas": obtener_estadisticas_overrides_empleados(),
+                "resultados": [
+                    serializar_override(o, self.clave_key) for o in resultados
+                ],
+                "estadisticas": obtener_estadisticas_overrides(self.tabla),
             },
             status=status.HTTP_200_OK,
         )
+
+
+class EmpleadosCompletosCeldaHistorialView(_CeldaHistorialBaseView):
+    """Historial de ediciones manuales sobre EMPLEADOS_COMPLETOS_SIG (tab Detalle)."""
+
+    view_permission = "authentication.view_plantilla_detalle"
+    tabla = TABLA_EMPLEADOS
+    clave_key = "posicion"
+
+
+class MovPosCeldaHistorialView(_CeldaHistorialBaseView):
+    """
+    Historial de ediciones manuales sobre MOV_POS (tab Mov. Posiciones): hoy
+    solo `fecha_anuencia`, ver MovPosFechaAnuenciaOverrideView. La clave de
+    negocio es `no_pos_actual`, no `posicion`.
+    """
+
+    view_permission = "authentication.view_plantilla_mov_posiciones"
+    tabla = TABLA_MOV_POS
+    clave_key = "no_pos_actual"
 
 
 class EmpleadosPorNivelYEstatusView(APIView):
