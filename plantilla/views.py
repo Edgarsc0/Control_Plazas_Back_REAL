@@ -54,6 +54,8 @@ from .models import (
     TblColumnasPlantillaQuincenal,
 )
 from .celda_override import (
+    TABLA_EMPLEADOS,
+    TABLA_MOV_POS,
     borrar_contenido_celda,
     borrar_override_fecha_anuencia,
     borrar_override_quincenal,
@@ -63,14 +65,12 @@ from .celda_override import (
     get_fecha_anuencia_overrides_texto_map,
     get_quincenal_overrides_map,
     notificar_cambio_celda,
-    obtener_estadisticas_overrides_empleados,
-    obtener_historial_overrides_empleados,
+    obtener_estadisticas_overrides,
+    obtener_historial_overrides,
     registrar_override_fecha_anuencia,
     registrar_y_aplicar_override_empleado,
     registrar_y_aplicar_override_quincenal,
     serializar_override,
-    TABLA_EMPLEADOS,
-    TABLA_MOV_POS,
     TABLA_QUINCENAL,
 )
 from .nivel_jerarquico_sync import aplicar_prioridad_nivel_jerarquico
@@ -2057,48 +2057,26 @@ class EmpleadosCompletosCeldaOverrideView(APIView):
             logger.exception("Error al invalidar cache filtrada tras override de celda")
 
 
-_HISTORIAL_TABLA_MAP = {
-    "empleados": TABLA_EMPLEADOS,
-    "quincenal": TABLA_QUINCENAL,
-    "fecha_anuencia": TABLA_MOV_POS,
-}
-_HISTORIAL_TABLAS_TODOS = [TABLA_EMPLEADOS, TABLA_QUINCENAL, TABLA_MOV_POS]
-
-
-class EmpleadosCompletosCeldaHistorialView(APIView):
+class _CeldaHistorialBaseView(APIView):
     """
-    Historial completo de ediciones manuales (CeldaOverride) sobre las
-    columnas editables del tab Plantilla Detalle. Solo lectura — no reaplica
-    ni modifica nada (ver plantilla.celda_override.obtener_historial_overrides_empleados).
+    Base del modal "Historial de Cambios": historial de ediciones manuales
+    (CeldaOverride) de una o más tablas. Solo lectura — no reaplica ni
+    modifica nada (ver plantilla.celda_override.obtener_historial_overrides).
 
-    ``?tabla=``: "empleados" (default, EMPLEADOS_COMPLETOS_SIG),
-    "quincenal" (columnas AL–AV, PLANTILLA_QUINCENAL), "fecha_anuencia"
-    (columna AL/Fecha de Anuencia, unificada con MOV_POS) o "todos" (las 3 —
-    usado por Plantilla Detalle para mostrar en un solo historial TODAS las
-    ediciones hechas desde ese tab, sin importar qué tabla interna las
-    respalda).
+    Las subclases fijan `tabla` (valor de la columna `tabla` por el que se
+    filtra, o una LISTA de varios — ver EmpleadosCompletosCeldaHistorialView,
+    que unifica en un solo historial las 3 tablas editables desde Plantilla
+    Detalle), `clave_key` (campo de `clave_negocio` que identifica la fila) y
+    su propio `view_permission`.
     """
 
-    view_permission = (
-        "authentication.view_plantilla_detalle",
-        "authentication.view_plantilla_mov_posiciones",
-    )
+    tabla = None
+    clave_key = "posicion"
 
     def get(self, request):
         search = (request.query_params.get("search") or "").strip() or None
         columna = (request.query_params.get("columna") or "").strip() or None
         posicion = (request.query_params.get("posicion") or "").strip() or None
-
-        tabla_param = (request.query_params.get("tabla") or "empleados").strip().lower()
-        if tabla_param == "todos":
-            tabla = _HISTORIAL_TABLAS_TODOS
-        elif tabla_param in _HISTORIAL_TABLA_MAP:
-            tabla = _HISTORIAL_TABLA_MAP[tabla_param]
-        else:
-            return Response(
-                {"detail": f"Parámetro 'tabla' no válido. Opciones: {['todos', *_HISTORIAL_TABLA_MAP]}"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
 
         activo_param = request.query_params.get("activo")
         activo = None
@@ -2116,8 +2094,9 @@ class EmpleadosCompletosCeldaHistorialView(APIView):
         except (TypeError, ValueError):
             offset = 0
 
-        resultados, total = obtener_historial_overrides_empleados(
-            tabla=tabla,
+        resultados, total = obtener_historial_overrides(
+            tabla=self.tabla,
+            clave_key=self.clave_key,
             search=search,
             columna=columna,
             posicion=posicion,
@@ -2131,11 +2110,42 @@ class EmpleadosCompletosCeldaHistorialView(APIView):
                 "count": total,
                 "limit": limit,
                 "offset": offset,
-                "resultados": [serializar_override(o) for o in resultados],
-                "estadisticas": obtener_estadisticas_overrides_empleados(tabla=tabla),
+                "resultados": [
+                    serializar_override(o, self.clave_key) for o in resultados
+                ],
+                "estadisticas": obtener_estadisticas_overrides(self.tabla),
             },
             status=status.HTTP_200_OK,
         )
+
+
+class EmpleadosCompletosCeldaHistorialView(_CeldaHistorialBaseView):
+    """
+    Historial de ediciones manuales sobre las 3 tablas editables desde el
+    tab Plantilla Detalle: EMPLEADOS_COMPLETOS_SIG (columnas normales),
+    PLANTILLA_QUINCENAL (columnas AL–AV) y MOV_POS (Fecha de Anuencia,
+    unificada con el override de Mov. Posiciones) — se muestran juntas en un
+    solo historial porque las 3 se editan desde la misma pantalla.
+    """
+
+    view_permission = (
+        "authentication.view_plantilla_detalle",
+        "authentication.view_plantilla_mov_posiciones",
+    )
+    tabla = [TABLA_EMPLEADOS, TABLA_QUINCENAL, TABLA_MOV_POS]
+    clave_key = "posicion"
+
+
+class MovPosCeldaHistorialView(_CeldaHistorialBaseView):
+    """
+    Historial de ediciones manuales sobre MOV_POS (tab Mov. Posiciones): hoy
+    solo `fecha_anuencia`, ver MovPosFechaAnuenciaOverrideView. La clave de
+    negocio es `no_pos_actual`, no `posicion`.
+    """
+
+    view_permission = "authentication.view_plantilla_mov_posiciones"
+    tabla = TABLA_MOV_POS
+    clave_key = "no_pos_actual"
 
 
 class EmpleadosPorNivelYEstatusView(APIView):
@@ -4841,6 +4851,88 @@ class IniciarSincronizacionZafiroView(APIView):
         )
 
 
+class InvalidarCacheManualView(APIView):
+    """
+    Endpoint para uso humano desde el front (botón "Borrar caché del
+    servidor" en Monitoreo ZAFIRO). Borra la caché ya, sin bitácora_id ni
+    token de servicio — a diferencia de `InvalidarCacheZafiroView`, que es
+    exclusivo del worker de Celery remoto.
+    """
+
+    view_permission = "authentication.view_monitoreo_zafiro"
+
+    def post(self, request):
+        from .cache_invalidation import invalidar_todo_el_cache_servidor
+
+        borradas = invalidar_todo_el_cache_servidor()
+        return Response(
+            {"status": "ok", "cache_keys_borradas": borradas},
+            status=status.HTTP_200_OK,
+        )
+
+
+class InvalidarCacheZafiroView(APIView):
+    """
+    Endpoint interno: lo llama el worker de Celery de `copia_back` (PC
+    Windows) justo al terminar `importar_zafiro`, para que ESTE servidor
+    invalide su propia caché (Redis local del servidor, distinto al de la
+    PC Windows) y publique el evento SSE — ver docstring de
+    `cache_invalidation.invalidar_todo_el_cache_servidor`.
+
+    Autenticación: Token de DRF de una cuenta de servicio dedicada (no un
+    usuario humano). No usa `HasModulePermission` (el default del proyecto)
+    porque esa cuenta no tiene permisos de módulo asignados.
+    """
+
+    from rest_framework.authentication import TokenAuthentication
+
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from datetime import timedelta
+
+        from .cache_invalidation import invalidar_todo_el_cache_servidor
+
+        bitacora_id = request.data.get("bitacora_id")
+        if not bitacora_id:
+            return Response(
+                {"error": "Falta 'bitacora_id'."}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            bitacora = ZafiroBitacora.objects.get(pk=bitacora_id)
+        except ZafiroBitacora.DoesNotExist:
+            return Response(
+                {"error": f"No existe ZafiroBitacora con id={bitacora_id}."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if bitacora.status != "EXITO":
+            return Response(
+                {"error": f"ZafiroBitacora {bitacora_id} tiene status '{bitacora.status}', se esperaba 'EXITO'."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        borradas = invalidar_todo_el_cache_servidor()
+
+        fecha_fin = bitacora.fecha_ejecucion
+        if bitacora.duracion_segundos:
+            fecha_fin += timedelta(seconds=bitacora.duracion_segundos)
+        try:
+            import redis as redis_lib
+
+            r = redis_lib.Redis.from_url(settings.CELERY_BROKER_URL)
+            r.publish("zafiro_updates", fecha_fin.isoformat())
+        except Exception:
+            logger.exception("Error al publicar evento zafiro_updates tras invalidación remota de caché")
+
+        return Response(
+            {"status": "ok", "cache_keys_borradas": borradas},
+            status=status.HTTP_200_OK,
+        )
+
+
 from django.views import View
 
 # Vida máxima de un stream SSE antes de forzar el cierre (el cliente
@@ -6489,23 +6581,6 @@ class MovimientosPersonalStatsView(APIView):
         accion_nombre = request.query_params.get("accion_nombre")
         fecha_captura__in = request.query_params.get("fecha_captura__in")
 
-        import hashlib
-
-        from django.core.cache import cache
-
-        cache_key_base = "movimientos_personal_stats"
-        if accion_nombre:
-            cache_key_base += f"_{accion_nombre}"
-        if fecha_captura__in:
-            cache_key_base += f"_fc_{fecha_captura__in}"
-
-        name_hash = hashlib.md5(cache_key_base.encode("utf-8")).hexdigest()
-        cache_key = f"mov_stats_{name_hash}"
-
-        cached_data = cache.get(cache_key)
-        if cached_data is not None:
-            return Response(cached_data, status=status.HTTP_200_OK)
-
         from django.db.models import Count, F, Value
         from django.db.models.functions import Coalesce, ExtractYear, NullIf
 
@@ -6570,7 +6645,6 @@ class MovimientosPersonalStatsView(APIView):
 
         result = {"by_year": by_year_dict, "all": all_list}
 
-        cache.set(cache_key, result, 1200)
         return Response(result, status=status.HTTP_200_OK)
 
 

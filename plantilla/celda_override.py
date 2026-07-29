@@ -203,14 +203,25 @@ def aplicar_overrides_empleados_completos(bitacora=None):
     return {"aplicados": aplicados, "huerfanos": huerfanos}
 
 
-def serializar_override(override: CeldaOverride) -> dict:
-    # `clave_negocio` usa "posicion" (EMPLEADOS_COMPLETOS_SIG, PLANTILLA_QUINCENAL)
-    # o "no_pos_actual" (MOV_POS) según la tabla — mismo valor de posición en
-    # ambos casos, solo cambia el nombre de la key (ver TABLA_MOV_POS más abajo).
+def serializar_override(override: CeldaOverride, clave_key: str = "posicion") -> dict:
+    """
+    `clave_key` es el nombre del campo dentro de `clave_negocio` que identifica
+    la fila: "posicion" en EMPLEADOS_COMPLETOS_SIG/PLANTILLA_QUINCENAL,
+    "no_pos_actual" en MOV_POS. Siempre se expone como "posicion" en la
+    respuesta para que el modal de historial del frontend sea el mismo para
+    todas las tablas.
+
+    Si `clave_key` no resuelve nada (vista "unificada" que combina tablas con
+    distinta clave_key, ver PlantillaDetalleCeldaHistorialView), se intentan
+    las variantes conocidas como respaldo.
+    """
     clave = override.clave_negocio or {}
+    posicion = clave.get(clave_key)
+    if posicion is None:
+        posicion = clave.get("posicion") or clave.get("no_pos_actual")
     return {
         "id": override.id,
-        "posicion": clave.get("posicion") or clave.get("no_pos_actual"),
+        "posicion": posicion,
         "columna": override.columna,
         "valor_original": override.valor_original,
         "valor_nuevo": override.valor_nuevo,
@@ -221,23 +232,30 @@ def serializar_override(override: CeldaOverride) -> dict:
     }
 
 
-def obtener_historial_overrides_empleados(
-    *, tabla=TABLA_EMPLEADOS, search=None, columna=None, posicion=None, activo=None, limit=100, offset=0
+def obtener_historial_overrides(
+    *,
+    tabla,
+    clave_key="posicion",
+    search=None,
+    columna=None,
+    posicion=None,
+    activo=None,
+    limit=100,
+    offset=0,
 ):
     """
-    Historial completo (activo e inactivo) de ediciones manuales sobre
-    EMPLEADOS_COMPLETOS_SIG (o, vía ``tabla``, sobre PLANTILLA_QUINCENAL/
-    MOV_POS — ver EmpleadosCompletosCeldaHistorialView), para el modal
-    "Historial de Cambios" del tab Detalle. Solo lectura — no reaplica ni
-    modifica nada.
+    Historial completo (activo e inactivo) de ediciones manuales sobre una
+    tabla, para el modal "Historial de Cambios". Solo lectura — no reaplica ni
+    modifica nada. `clave_key` es el campo de `clave_negocio` con el que se
+    resuelve el filtro por posición (ver `serializar_override`).
 
     ``tabla``: un valor de CeldaOverride.tabla, o una lista de varios (p.ej.
     Plantilla Detalle unifica EMPLEADOS_COMPLETOS_SIG + PLANTILLA_QUINCENAL +
-    MOV_POS en una sola vista, ya que las 3 se editan desde ese mismo tab).
-
-    ``posicion``: filtra por el hash de AMBAS variantes de clave de negocio
-    ({"posicion": X} y {"no_pos_actual": X}) porque MOV_POS usa un nombre de
-    key distinto para el mismo valor de posición (ver serializar_override).
+    MOV_POS en una sola vista, ya que las 3 se editan desde ese mismo tab —
+    ver PlantillaDetalleCeldaHistorialView). En ese caso el filtro por
+    ``posicion`` prueba el hash de AMBAS variantes de clave de negocio
+    ({"posicion": X} y {"no_pos_actual": X}), ya que MOV_POS usa un nombre de
+    key distinto para el mismo valor de posición.
     """
     tablas = [tabla] if isinstance(tabla, str) else list(tabla)
     qs = (
@@ -248,10 +266,11 @@ def obtener_historial_overrides_empleados(
     if columna:
         qs = qs.filter(columna=columna)
     if posicion:
-        hashes = [
+        hashes = {
+            compute_clave_hash({clave_key: posicion}),
             compute_clave_hash({"posicion": posicion}),
             compute_clave_hash({"no_pos_actual": posicion}),
-        ]
+        }
         qs = qs.filter(clave_negocio_hash__in=hashes)
     if activo is not None:
         qs = qs.filter(activo=activo)
@@ -270,11 +289,11 @@ def obtener_historial_overrides_empleados(
     return resultados, total
 
 
-def obtener_estadisticas_overrides_empleados(tabla=TABLA_EMPLEADOS):
+def obtener_estadisticas_overrides(tabla):
     """
-    Métricas agregadas del historial completo (sin filtros) para el panel
-    resumen del modal "Historial de Cambios". Ver ``tabla`` en
-    ``obtener_historial_overrides_empleados``.
+    Métricas agregadas del historial completo de una tabla (sin filtros) para
+    el panel resumen del modal "Historial de Cambios". Ver ``tabla`` en
+    ``obtener_historial_overrides``.
     """
     tablas = [tabla] if isinstance(tabla, str) else list(tabla)
     base = CeldaOverride.objects.filter(tabla__in=tablas)

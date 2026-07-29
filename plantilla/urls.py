@@ -23,6 +23,7 @@ from .views import (
     EmpleadosDistribucionGeograficaView,
     MovPosAlineacionView,
     MovPosAlineacionHistoricoView,
+    MovPosCeldaHistorialView,
     MovPosDetalleView,
     MovPosExportExcelView,
     MovPosFechaAnuenciaOverrideView,
@@ -33,6 +34,8 @@ from .views import (
     ZafiroDuracionPromedioPorHoraView,
     UltimaActualizacionZafiroView,
     IniciarSincronizacionZafiroView,
+    InvalidarCacheManualView,
+    InvalidarCacheZafiroView,
     ZafiroSSEView,
     CeldaUpdatesSSEView,
     BajasSigListView,
@@ -231,6 +234,16 @@ urlpatterns = [
         name="zafiro_iniciar_sincronizacion",
     ),
     path(
+        "bitacora/invalidar-cache/",
+        InvalidarCacheZafiroView.as_view(),
+        name="zafiro_invalidar_cache",
+    ),
+    path(
+        "bitacora/invalidar-cache-manual/",
+        InvalidarCacheManualView.as_view(),
+        name="zafiro_invalidar_cache_manual",
+    ),
+    path(
         "bitacora/",
         ZafiroBitacoraView.as_view(),
         name="zafiro_bitacora",
@@ -364,6 +377,11 @@ urlpatterns = [
         "mov_pos_detalle/fecha_anuencia_override/",
         MovPosFechaAnuenciaOverrideView.as_view(),
         name="mov_pos_fecha_anuencia_override",
+    ),
+    path(
+        "mov_pos_detalle/override/historial/",
+        MovPosCeldaHistorialView.as_view(),
+        name="mov_pos_override_historial",
     ),
     path(
         "mov_pos_vacancia_detalle/",
