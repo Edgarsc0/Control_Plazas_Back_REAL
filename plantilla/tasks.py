@@ -16,8 +16,10 @@ Tras importar los 4 reportes:
      instante, y trunca las tablas staging (que quedan con los datos viejos).
   5. Ejecuta stored procedures de post-proceso: llenar Nombre Puesto en
      MOV_POS; llenar Niveles vacíos y corregir SMB/SMN (en ese orden, ver
-     nota en el paso 6/7 más abajo) en EMPLEADOS_COMPLETOS_SIG; y calcular/
-     actualizar fechas de vacancia.
+     nota en el paso 6/7 más abajo) en EMPLEADOS_COMPLETOS_SIG; actualizar
+     Departamento en EMPLEADOS_COMPLETOS_SIG cruzando Id Departamento contra
+     ORGANIGRAMA_ANAM (isSIGInfo=1); y calcular/actualizar fechas de
+     vacancia.
   6. Regenera el Cuadro de Vacancia Diario (management command).
   7. Publica evento en Redis (canal "zafiro_updates") para notificar a
      clientes vía SSE, e invalida las cachés de dashboard/plantilla.
@@ -1016,6 +1018,31 @@ def _corregir_smb_smn_empleados(bitacora):
         logger.error(f"Error en _corregir_smb_smn_empleados: {str(e)}", exc_info=True)
 
 
+def _actualizar_departamento_empleados(bitacora):
+    """
+    Ejecuta el Stored Procedure sp_actualizar_departamento_empleados, el cual
+    cruza `Id Departamento` de EMPLEADOS_COMPLETOS_SIG contra el catálogo
+    ORGANIGRAMA_ANAM (filtrado por isSIGInfo=1) para tomar el nombre largo
+    del departamento (descripcion_larga) y actualizar la columna
+    `Departamento`.
+    """
+    _append_log(
+        bitacora,
+        "Actualizando Departamento en EMPLEADOS_COMPLETOS_SIG desde catálogo ORGANIGRAMA_ANAM (isSIGInfo=1)...",
+    )
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("CALL sp_actualizar_departamento_empleados();")
+            filas_afectadas = cursor.rowcount
+            _append_log(
+                bitacora,
+                f"Departamento actualizado exitosamente ({filas_afectadas} fila(s) afectada(s)).",
+            )
+    except Exception as e:
+        _append_log(bitacora, f"Error actualizando Departamento: {str(e)}", is_error=True)
+        logger.error("Error en _actualizar_departamento_empleados: %s", e, exc_info=True)
+
+
 def _llenar_niveles_vacios_pos_activas(bitacora):
     """
     Ejecuta el Stored Procedure sp_llenar_niveles_vacios_pos_activas, el cual
@@ -1298,8 +1325,9 @@ def importar_zafiro(self):
       5. Swap atómico (Blue-Green) entre tablas activas y staging, y
          truncado de staging (que queda con los datos viejos).
       6. Post-proceso vía stored procedures: Nombre Puesto en MOV_POS,
-         corrección de SMB/SMN en EMPLEADOS_COMPLETOS_SIG, y cálculo de
-         fechas de vacancia.
+         corrección de SMB/SMN en EMPLEADOS_COMPLETOS_SIG, actualización de
+         Departamento en EMPLEADOS_COMPLETOS_SIG (cruce contra ORGANIGRAMA_
+         ANAM isSIGInfo=1), y cálculo de fechas de vacancia.
       7. Sincroniza cat_nivel_jerarquico_plaza desde las posiciones activas
          de MOV_POS (siembra/actualiza `nvl_direc_origen`, conserva el
          `nivel_jerarquico` ya asignado) y reaplica la fuente de prioridad
@@ -1417,6 +1445,10 @@ def importar_zafiro(self):
 
         # ── 7. Corregir SMB y SMN en EMPLEADOS_COMPLETOS_SIG desde catálogo ──
         _corregir_smb_smn_empleados(bitacora)
+
+        # ── 7.5. Actualizar Departamento en EMPLEADOS_COMPLETOS_SIG desde
+        # ORGANIGRAMA_ANAM (isSIGInfo=1) ────────────────────────────────────
+        _actualizar_departamento_empleados(bitacora)
 
         # ── 8. Calcular y Actualizar Fechas de Vacancia ─────────────────────
         _calcular_y_actualizar_vacancias(bitacora)

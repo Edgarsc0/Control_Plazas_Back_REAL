@@ -4463,6 +4463,26 @@ class IniciarSincronizacionZafiroView(APIView):
         )
 
 
+class InvalidarCacheManualView(APIView):
+    """
+    Endpoint para uso humano desde el front (botón "Borrar caché del
+    servidor" en Monitoreo ZAFIRO). Borra la caché ya, sin bitácora_id ni
+    token de servicio — a diferencia de `InvalidarCacheZafiroView`, que es
+    exclusivo del worker de Celery remoto.
+    """
+
+    view_permission = "authentication.view_monitoreo_zafiro"
+
+    def post(self, request):
+        from .cache_invalidation import invalidar_todo_el_cache_servidor
+
+        borradas = invalidar_todo_el_cache_servidor()
+        return Response(
+            {"status": "ok", "cache_keys_borradas": borradas},
+            status=status.HTTP_200_OK,
+        )
+
+
 class InvalidarCacheZafiroView(APIView):
     """
     Endpoint interno: lo llama el worker de Celery de `copia_back` (PC

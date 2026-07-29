@@ -34,6 +34,7 @@ from .views import (
     ZafiroDuracionPromedioPorHoraView,
     UltimaActualizacionZafiroView,
     IniciarSincronizacionZafiroView,
+    InvalidarCacheManualView,
     InvalidarCacheZafiroView,
     ZafiroSSEView,
     CeldaUpdatesSSEView,
@@ -235,6 +236,11 @@ urlpatterns = [
         "bitacora/invalidar-cache/",
         InvalidarCacheZafiroView.as_view(),
         name="zafiro_invalidar_cache",
+    ),
+    path(
+        "bitacora/invalidar-cache-manual/",
+        InvalidarCacheManualView.as_view(),
+        name="zafiro_invalidar_cache_manual",
     ),
     path(
         "bitacora/",
