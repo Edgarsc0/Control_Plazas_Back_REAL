@@ -15,7 +15,8 @@ Tras importar los 4 reportes:
      staging (Blue-Green), dejando los datos nuevos en producción al
      instante, y trunca las tablas staging (que quedan con los datos viejos).
   5. Ejecuta stored procedures de post-proceso: llenar Nombre Puesto en
-     MOV_POS, corregir SMB/SMN en EMPLEADOS_COMPLETOS_SIG, y calcular/
+     MOV_POS; llenar Niveles vacíos y corregir SMB/SMN (en ese orden, ver
+     nota en el paso 6/7 más abajo) en EMPLEADOS_COMPLETOS_SIG; y calcular/
      actualizar fechas de vacancia.
   6. Regenera el Cuadro de Vacancia Diario (management command).
   7. Publica evento en Redis (canal "zafiro_updates") para notificar a
@@ -45,6 +46,7 @@ from pathlib import Path
 
 csv.field_size_limit(sys.maxsize)
 
+import requests
 from celery import shared_task
 from celery.utils.log import get_task_logger
 from django.conf import settings
@@ -1004,7 +1006,11 @@ def _corregir_smb_smn_empleados(bitacora):
     try:
         with connection.cursor() as cursor:
             cursor.execute("CALL sp_corregir_smb_smn_empleados();")
-            _append_log(bitacora, "SMB y SMN corregidos exitosamente.")
+            filas_afectadas = cursor.rowcount
+            _append_log(
+                bitacora,
+                f"SMB y SMN corregidos exitosamente ({filas_afectadas} fila(s) afectada(s)).",
+            )
     except Exception as e:
         _append_log(bitacora, f"Error corrigiendo SMB y SMN: {str(e)}")
         logger.error(f"Error en _corregir_smb_smn_empleados: {str(e)}", exc_info=True)
@@ -1170,6 +1176,55 @@ def _invalidar_cache_ocupacion_vacancia(bitacora=None):
         return
     if bitacora is not None:
         _append_log(bitacora, "Cache de ocupación/fecha de vacancia invalidado (datos frescos disponibles de inmediato).")
+
+
+def _notificar_servidor_invalidar_cache(bitacora):
+    """
+    Notifica al backend del servidor (eje_central_back, 89.116.51.124) para
+    que invalide TODA su caché local y publique el evento SSE.
+
+    Por qué existe: esta tarea puede correr en una máquina distinta al
+    servidor que sirve a los usuarios (ver `copia_back`, PC Windows dedicada
+    a Celery). Las invalidaciones de arriba (`_invalidar_cache_ocupacion_
+    vacancia` y el bloque al final de `importar_zafiro`) solo pegan al Redis
+    LOCAL de la máquina donde corre esta tarea — si esa máquina no es el
+    servidor, los usuarios seguirían viendo datos viejos hasta que expire el
+    TTL de cada cache key. Este POST hace que el servidor invalide su propio
+    Redis vía `InvalidarCacheZafiroView` (plantilla/views.py).
+
+    Si `SERVER_CACHE_INVALIDATION_URL`/`_TOKEN` no están configurados (caso
+    normal cuando esta tarea corre EN el propio servidor, que ya invalida su
+    caché localmente arriba), no hace nada.
+    """
+    url = os.getenv("SERVER_CACHE_INVALIDATION_URL")
+    token = os.getenv("SERVER_CACHE_INVALIDATION_TOKEN")
+    if not url or not token:
+        return
+
+    ultimo_error = None
+    for intento in range(2):
+        try:
+            resp = requests.post(
+                url,
+                json={"bitacora_id": bitacora.id},
+                headers={"Authorization": f"Token {token}"},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            _append_log(bitacora, "Servidor notificado: invalidó su caché remota exitosamente.")
+            return
+        except Exception as e:
+            ultimo_error = e
+            if intento == 0:
+                time.sleep(3)
+
+    logger.exception("Error al notificar al servidor para invalidar su caché", exc_info=ultimo_error)
+    _append_log(
+        bitacora,
+        f"Aviso: no se pudo notificar al servidor para invalidar su caché ({ultimo_error}). "
+        "Los usuarios verán datos viejos hasta que expire el TTL de cada cache key.",
+        is_error=True,
+    )
 
 
 def _actualizar_historico_alineacion_general(bitacora=None):
@@ -1353,11 +1408,15 @@ def importar_zafiro(self):
         # ── 5. Llenar Nombre Puesto en MOV_POS desde CAT_PTO_FUNC ──────────
         _llenar_nombre_puesto(bitacora)
 
-        # ── 6. Corregir SMB y SMN en EMPLEADOS_COMPLETOS_SIG desde catálogo ──
-        _corregir_smb_smn_empleados(bitacora)
-
-        # ── 7. Llenar Niveles vacíos en EMPLEADOS_COMPLETOS_SIG ────────────
+        # ── 6. Llenar Niveles vacíos en EMPLEADOS_COMPLETOS_SIG ────────────
+        # Debe correr ANTES de corregir SMB/SMN: el catálogo rc_cat_cod_presupuestal
+        # matchea por Código Presupuestal + Nivel + Escala, y varias posiciones
+        # llegan del CSV con Nivel vacío/NULL — sin este paso primero, esas filas
+        # nunca matchean y se quedan con el SMB/SMN crudo (placeholder ' '/VACANTE).
         _llenar_niveles_vacios_pos_activas(bitacora)
+
+        # ── 7. Corregir SMB y SMN en EMPLEADOS_COMPLETOS_SIG desde catálogo ──
+        _corregir_smb_smn_empleados(bitacora)
 
         # ── 8. Calcular y Actualizar Fechas de Vacancia ─────────────────────
         _calcular_y_actualizar_vacancias(bitacora)
@@ -1449,6 +1508,12 @@ def importar_zafiro(self):
             r.publish("zafiro_updates", fecha_fin.isoformat())
         except Exception as e:
             logger.error("Error al publicar evento de actualización en Redis: %s", e)
+
+        # Si esta tarea corrió en una máquina distinta al servidor (ver
+        # copia_back/PC Windows), la invalidación de arriba solo pegó al
+        # Redis local de esta máquina — avisar al servidor para que invalide
+        # el suyo también (no-op si no está configurado, ver docstring).
+        _notificar_servidor_invalidar_cache(bitacora)
 
         # ── 12. Actualizar histórico diario de % Alineación General ────────
         _actualizar_historico_alineacion_general(bitacora)

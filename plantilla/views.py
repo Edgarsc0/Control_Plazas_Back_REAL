@@ -4463,6 +4463,68 @@ class IniciarSincronizacionZafiroView(APIView):
         )
 
 
+class InvalidarCacheZafiroView(APIView):
+    """
+    Endpoint interno: lo llama el worker de Celery de `copia_back` (PC
+    Windows) justo al terminar `importar_zafiro`, para que ESTE servidor
+    invalide su propia caché (Redis local del servidor, distinto al de la
+    PC Windows) y publique el evento SSE — ver docstring de
+    `cache_invalidation.invalidar_todo_el_cache_servidor`.
+
+    Autenticación: Token de DRF de una cuenta de servicio dedicada (no un
+    usuario humano). No usa `HasModulePermission` (el default del proyecto)
+    porque esa cuenta no tiene permisos de módulo asignados.
+    """
+
+    from rest_framework.authentication import TokenAuthentication
+
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from datetime import timedelta
+
+        from .cache_invalidation import invalidar_todo_el_cache_servidor
+
+        bitacora_id = request.data.get("bitacora_id")
+        if not bitacora_id:
+            return Response(
+                {"error": "Falta 'bitacora_id'."}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            bitacora = ZafiroBitacora.objects.get(pk=bitacora_id)
+        except ZafiroBitacora.DoesNotExist:
+            return Response(
+                {"error": f"No existe ZafiroBitacora con id={bitacora_id}."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if bitacora.status != "EXITO":
+            return Response(
+                {"error": f"ZafiroBitacora {bitacora_id} tiene status '{bitacora.status}', se esperaba 'EXITO'."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        borradas = invalidar_todo_el_cache_servidor()
+
+        fecha_fin = bitacora.fecha_ejecucion
+        if bitacora.duracion_segundos:
+            fecha_fin += timedelta(seconds=bitacora.duracion_segundos)
+        try:
+            import redis as redis_lib
+
+            r = redis_lib.Redis.from_url(settings.CELERY_BROKER_URL)
+            r.publish("zafiro_updates", fecha_fin.isoformat())
+        except Exception:
+            logger.exception("Error al publicar evento zafiro_updates tras invalidación remota de caché")
+
+        return Response(
+            {"status": "ok", "cache_keys_borradas": borradas},
+            status=status.HTTP_200_OK,
+        )
+
+
 from django.views import View
 
 # Vida máxima de un stream SSE antes de forzar el cierre (el cliente
