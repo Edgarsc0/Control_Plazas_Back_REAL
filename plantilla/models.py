@@ -1131,6 +1131,29 @@ class CatNivelJerarquicoPlaza(models.Model):
         return f"{self.plaza} - {self.descripcion_nivel_jerarquico or 'sin asignar'}"
 
 
+class CatCodigoPosicion(models.Model):
+    """
+    Catálogo estático posición → código federal.
+
+    El código va ligado a la posición y NUNCA cambia; se carga una sola vez
+    desde el archivo Excel de referencia mediante el management command
+    `cargar_codigos`. No se toca en las sincronizaciones automáticas de Celery.
+
+    Se usa como lookup dict en las vistas que sirven Plantilla Detalle y
+    Movimientos de Posiciones para inyectar la columna 'Código' en respuesta.
+    """
+
+    plaza = models.CharField(max_length=20, primary_key=True)
+    codigo = models.CharField(max_length=100, blank=True, null=True)
+
+    class Meta:
+        managed = True
+        db_table = "cat_codigo_posicion"
+
+    def __str__(self):
+        return f"{self.plaza} → {self.codigo or '(sin código)'}"
+
+
 class EmpleadosCompletosSig(EmpleadosCompletosSigBase):
     class Meta:
         managed = True
@@ -1394,6 +1417,78 @@ class CuadroVacancia(models.Model):
         verbose_name = 'Cuadro Vacancia'
         verbose_name_plural = 'Cuadros Vacancia'
 
+# Columnas personalizadas admitidas en tbl_columnas_plantilla_quincenal.
+# Añadir aquí una nueva key es suficiente para habilitarla — no requiere migración.
+COLUMNAS_QUINCENAL_VALIDAS = {
+    "fecha_anuencia_detalle",                    # AL — texto libre (viene mixto en el Excel)
+    "oficios_autorizacion_shcp",                 # AM
+    "plazas_eventuales_autorizacion_2026",        # AN
+    "candidato",                                 # AO
+    "reportada",                                 # AP — Si / No (select en frontend)
+    "fecha_genera_vacante",                      # AQ
+    "cap_anual",                                 # AR
+    "cap_mensual",                               # AS
+    "observaciones_plantillas_do",               # AT
+    "observaciones_proyectos_alineaciones",      # AU
+    "anno_vacancia",                             # AV
+}
+
+REPORTADA_CHOICES = ["Si", "No"]
+
+# "Fecha de Anuencia" (columna AL) no siempre es una fecha en el Excel: además
+# de fechas reales y "-" (sin dato → cae al cálculo automático), existen estas
+# 4 categorías de texto fijo (confirmadas contra datos reales). Un usuario que
+# edite esta celda manualmente solo puede escribir una fecha 'YYYY-MM-DD' o
+# una de estas categorías exactas — ver celda_override.registrar_override_fecha_anuencia.
+FECHA_ANUENCIA_CATEGORIAS_VALIDAS = {"Nueva Creación", "En Proceso", "Sin Anuencia", "N/A"}
+
+
+class TblColumnasPlantillaQuincenal(models.Model):
+    """
+    BASELINE de solo lectura de las columnas AL–AV del Excel de plantilla
+    (``plantilla_con_columna_codigo.xlsx``), cargada por el management
+    command ``cargar_columnas_quincenal`` — mismo patrón que
+    ``CatCodigoPosicion``/``cargar_codigos`` para la columna "Código".
+
+    IMPORTANTE: esta tabla NUNCA la escribe un usuario. Las ediciones
+    manuales de estas columnas NO se guardan aquí — se registran en
+    ``CeldaOverride`` (tabla=PLANTILLA_QUINCENAL, ver
+    ``celda_override.registrar_y_aplicar_override_quincenal``), exactamente
+    el mismo mecanismo de auditoría (valor_original/valor_nuevo/usuario/
+    activo + historial) que ya existe para EMPLEADOS_COMPLETOS_SIG. La
+    prioridad de lectura es: override activo del usuario > este baseline >
+    "" (vacío) — así una edición manual sobrevive indefinidamente y una
+    recarga del Excel (nuevo `cargar_columnas_quincenal`) solo actualiza el
+    valor de referencia, nunca pisa lo que el usuario ya editó.
+
+    Diseño clave-valor por posición: agregar una columna nueva en el futuro
+    no requiere migración de BD, solo declarar la key en
+    COLUMNAS_QUINCENAL_VALIDAS.
+
+    Caso especial: ``fecha_anuencia_detalle`` (columna AL) no es editable a
+    través de esta tabla/CeldaOverride(PLANTILLA_QUINCENAL) — se unificó con
+    el sistema de "Fecha de Anuencia" ya existente para MOV_POS (ver
+    ``celda_override._fecha_anuencia_default``), que ahora consulta este
+    baseline como prioridad intermedia (Excel > cálculo automático), por
+    encima de la cual el override manual de MOV_POS sigue mandando.
+    """
+
+    posicion = models.CharField(max_length=20, db_index=True)
+    columna = models.CharField(max_length=100)          # key de COLUMNAS_QUINCENAL_VALIDAS
+    valor = models.TextField(blank=True, null=True)
+    actualizado_en = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        managed = True
+        db_table = "tbl_columnas_plantilla_quincenal"
+        unique_together = [("posicion", "columna")]
+        indexes = [
+            models.Index(fields=["posicion"]),
+        ]
+
+    def __str__(self):
+        return f"{self.posicion} · {self.columna} = {self.valor!r}"
+
 
 class CeldaOverride(models.Model):
     """
@@ -1409,6 +1504,7 @@ class CeldaOverride(models.Model):
         ("BAJAS_SIG", "Bajas"),
         ("MOV_POS", "Movimientos Posición"),
         ("CP_TBL_HISTORIAL", "Histórico Movimientos"),
+        ("PLANTILLA_QUINCENAL", "Columnas Quincenal (Plantilla Detalle)"),
     ])
     clave_negocio = models.JSONField()
     clave_negocio_hash = models.CharField(max_length=64, db_index=True)

@@ -59,6 +59,7 @@ from .views import (
     CuadroVacanciaView,
     DesgloseJerarquicoView,
     DesgloseJerarquicoOcupadosView,
+    ColumnasQuincenalView,
 )
 
 urlpatterns = [
@@ -303,6 +304,11 @@ urlpatterns = [
         "empleados_completos_sig/celda-updates/sse/",
         CeldaUpdatesSSEView.as_view(),
         name="celda_updates_sse",
+    ),
+    path(
+        "plantilla_quincenal/columnas/",
+        ColumnasQuincenalView.as_view(),
+        name="columnas_quincenal",
     ),
     path(
         "empleados_por_nivel_y_estatus/",

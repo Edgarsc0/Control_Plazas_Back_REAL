@@ -36,8 +36,10 @@ from .models import (
     AlineacionOrganizacionalHistorico,
     CatAcciones,
     CatAccionesMotivos,
+    CatCodigoPosicion,
     CatNivelJerarquicoPlaza,
     CatPtoFunc,
+    COLUMNAS_QUINCENAL_VALIDAS,
     CuadroVacancia,
     DESCRIPCION_NJ_CHOICES,
     EmpleadosCompletosSig,
@@ -47,18 +49,29 @@ from .models import (
     NivelJerarquicoPrioridadConfig,
     OrganigramaAnam,
     Plantilla1800Plazas,
+    REPORTADA_CHOICES,
     RcCatCodPresupuestal,
+    TblColumnasPlantillaQuincenal,
 )
 from .celda_override import (
     borrar_contenido_celda,
     borrar_override_fecha_anuencia,
+    borrar_override_quincenal,
+    get_fecha_anuencia_baseline_map,
+    get_fecha_anuencia_baseline_texto_map,
     get_fecha_anuencia_overrides_map,
+    get_fecha_anuencia_overrides_texto_map,
+    get_quincenal_overrides_map,
     notificar_cambio_celda,
     obtener_estadisticas_overrides_empleados,
     obtener_historial_overrides_empleados,
     registrar_override_fecha_anuencia,
     registrar_y_aplicar_override_empleado,
+    registrar_y_aplicar_override_quincenal,
     serializar_override,
+    TABLA_EMPLEADOS,
+    TABLA_MOV_POS,
+    TABLA_QUINCENAL,
 )
 from .nivel_jerarquico_sync import aplicar_prioridad_nivel_jerarquico
 from .serializers import (
@@ -119,7 +132,7 @@ def apply_text_search(queryset, query, fields):
     return queryset.filter(q)
 
 
-def annotate_fecha_anuencia(queryset, source_field="fecha_vacancia", overrides=None):
+def annotate_fecha_anuencia(queryset, source_field="fecha_vacancia", overrides=None, baseline=None):
     """Anota ``fecha_anuencia`` = ``source_field`` + 30 días, calculada al
     vuelo en cada consulta (nunca persistida en BD, nunca toca el SP
     ``sp_obtener_todas_vacancias``): es una simple suma de días sobre un
@@ -138,14 +151,20 @@ def annotate_fecha_anuencia(queryset, source_field="fecha_vacancia", overrides=N
     igual que un campo real en filtros/orden/`distinct_field` — mismo
     tratamiento que ya recibe `fecha_vacancia` (campo real del modelo).
 
-    ``overrides``: dict opcional ``{no_pos_actual: date}`` (ver
-    ``celda_override.get_fecha_anuencia_overrides_map``) — el usuario puede
-    editar manualmente la fecha sugerida (+30 días es solo el default); un
-    override activo tiene prioridad absoluta sobre el cálculo automático. Se
-    resuelve con un ``Case`` adicional (una rama ``When`` por override activo,
-    comparando contra el campo real e indexado ``no_pos_actual``) en vez de un
-    ``Subquery`` correlacionado contra ``CeldaOverride`` — más simple y más
-    barato ya que en la práctica son pocos overrides activos a la vez.
+    Prioridad de 3 niveles (de mayor a menor):
+      1. ``overrides``: dict opcional ``{no_pos_actual: date}`` (ver
+         ``celda_override.get_fecha_anuencia_overrides_map``) — edición
+         manual del usuario, gana siempre.
+      2. ``baseline``: dict opcional ``{no_pos_actual: date}`` (ver
+         ``celda_override.get_fecha_anuencia_baseline_map``) — valor cargado
+         del Excel de plantilla (columna AL) cuando trae una fecha real (la
+         mayoría de posiciones no traen nada ahí y caen al nivel 3).
+      3. ``computed_default``: fecha_vacancia + 30 días.
+    Se resuelve con un ``Case`` adicional por nivel (una rama ``When`` por
+    entrada activa, comparando contra el campo real e indexado
+    ``no_pos_actual``) en vez de un ``Subquery`` correlacionado contra
+    ``CeldaOverride``/``TblColumnasPlantillaQuincenal`` — más simple y más
+    barato ya que en la práctica son pocas entradas activas a la vez.
     """
     from datetime import timedelta
 
@@ -161,19 +180,27 @@ def annotate_fecha_anuencia(queryset, source_field="fecha_vacancia", overrides=N
         output_field=DateField(),
     )
 
+    layered_default = computed_default
+    if baseline:
+        whens_baseline = [
+            When(no_pos_actual=pos, then=Value(fecha, output_field=DateField()))
+            for pos, fecha in baseline.items()
+        ]
+        layered_default = Case(*whens_baseline, default=computed_default, output_field=DateField())
+
     if not overrides:
-        return queryset.annotate(fecha_anuencia=computed_default)
+        return queryset.annotate(fecha_anuencia=layered_default)
 
     whens = [
         When(no_pos_actual=pos, then=Value(fecha, output_field=DateField()))
         for pos, fecha in overrides.items()
     ]
     return queryset.annotate(
-        fecha_anuencia=Case(*whens, default=computed_default, output_field=DateField())
+        fecha_anuencia=Case(*whens, default=layered_default, output_field=DateField())
     )
 
 
-def corregir_fecha_anuencia_row(row, pos, posiciones_ocupadas, overrides=None):
+def corregir_fecha_anuencia_row(row, pos, posiciones_ocupadas, overrides=None, overrides_texto=None, baseline_texto=None):
     """Aplica a ``row["fecha_anuencia"]`` la MISMA regla que ya aplica
     ``fecha_vacancia`` en estas vistas (vacío si la posición está ocupada —
     el SP nunca limpia `FECHA VACANCIA` al volver a ocuparse, así que esta
@@ -193,7 +220,18 @@ def corregir_fecha_anuencia_row(row, pos, posiciones_ocupadas, overrides=None):
     tiene un override manual activo (ver ``overrides``, el mismo dict que ya
     se le pasó a ``annotate_fecha_anuencia``) — el frontend lo usa para
     resaltar en azul las fechas editadas manualmente. `False` si la posición
-    está ocupada (el override deja de aplicar junto con la fecha misma)."""
+    está ocupada (el override deja de aplicar junto con la fecha misma).
+
+    ``overrides_texto``/``baseline_texto`` (``{pos: str}``, ver
+    ``celda_override.get_fecha_anuencia_overrides_texto_map``/
+    ``get_fecha_anuencia_baseline_texto_map``): "Fecha de Anuencia" no
+    siempre es una fecha real — el Excel de origen trae, para algunas
+    posiciones, una de 4 categorías de texto fijo (p.ej. "Nueva Creación")
+    que no puede representarse en la anotación SQL ``DateField`` de
+    ``fecha_anuencia`` (por eso ``overrides``/el baseline SQL las omiten).
+    Aquí, a nivel Python, tienen la prioridad final sobre el valor ya
+    resuelto arriba (fecha real calculada u "").
+    """
     if pos in posiciones_ocupadas:
         row["fecha_anuencia"] = ""
         row["fecha_anuencia_override"] = False
@@ -206,6 +244,12 @@ def corregir_fecha_anuencia_row(row, pos, posiciones_ocupadas, overrides=None):
     else:
         row["fecha_anuencia"] = ""
     row["fecha_anuencia_override"] = bool(overrides) and pos in overrides
+
+    if overrides_texto and pos in overrides_texto:
+        row["fecha_anuencia"] = overrides_texto[pos]
+        row["fecha_anuencia_override"] = True
+    elif baseline_texto and pos in baseline_texto:
+        row["fecha_anuencia"] = baseline_texto[pos]
 
 
 def _annotate_full_name(queryset, alias="full_name", fields=("nombre", "ap_pat", "ap_mat")):
@@ -906,6 +950,106 @@ def obtener_posiciones_activas():
     return result
 
 
+def _get_mapa_codigos():
+    """
+    Retorna un dict {plaza: codigo} cargado desde cat_codigo_posicion.
+    Se cachea 30 minutos para no repetir el query en cada request — el catálogo
+    es estático y solo cambia cuando el admin ejecuta `cargar_codigos` de nuevo.
+    """
+    cache_key = "cat_codigo_posicion_mapa"
+    mapa = cache.get(cache_key)
+    if mapa is None:
+        mapa = dict(CatCodigoPosicion.objects.values_list("plaza", "codigo"))
+        cache.set(cache_key, mapa, 1800)  # 30 minutos
+    return mapa
+
+
+def _get_mapa_quincenal():
+    """
+    Retorna un dict anidado {posicion: {columna: valor}} con las 10 columnas
+    quincenal editables (AL–AV, excepto fecha_anuencia_detalle — ver
+    ``_get_fecha_anuencia_bulk_map``), mergeando el baseline cargado del Excel
+    (``TblColumnasPlantillaQuincenal``) con las ediciones manuales activas
+    (``celda_override.get_quincenal_overrides_map``, tabla PLANTILLA_QUINCENAL)
+    — el override del usuario tiene prioridad sobre el valor del Excel.
+
+    Se cachea 30 minutos — se invalida desde ``ColumnasQuincenalView`` tras
+    cada edición y desde ``cargar_columnas_quincenal`` tras cada recarga del
+    baseline.
+    """
+    cache_key = "tbl_columnas_quincenal_mapa"
+    mapa = cache.get(cache_key)
+    if mapa is None:
+        mapa = {}
+        for row in TblColumnasPlantillaQuincenal.objects.exclude(
+            columna="fecha_anuencia_detalle"
+        ).values("posicion", "columna", "valor"):
+            mapa.setdefault(row["posicion"], {})[row["columna"]] = row["valor"] or ""
+
+        for pos, overrides_pos in get_quincenal_overrides_map().items():
+            mapa.setdefault(pos, {}).update(overrides_pos)
+
+        cache.set(cache_key, mapa, 1800)  # 30 minutos
+    return mapa
+
+
+def _get_fecha_anuencia_bulk_map(posiciones):
+    """
+    Calcula ``fecha_anuencia`` para un conjunto de posiciones con la MISMA
+    prioridad y fuente de datos que ``MovPosDetalleView`` (override manual >
+    valor cargado del Excel > fecha_vacancia + 30 días) y el MISMO criterio
+    de "ocupada" (``mov_pos_ocupadas_set``/``OCUPADAS_RAW_SQL``) — así
+    Plantilla Detalle y Mov. Posiciones siempre muestran la misma fecha para
+    la misma posición. Devuelve ``{posicion: 'YYYY-MM-DD'|""}``.
+    """
+    if not posiciones:
+        return {}
+
+    sub_ids = cache.get("latest_movpos_sub_ids")
+    if sub_ids is None:
+        with connection.cursor() as cursor:
+            cursor.execute(LATEST_MOVPOS_RAW_SQL)
+            sub_ids = [row[0] for row in cursor.fetchall() if row[0]]
+        cache.set("latest_movpos_sub_ids", sub_ids, 600)
+
+    posiciones_ocupadas = cache.get("mov_pos_ocupadas_set")
+    if posiciones_ocupadas is None:
+        with connection.cursor() as cursor:
+            cursor.execute(OCUPADAS_RAW_SQL)
+            posiciones_ocupadas = set(row[0] for row in cursor.fetchall() if row[0])
+        cache.set("mov_pos_ocupadas_set", posiciones_ocupadas, 600)
+
+    qs = MovPos.objects.filter(id__in=sub_ids, no_pos_actual__in=list(posiciones))
+    qs = annotate_fecha_anuencia(
+        qs,
+        overrides=get_fecha_anuencia_overrides_map(),
+        baseline=get_fecha_anuencia_baseline_map(),
+    )
+
+    # "Fecha de Anuencia" no siempre es una fecha real (ver
+    # corregir_fecha_anuencia_row) — estas 2 tienen prioridad final sobre lo
+    # que resuelve la anotación SQL (que solo puede representar fechas).
+    overrides_texto = get_fecha_anuencia_overrides_texto_map()
+    baseline_texto = get_fecha_anuencia_baseline_texto_map()
+
+    mapa = {}
+    for pos, fecha in qs.values_list("no_pos_actual", "fecha_anuencia"):
+        if pos in posiciones_ocupadas:
+            mapa[pos] = ""
+            continue
+        if pos in overrides_texto:
+            mapa[pos] = overrides_texto[pos]
+        elif pos in baseline_texto:
+            mapa[pos] = baseline_texto[pos]
+        elif hasattr(fecha, "strftime"):
+            mapa[pos] = fecha.strftime("%Y-%m-%d")
+        elif fecha:
+            mapa[pos] = str(fecha).split(" ")[0].split("T")[0]
+        else:
+            mapa[pos] = ""
+    return mapa
+
+
 def populate_movpos_occupant_details(resultados, posiciones_ocupadas):
     if not resultados:
         return
@@ -1270,6 +1414,19 @@ class EmpleadosCompletosActivosDetalleView(APIView):
                 )
                 resultados = list(queryset.values())
 
+                # Inyectar código federal + columnas quincenal + fecha_anuencia
+                mapa_codigos = _get_mapa_codigos()
+                mapa_quincenal = _get_mapa_quincenal()
+                mapa_fa = _get_fecha_anuencia_bulk_map([r.get("posicion", "") for r in resultados])
+                _COLS_QUINCENAL = sorted(COLUMNAS_QUINCENAL_VALIDAS - {"fecha_anuencia_detalle"})
+                for r in resultados:
+                    pos = r.get("posicion", "")
+                    r["codigo"] = mapa_codigos.get(pos, "")
+                    custom = mapa_quincenal.get(pos, {})
+                    for col in _COLS_QUINCENAL:
+                        r[col] = custom.get(col, "")
+                    r["fecha_anuencia_detalle"] = mapa_fa.get(pos, "")
+
                 cache.set(cache_key, resultados, 300)
                 return Response(resultados, status=status.HTTP_200_OK)
             except Exception:
@@ -1295,6 +1452,19 @@ class EmpleadosCompletosActivosDetalleView(APIView):
             # 3. Serializar directamente
             resultados = list(queryset.values())
 
+            # Inyectar código federal + columnas quincenal + fecha_anuencia
+            mapa_codigos = _get_mapa_codigos()
+            mapa_quincenal = _get_mapa_quincenal()
+            mapa_fa = _get_fecha_anuencia_bulk_map([r.get("posicion", "") for r in resultados])
+            _COLS_QUINCENAL = sorted(COLUMNAS_QUINCENAL_VALIDAS - {"fecha_anuencia_detalle"})
+            for r in resultados:
+                pos = r.get("posicion", "")
+                r["codigo"] = mapa_codigos.get(pos, "")
+                custom = mapa_quincenal.get(pos, {})
+                for col in _COLS_QUINCENAL:
+                    r[col] = custom.get(col, "")
+                r["fecha_anuencia_detalle"] = mapa_fa.get(pos, "")
+
             cache.set(cache_key, resultados, 1200)
             return Response(resultados, status=status.HTTP_200_OK)
         except Exception:
@@ -1307,6 +1477,122 @@ class EmpleadosCompletosActivosDetalleView(APIView):
 FOTOS_EMPLEADOS_CONTENT_TYPES = {
     "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
 }
+
+
+def _invalidar_cache_detalle_plantilla():
+    """
+    Invalida las variantes cacheadas de EmpleadosCompletosActivosDetalleView
+    (cache_key "empleados_completos_activos_detalle" sin filtros +
+    "empleados_completos_activos_detalle_{oficio}_{nivel}" con filtros, más
+    "active_employees_filtered" de otro consumidor) tras cualquier edición
+    que afecte esa respuesta: overrides de EMPLEADOS_COMPLETOS_SIG, columnas
+    quincenal o fecha_anuencia. Función compartida — antes duplicada
+    (imperfectamente, sin "active_employees_filtered") entre
+    EmpleadosCompletosCeldaOverrideView y ColumnasQuincenalView.
+    """
+    cache.delete_many(["empleados_completos_activos_detalle", "active_employees_filtered"])
+    try:
+        import redis as redis_lib
+
+        r = redis_lib.Redis.from_url(settings.CELERY_BROKER_URL)
+        for key in r.scan_iter("*empleados_completos_activos_detalle_*"):
+            r.delete(key)
+    except Exception:
+        logger.exception("Error al invalidar cache filtrada tras edición de Plantilla Detalle")
+
+
+class ColumnasQuincenalView(APIView):
+    """
+    Edición manual de las columnas quincenal (AL–AV del Excel, excepto
+    fecha_anuencia_detalle — ver MovPosFechaAnuenciaOverrideView, unificada
+    con el sistema de Mov. Posiciones) desde el tab Plantilla Detalle.
+
+    Registra el cambio en CeldaOverride (tabla=PLANTILLA_QUINCENAL, ver
+    celda_override.registrar_y_aplicar_override_quincenal) — el MISMO
+    mecanismo de auditoría (valor_original/valor_nuevo/usuario/activo +
+    historial, ver EmpleadosCompletosCeldaHistorialView) que ya existe para
+    EMPLEADOS_COMPLETOS_SIG. El baseline cargado del Excel
+    (TblColumnasPlantillaQuincenal, ver management command
+    `cargar_columnas_quincenal`) nunca se modifica aquí: solo se lee como
+    "valor original" de la primera edición y como fallback en la lectura
+    (ver `_get_mapa_quincenal`) — así una recarga futura del Excel actualiza
+    el valor de referencia sin pisar lo que el usuario ya editó.
+
+    GET  ?posicion=X                 → {columna: valor_efectivo, ...} (override > baseline).
+    PATCH {posicion, columna, valor} → registra el override.
+    DELETE {posicion, columna}       → revierte al valor baseline del Excel (o vacío).
+
+    Solo admite columnas declaradas en COLUMNAS_QUINCENAL_EDITABLES.
+    'reportada' solo acepta '' | 'Si' | 'No'.
+    """
+
+    edit_permission = "authentication.edit_plantilla_detalle"
+    view_permission = "authentication.view_plantilla_detalle"
+
+    @staticmethod
+    def _invalidar_cache():
+        cache.delete("tbl_columnas_quincenal_mapa")
+        _invalidar_cache_detalle_plantilla()
+
+    def get(self, request):
+        posicion = request.query_params.get("posicion", "").strip()
+        if not posicion:
+            return Response({"detail": "posicion es requerida."}, status=status.HTTP_400_BAD_REQUEST)
+        baseline = dict(
+            TblColumnasPlantillaQuincenal.objects.filter(posicion=posicion)
+            .exclude(columna="fecha_anuencia_detalle")
+            .values_list("columna", "valor")
+        )
+        overrides = get_quincenal_overrides_map().get(posicion, {})
+        resultado = {**baseline, **overrides}
+        return Response(resultado)
+
+    def patch(self, request):
+        posicion = request.data.get("posicion", "").strip()
+        columna = request.data.get("columna", "").strip()
+        valor = request.data.get("valor")  # puede ser None → se convierte a ""
+        if not posicion or not columna:
+            return Response({"detail": "posicion y columna son requeridos."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            override = registrar_y_aplicar_override_quincenal(posicion, columna, valor, request.user)
+        except ValueError as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        if override is None:
+            # Valor idéntico al vigente — no se registró como cambio (mismo
+            # criterio 8.10 QA que EMPLEADOS_COMPLETOS_SIG/fecha_anuencia).
+            return Response({
+                "posicion": posicion,
+                "columna": columna,
+                "valor": "" if valor is None else str(valor).strip(),
+                "sin_cambios": True,
+            })
+
+        self._invalidar_cache()
+        return Response({
+            "posicion": posicion,
+            "columna": columna,
+            "valor": override.valor_nuevo,
+            "valor_original": override.valor_original,
+            "usuario": request.user.username,
+            "fecha_modificacion": override.fecha_modificacion,
+            "created": True,
+        })
+
+    def delete(self, request):
+        posicion = request.data.get("posicion", "").strip()
+        columna = request.data.get("columna", "").strip()
+        if not posicion or not columna:
+            return Response({"detail": "posicion y columna son requeridos."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            deleted = borrar_override_quincenal(posicion, columna)
+        except ValueError as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        self._invalidar_cache()
+        return Response({"posicion": posicion, "columna": columna, "deleted": deleted})
 
 
 class EmpleadoFotoView(APIView):
@@ -1386,6 +1672,50 @@ def _mapear_estado_nomina_excel(val):
     return {"A": "Activo", "S": "Suspendido", "L": "Licencia", "P": "Licencia Médica"}.get(codigo, "Vacante")
 
 
+# Réplicas exactas de mapPartida/mapTipoContratacion/displayRango (frontend,
+# PlantillaDetalleTab.jsx) para que el export server-side (con fotos) muestre
+# las MISMAS etiquetas que la tabla en pantalla, en vez de los códigos crudos.
+_TIPO_CONTRATACION_LABELS_EXCEL = {"SAT_CFZA": "Confianza", "SAT_BSE": "Base"}
+
+
+def _mapear_partida_excel(codigo, posicion):
+    codigo = str(codigo or "").strip()
+    if codigo == "11301":
+        return "Permanente"
+    if codigo == "11401":
+        return "PASEM"
+    if codigo == "12201":
+        return "Eventual N.C." if str(posicion or "").strip().startswith("2026") else "Eventual"
+    return codigo
+
+
+def _mapear_tipo_contratacion_excel(val):
+    codigo = str(val or "").strip()
+    return _TIPO_CONTRATACION_LABELS_EXCEL.get(codigo, codigo)
+
+
+def _completar_rango_excel(rango, tipo_personal):
+    val = str(rango or "").strip()
+    if val:
+        return val
+    return "Civil" if str(tipo_personal or "").strip().lower() == "civil" else ""
+
+
+def _aplicar_mapeos_detalle_excel(rows):
+    """Aplica in-place los mapeos de Partida/Tipo de Contratación/Rango a
+    filas de EMPLEADOS_COMPLETOS_SIG antes de generar el Excel — para que la
+    descarga (con o sin fotos) siempre coincida con lo que se ve en pantalla
+    (ver mismas funciones en PlantillaDetalleTab.jsx)."""
+    for r in rows:
+        if "partida" in r:
+            r["partida"] = _mapear_partida_excel(r.get("partida"), r.get("posicion"))
+        if "tipo_de_contratacion" in r:
+            r["tipo_de_contratacion"] = _mapear_tipo_contratacion_excel(r.get("tipo_de_contratacion"))
+        if "rango" in r:
+            r["rango"] = _completar_rango_excel(r.get("rango"), r.get("tipo_de_personal_sedena_semar"))
+    return rows
+
+
 _EXCEL_CON_FOTOS_CONTENT_TYPE_XLSM = "application/vnd.ms-excel.sheet.macroEnabled.12"
 _EXCEL_CON_FOTOS_CONTENT_TYPE_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
@@ -1435,7 +1765,9 @@ class ExportarPlantillaDetalleConFotosView(APIView):
             str(r["posicion"]): r
             for r in EmpleadosCompletosSig.objects.filter(posicion__in=posiciones).values()
         }
-        rows = [rows_by_posicion[str(p)] for p in posiciones if str(p) in rows_by_posicion]
+        rows = _aplicar_mapeos_detalle_excel(
+            [rows_by_posicion[str(p)] for p in posiciones if str(p) in rows_by_posicion]
+        )
 
         # Tope de seguridad: la plantilla activa completa son ~13,300 filas
         # hoy (medido) — con margen. Sin este tope, "sin querer" no hay
@@ -1616,7 +1948,9 @@ class ExportarEmpleadosPorPosicionConFotosView(APIView):
             str(r["posicion"]): r
             for r in EmpleadosCompletosSig.objects.filter(posicion__in=posiciones).values()
         }
-        rows = [rows_by_posicion[str(p)] for p in posiciones if str(p) in rows_by_posicion]
+        rows = _aplicar_mapeos_detalle_excel(
+            [rows_by_posicion[str(p)] for p in posiciones if str(p) in rows_by_posicion]
+        )
 
         if incluir_fotos and len(rows) > 15000:
             return Response(
@@ -1723,20 +2057,48 @@ class EmpleadosCompletosCeldaOverrideView(APIView):
             logger.exception("Error al invalidar cache filtrada tras override de celda")
 
 
+_HISTORIAL_TABLA_MAP = {
+    "empleados": TABLA_EMPLEADOS,
+    "quincenal": TABLA_QUINCENAL,
+    "fecha_anuencia": TABLA_MOV_POS,
+}
+_HISTORIAL_TABLAS_TODOS = [TABLA_EMPLEADOS, TABLA_QUINCENAL, TABLA_MOV_POS]
+
+
 class EmpleadosCompletosCeldaHistorialView(APIView):
     """
-    Historial completo de ediciones manuales (CeldaOverride) sobre
-    EMPLEADOS_COMPLETOS_SIG, para el modal "Historial de Cambios" del tab
-    Detalle. Solo lectura — no reaplica ni modifica nada (ver
-    plantilla.celda_override.obtener_historial_overrides_empleados).
+    Historial completo de ediciones manuales (CeldaOverride) sobre las
+    columnas editables del tab Plantilla Detalle. Solo lectura — no reaplica
+    ni modifica nada (ver plantilla.celda_override.obtener_historial_overrides_empleados).
+
+    ``?tabla=``: "empleados" (default, EMPLEADOS_COMPLETOS_SIG),
+    "quincenal" (columnas AL–AV, PLANTILLA_QUINCENAL), "fecha_anuencia"
+    (columna AL/Fecha de Anuencia, unificada con MOV_POS) o "todos" (las 3 —
+    usado por Plantilla Detalle para mostrar en un solo historial TODAS las
+    ediciones hechas desde ese tab, sin importar qué tabla interna las
+    respalda).
     """
 
-    view_permission = "authentication.view_plantilla_detalle"
+    view_permission = (
+        "authentication.view_plantilla_detalle",
+        "authentication.view_plantilla_mov_posiciones",
+    )
 
     def get(self, request):
         search = (request.query_params.get("search") or "").strip() or None
         columna = (request.query_params.get("columna") or "").strip() or None
         posicion = (request.query_params.get("posicion") or "").strip() or None
+
+        tabla_param = (request.query_params.get("tabla") or "empleados").strip().lower()
+        if tabla_param == "todos":
+            tabla = _HISTORIAL_TABLAS_TODOS
+        elif tabla_param in _HISTORIAL_TABLA_MAP:
+            tabla = _HISTORIAL_TABLA_MAP[tabla_param]
+        else:
+            return Response(
+                {"detail": f"Parámetro 'tabla' no válido. Opciones: {['todos', *_HISTORIAL_TABLA_MAP]}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         activo_param = request.query_params.get("activo")
         activo = None
@@ -1755,6 +2117,7 @@ class EmpleadosCompletosCeldaHistorialView(APIView):
             offset = 0
 
         resultados, total = obtener_historial_overrides_empleados(
+            tabla=tabla,
             search=search,
             columna=columna,
             posicion=posicion,
@@ -1769,7 +2132,7 @@ class EmpleadosCompletosCeldaHistorialView(APIView):
                 "limit": limit,
                 "offset": offset,
                 "resultados": [serializar_override(o) for o in resultados],
-                "estadisticas": obtener_estadisticas_overrides_empleados(),
+                "estadisticas": obtener_estadisticas_overrides_empleados(tabla=tabla),
             },
             status=status.HTTP_200_OK,
         )
@@ -2520,7 +2883,12 @@ class MovPosDetalleView(APIView):
         # reusarla más abajo en corregir_fecha_anuencia_row, que necesita el
         # mismo mapa para marcar `fecha_anuencia_override` por fila.
         fecha_anuencia_overrides = get_fecha_anuencia_overrides_map()
-        queryset = annotate_fecha_anuencia(queryset, overrides=fecha_anuencia_overrides)
+        fecha_anuencia_baseline = get_fecha_anuencia_baseline_map()
+        fecha_anuencia_overrides_texto = get_fecha_anuencia_overrides_texto_map()
+        fecha_anuencia_baseline_texto = get_fecha_anuencia_baseline_texto_map()
+        queryset = annotate_fecha_anuencia(
+            queryset, overrides=fecha_anuencia_overrides, baseline=fecha_anuencia_baseline
+        )
 
         oficio = request.query_params.get("oficio")
         nivel = request.query_params.get("nivel")
@@ -2927,6 +3295,7 @@ class MovPosDetalleView(APIView):
                 cache.set(cache_key_ocupadas, posiciones_ocupadas, 600)
 
             populate_movpos_occupant_details(resultados, posiciones_ocupadas)
+            mapa_codigos = _get_mapa_codigos()
             for r in resultados:
                 pos = r.get("no_pos_actual")
                 r["total_movimientos"] = counts.get(pos, 1)
@@ -2937,7 +3306,11 @@ class MovPosDetalleView(APIView):
                 r["fecha_vacancia"] = (
                     "" if pos in posiciones_ocupadas else r.get("fecha_vacancia", "")
                 )
-                corregir_fecha_anuencia_row(r, pos, posiciones_ocupadas, fecha_anuencia_overrides)
+                r["codigo"] = mapa_codigos.get(pos, "")
+                corregir_fecha_anuencia_row(
+                    r, pos, posiciones_ocupadas, fecha_anuencia_overrides,
+                    fecha_anuencia_overrides_texto, fecha_anuencia_baseline_texto,
+                )
 
             is_excel_mode = (
                 request.query_params.get("no_pagination", "false").strip().lower()
@@ -2975,6 +3348,7 @@ class MovPosDetalleView(APIView):
                 cache.set(cache_key_ocupadas, posiciones_ocupadas, 600)
 
             populate_movpos_occupant_details(resultados, posiciones_ocupadas)
+            mapa_codigos = _get_mapa_codigos()
             for r in resultados:
                 pos = r.get("no_pos_actual")
                 r["total_movimientos"] = counts.get(pos, 1)
@@ -2985,7 +3359,11 @@ class MovPosDetalleView(APIView):
                 r["fecha_vacancia"] = (
                     "" if pos in posiciones_ocupadas else r.get("fecha_vacancia", "")
                 )
-                corregir_fecha_anuencia_row(r, pos, posiciones_ocupadas, fecha_anuencia_overrides)
+                r["codigo"] = mapa_codigos.get(pos, "")
+                corregir_fecha_anuencia_row(
+                    r, pos, posiciones_ocupadas, fecha_anuencia_overrides,
+                    fecha_anuencia_overrides_texto, fecha_anuencia_baseline_texto,
+                )
             return paginator.get_paginated_response(resultados)
 
         resultados = list(queryset.values())
@@ -3004,6 +3382,7 @@ class MovPosDetalleView(APIView):
             cache.set(cache_key_ocupadas, posiciones_ocupadas, 600)
 
         populate_movpos_occupant_details(resultados, posiciones_ocupadas)
+        mapa_codigos = _get_mapa_codigos()
         for r in resultados:
             pos = r.get("no_pos_actual")
             r["total_movimientos"] = counts.get(pos, 1)
@@ -3014,7 +3393,11 @@ class MovPosDetalleView(APIView):
             r["fecha_vacancia"] = (
                 "" if pos in posiciones_ocupadas else r.get("fecha_vacancia", "")
             )
-            corregir_fecha_anuencia_row(r, pos, posiciones_ocupadas, fecha_anuencia_overrides)
+            r["codigo"] = mapa_codigos.get(pos, "")
+            corregir_fecha_anuencia_row(
+                r, pos, posiciones_ocupadas, fecha_anuencia_overrides,
+                fecha_anuencia_overrides_texto, fecha_anuencia_baseline_texto,
+            )
         return Response(resultados)
 
 
@@ -3028,7 +3411,14 @@ def _recalcular_fecha_anuencia_actual(no_pos_actual):
     DELETE devolvía `None` a secas, dejando la celda en blanco hasta el
     siguiente GET)."""
     row = {"fecha_anuencia": None}
-    obj = annotate_fecha_anuencia(MovPos.objects.filter(no_pos_actual=no_pos_actual)).values("fecha_anuencia").first()
+    obj = (
+        annotate_fecha_anuencia(
+            MovPos.objects.filter(no_pos_actual=no_pos_actual),
+            baseline=get_fecha_anuencia_baseline_map(),
+        )
+        .values("fecha_anuencia")
+        .first()
+    )
     if obj:
         row["fecha_anuencia"] = obj["fecha_anuencia"]
 
@@ -3039,23 +3429,33 @@ def _recalcular_fecha_anuencia_actual(no_pos_actual):
             posiciones_ocupadas = set(r[0] for r in cursor.fetchall() if r[0])
         cache.set("mov_pos_ocupadas_set", posiciones_ocupadas, 600)
 
-    corregir_fecha_anuencia_row(row, no_pos_actual, posiciones_ocupadas)
+    corregir_fecha_anuencia_row(
+        row, no_pos_actual, posiciones_ocupadas,
+        baseline_texto=get_fecha_anuencia_baseline_texto_map(),
+    )
     return row["fecha_anuencia"]
 
 
 class MovPosFechaAnuenciaOverrideView(APIView):
     """
-    Edición manual de `fecha_anuencia` (sugerida por default como
-    fecha_vacancia + 30 días, ver `annotate_fecha_anuencia`) desde el tab
-    Mov. Posiciones. A diferencia de `EmpleadosCompletosCeldaOverrideView`:
-    no hay tabla viva que actualizar ni caché que invalidar — el valor se
-    calcula (override o default) en cada request. `delete()` además
-    devuelve el valor automático recién recalculado (ver
-    `_recalcular_fecha_anuencia_actual`) para que el frontend pinte la
-    celda de inmediato al revertir, sin esperar a un GET/recarga nueva.
+    Edición manual de `fecha_anuencia` (sugerida por default como el valor
+    cargado del Excel o, si no hay, fecha_vacancia + 30 días, ver
+    `annotate_fecha_anuencia`) desde el tab Mov. Posiciones **y** desde
+    Plantilla Detalle (columna "Fecha de Anuencia", misma clave de negocio
+    `posicion` == `no_pos_actual` — ver PlantillaDetalleTab.jsx) — ambos tabs
+    comparten el mismo override, así que siempre muestran la misma fecha.
+    A diferencia de `EmpleadosCompletosCeldaOverrideView`: no hay tabla viva
+    que actualizar ni caché que invalidar — el valor se calcula (override o
+    default) en cada request. `delete()` además devuelve el valor automático
+    recién recalculado (ver `_recalcular_fecha_anuencia_actual`) para que el
+    frontend pinte la celda de inmediato al revertir, sin esperar a un
+    GET/recarga nueva.
     """
 
-    edit_permission = "authentication.edit_plantilla_mov_posiciones"
+    edit_permission = (
+        "authentication.edit_plantilla_mov_posiciones",
+        "authentication.edit_plantilla_detalle",
+    )
 
     def post(self, request):
         no_pos_actual = request.data.get("no_pos_actual")
@@ -3748,7 +4148,12 @@ class MovPosExportExcelView(APIView):
         # ── 2. Construir queryset con los mismos filtros que MovPosDetalleView ──
         queryset = MovPos.objects.all()
         fecha_anuencia_overrides = get_fecha_anuencia_overrides_map()
-        queryset = annotate_fecha_anuencia(queryset, overrides=fecha_anuencia_overrides)
+        fecha_anuencia_baseline = get_fecha_anuencia_baseline_map()
+        fecha_anuencia_overrides_texto = get_fecha_anuencia_overrides_texto_map()
+        fecha_anuencia_baseline_texto = get_fecha_anuencia_baseline_texto_map()
+        queryset = annotate_fecha_anuencia(
+            queryset, overrides=fecha_anuencia_overrides, baseline=fecha_anuencia_baseline
+        )
 
         oficio = request.query_params.get("oficio")
         nivel = request.query_params.get("nivel")
@@ -3948,7 +4353,10 @@ class MovPosExportExcelView(APIView):
             r["total_movimientos"] = counts.get(pos, 1)
             r["ocupacion"] = "Ocupada" if pos in posiciones_ocupadas else "Vacante"
             r["fecha_vacancia"] = "" if pos in posiciones_ocupadas else r.get("fecha_vacancia", "")
-            corregir_fecha_anuencia_row(r, pos, posiciones_ocupadas, fecha_anuencia_overrides)
+            corregir_fecha_anuencia_row(
+                r, pos, posiciones_ocupadas, fecha_anuencia_overrides,
+                fecha_anuencia_overrides_texto, fecha_anuencia_baseline_texto,
+            )
 
         # Export de solo "Vacantes": desglosa el registro decisivo (baja o
         # traslado) y la insubsistencia de cada posición vacante en columnas
