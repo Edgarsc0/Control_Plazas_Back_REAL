@@ -6004,16 +6004,16 @@ class OrganigramaTreeView(APIView):
         with connection.cursor() as cursor:
             cursor.execute(
                 f"""
-                SELECT `Posición`, `Nombres`, `Nivel`, `SMB`, `Estado Nómina`
+                SELECT `Posición`, `Nombres`, `Nivel`, `SMB`, `Estado Nómina`, `Numempleado`
                 FROM EMPLEADOS_COMPLETOS_SIG
                 WHERE `Posición` IN ({placeholders})
                 """,
                 posiciones,
             )
             ocupantes = {}
-            for posicion, nombre, nivel, smb, estado_nomina in cursor.fetchall():
+            for posicion, nombre, nivel, smb, estado_nomina, numempleado in cursor.fetchall():
                 if posicion not in ocupantes:
-                    ocupantes[posicion] = (nombre, nivel, smb, estado_nomina)
+                    ocupantes[posicion] = (nombre, nivel, smb, estado_nomina, numempleado)
 
         occupant_map = {}
         for posicion in posiciones:
@@ -6024,13 +6024,14 @@ class OrganigramaTreeView(APIView):
             if not row or not str(row[3] or "").strip():
                 occupant_map[posicion] = {"activa": True, "vacante": True}
                 continue
-            nombre, nivel, smb, estado_nomina = row
+            nombre, nivel, smb, estado_nomina, numempleado = row
             occupant_map[posicion] = {
                 "activa": True,
                 "vacante": False,
                 "nombre": nombre,
                 "nivel": nivel,
                 "smb": smb,
+                "numempleado": numempleado,
             }
         return occupant_map
 
