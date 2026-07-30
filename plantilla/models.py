@@ -973,9 +973,20 @@ class OrganigramaAnam(models.Model):
     Adoptada vía SeparateDatabaseAndState (tabla ya existente en producción,
     poblada por el pipeline ZAFIRO). Usada por organigrama_tree.build_tree y
     las vistas de búsqueda de organigrama en views.py.
+
+    Contiene DOS conjuntos de filas distinguidos por `isSIGInfo`: el
+    institucional/editable (isSIGInfo=False, antes tabla única con
+    `departamento` como PK) y el snapshot SIG de solo lectura (isSIGInfo=True,
+    antes en la tabla aparte ORGANIGRAMA_ANAM_SIG, fusionada aquí). Como un
+    mismo `departamento` puede existir en ambos conjuntos, la PK ya no puede
+    ser `departamento`: ahora es `id` autoincremental, con `departamento`
+    único solo DENTRO de cada conjunto (unique_together con isSIGInfo). Todo
+    lookup por `departamento` debe ir siempre acompañado de un filtro por
+    isSIGInfo para no toparse con MultipleObjectsReturned.
     """
 
-    departamento = models.CharField(primary_key=True, max_length=255)
+    id = models.BigAutoField(primary_key=True)
+    departamento = models.CharField(max_length=255)
     unidad_negocio = models.CharField(max_length=255)
     estado_fecha_efectiva = models.CharField(max_length=255)
     descripcion_larga = models.CharField(max_length=500)
@@ -996,6 +1007,12 @@ class OrganigramaAnam(models.Model):
     class Meta:
         managed = True
         db_table = "ORGANIGRAMA_ANAM"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["departamento", "isSIGInfo"],
+                name="uq_departamento_sig",
+            ),
+        ]
 
     def __str__(self):
         return f"{self.departamento} - {self.descripcion_larga}"

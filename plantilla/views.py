@@ -3877,7 +3877,7 @@ def _cargar_catalogos_alineacion():
     with connection.cursor() as cursor:
         cursor.execute("SELECT codigo, nombre FROM ua_unidadadministrativa")
         ua_lookup = {(row[0] or "").strip().upper(): row[1] for row in cursor.fetchall()}
-        cursor.execute("SELECT departamento, descripcion_larga FROM ORGANIGRAMA_ANAM")
+        cursor.execute("SELECT departamento, descripcion_larga FROM ORGANIGRAMA_ANAM WHERE isSIGInfo = 0")
         depto_lookup = {(row[0] or "").strip().upper(): row[1] for row in cursor.fetchall()}
     return {"ua": ua_lookup, "depto": depto_lookup}
 
@@ -5911,16 +5911,16 @@ class OrganigramaTreeView(APIView):
     del determinante) — "Vista Institucional" (manual/curada, editable).
 
     Query param opcional `vista`: `"institucional"` (default) lee de
-    ORGANIGRAMA_ANAM tal cual (manual/curada, editable). `"alineacion"` y
-    `"sig"` son de solo lectura y fuerzan el recálculo en vivo desde el
-    determinante real (`forzar_recalculo=True`, ignoran `subordinados`) —
-    la diferencia entre ambas es la TABLA de origen: Alineación recalcula
-    sobre ORGANIGRAMA_ANAM (todo lo editado a mano incluido); SIG recalcula
-    sobre ORGANIGRAMA_ANAM_SIG, una foto fija (snapshot) completamente
-    aparte, poblada una sola vez por el management command
-    `congelar_organigrama_sig` — así SIG es inmune a CUALQUIER edición
-    manual (estructura, orden y contenido), no solo a nodos creados a mano.
-    Ver organigrama_tree.build_tree y plantilla.models.OrganigramaAnamSig.
+    ORGANIGRAMA_ANAM con isSIGInfo=0 (manual/curada, editable). `"alineacion"`
+    y `"sig"` son de solo lectura y fuerzan el recálculo en vivo desde el
+    determinante real (`forzar_recalculo=True`, ignoran `subordinados`) — la
+    diferencia entre ambas es el SUBCONJUNTO de filas: Alineación recalcula
+    sobre isSIGInfo=0 (todo lo editado a mano incluido); SIG recalcula sobre
+    isSIGInfo=1, un snapshot congelado por el management command
+    `congelar_organigrama_sig` (antes en la tabla aparte ORGANIGRAMA_ANAM_SIG,
+    ahora fusionado en ORGANIGRAMA_ANAM) — así SIG es inmune a CUALQUIER
+    edición manual (estructura, orden y contenido), no solo a nodos creados a
+    mano. Ver organigrama_tree.build_tree y plantilla.models.OrganigramaAnam.
     """
     view_permission = (
         "authentication.view_organigrama_institucional",
@@ -5951,21 +5951,24 @@ class OrganigramaTreeView(APIView):
             return Response({"error": "No tienes permiso para ver esta vista del organigrama."}, status=403)
 
         if vista == "sig":
-            # Tabla completamente aparte (foto fija) — no hay isSIGInfo que
-            # filtrar aquí, ORGANIGRAMA_ANAM_SIG completa ES el conjunto SIG.
+            # Snapshot SIG de solo lectura, ahora fusionado dentro de
+            # ORGANIGRAMA_ANAM (isSIGInfo=1) — antes era la tabla aparte
+            # ORGANIGRAMA_ANAM_SIG.
             sql = """
                 SELECT departamento, descripcion_larga, nivel_direccion, unidad_negocio,
                        unidad_administrativa, doaf, num_posicion_gerente, posicion_director
-                FROM ORGANIGRAMA_ANAM_SIG
-                WHERE unidad_negocio = %s
+                FROM ORGANIGRAMA_ANAM
+                WHERE unidad_negocio = %s AND isSIGInfo = 1
             """
         else:
+            # institucional/alineación: siempre el conjunto editable
+            # (isSIGInfo=0), nunca las filas del snapshot SIG.
             sql = """
                 SELECT departamento, descripcion_larga, nivel_direccion, unidad_negocio,
                        unidad_administrativa, doaf, num_posicion_gerente, posicion_director,
                        subordinados
                 FROM ORGANIGRAMA_ANAM
-                WHERE unidad_negocio = %s
+                WHERE unidad_negocio = %s AND isSIGInfo = 0
             """
         with connection.cursor() as cursor:
             cursor.execute(sql, [unidad_negocio])
@@ -6110,7 +6113,7 @@ class OrganigramaUnidadesView(APIView):
         from .organigrama_tree import find_root
 
         rows = list(
-            OrganigramaAnam.objects.values(
+            OrganigramaAnam.objects.filter(isSIGInfo=False).values(
                 "departamento", "descripcion_larga", "nivel_direccion", "unidad_negocio"
             )
         )
@@ -6187,9 +6190,9 @@ class OrganigramaCrearNodoView(APIView):
                 {"detail": "unidad_negocio y departamento son obligatorios para crear una Dirección General."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        if OrganigramaAnam.objects.filter(departamento=departamento).exists():
+        if OrganigramaAnam.objects.filter(isSIGInfo=False, departamento=departamento).exists():
             return Response({"detail": f"Ya existe el departamento {departamento}."}, status=status.HTTP_409_CONFLICT)
-        if OrganigramaAnam.objects.filter(unidad_negocio=unidad_negocio).exists():
+        if OrganigramaAnam.objects.filter(isSIGInfo=False, unidad_negocio=unidad_negocio).exists():
             return Response({"detail": f"Ya existe la unidad_negocio {unidad_negocio}."}, status=status.HTTP_409_CONFLICT)
 
         nuevo = OrganigramaAnam.objects.create(
@@ -6212,7 +6215,7 @@ class OrganigramaCrearNodoView(APIView):
         parent_code = (data.get("parent_departamento") or "").strip()
         if not parent_code:
             return Response({"detail": "Falta parent_departamento."}, status=status.HTTP_400_BAD_REQUEST)
-        parent = get_object_or_404(OrganigramaAnam, departamento=parent_code)
+        parent = get_object_or_404(OrganigramaAnam, isSIGInfo=False, departamento=parent_code)
 
         if tipo == "Enlace":
             return self._crear_enlace(request, data, parent, descripcion_larga)
@@ -6263,6 +6266,7 @@ class OrganigramaCrearNodoView(APIView):
         prefix = "".join(segs[:target_pos])
         w_target = widths[target_pos]
         siblings = OrganigramaAnam.objects.filter(
+            isSIGInfo=False,
             unidad_negocio=parent.unidad_negocio,
             departamento__startswith=prefix,
         ).exclude(departamento=parent_code).values_list("departamento", flat=True)
@@ -6287,7 +6291,7 @@ class OrganigramaCrearNodoView(APIView):
             segs[i] = "0" * widths[i]
 
         new_code = "".join(segs)
-        if OrganigramaAnam.objects.filter(departamento=new_code).exists():
+        if OrganigramaAnam.objects.filter(isSIGInfo=False, departamento=new_code).exists():
             return Response(
                 {"detail": f"Colisión al generar el código {new_code}, intenta de nuevo."},
                 status=status.HTTP_409_CONFLICT,
@@ -6327,6 +6331,7 @@ class OrganigramaCrearNodoView(APIView):
         parent_code = parent.departamento
         suffix_len = len(parent_code) + 2
         siblings = OrganigramaAnam.objects.filter(
+            isSIGInfo=False,
             departamento__startswith=parent_code,
         ).values_list("departamento", flat=True)
 
@@ -6344,7 +6349,7 @@ class OrganigramaCrearNodoView(APIView):
                 status=status.HTTP_409_CONFLICT,
             )
         new_code = f"{parent_code}{str(next_num).zfill(2)}"
-        if OrganigramaAnam.objects.filter(departamento=new_code).exists():
+        if OrganigramaAnam.objects.filter(isSIGInfo=False, departamento=new_code).exists():
             return Response(
                 {"detail": f"Colisión al generar el código {new_code}, intenta de nuevo."},
                 status=status.HTTP_409_CONFLICT,
@@ -6599,8 +6604,18 @@ class OrganigramaAnamViewSet(AuditedViewSetMixin, viewsets.ModelViewSet):
     descripción, nivel de dirección, DOAF, posiciones de gerente/director),
     usado por organigrama_tree.build_tree y las vistas de búsqueda de
     organigrama.
+
+    Solo opera sobre el conjunto institucional (isSIGInfo=False): el
+    snapshot SIG (isSIGInfo=True) es de solo lectura, congelado por
+    `congelar_organigrama_sig`, y no debe poder editarse/borrarse desde acá.
+    `departamento` ya no es la PK de la tabla (ahora es `id`, porque un mismo
+    `departamento` puede repetirse entre institucional y SIG), pero sigue
+    siendo único DENTRO del conjunto institucional, así que `lookup_field`
+    se mantiene en `departamento` para no romper el contrato con el frontend
+    (`cat-organigrama-anam/<departamento>/`).
     """
-    queryset = OrganigramaAnam.objects.all()
+    queryset = OrganigramaAnam.objects.filter(isSIGInfo=False)
+    lookup_field = "departamento"
     serializer_class = OrganigramaAnamSerializer
     # Se usa desde 2 superficies: tab Catálogos de Plantilla (tabla cruda) y
     # el botón "Editar departamento"/alta-baja de nodo en el módulo
@@ -6662,7 +6677,7 @@ class OrganigramaAnamViewSet(AuditedViewSetMixin, viewsets.ModelViewSet):
             )
 
         with transaction.atomic():
-            for padre in OrganigramaAnam.objects.filter(subordinados__contains=departamento):
+            for padre in OrganigramaAnam.objects.filter(isSIGInfo=False, subordinados__contains=departamento):
                 codigos = [c for c in (padre.subordinados or "").split(",") if c and c != departamento]
                 nuevo_valor = ",".join(codigos)
                 if nuevo_valor != (padre.subordinados or ""):
