@@ -55,6 +55,8 @@ from .views import (
     OrganigramaCrearNodoView,
     CatAccionesViewSet,
     CatAccionesMotivosViewSet,
+    CatCorreccionPosicionListView,
+    CatCorreccionPosicionDetailView,
     CatNivelJerarquicoPlazaViewSet,
     CatPtoFuncViewSet,
     OrganigramaAnamViewSet,
@@ -158,6 +160,16 @@ urlpatterns = [
             {"put": "update", "patch": "partial_update", "delete": "destroy"}
         ),
         name="cat-cod-presupuestal-detail",
+    ),
+    path(
+        "cat-correccion-posicion/",
+        CatCorreccionPosicionListView.as_view(),
+        name="cat-correccion-posicion",
+    ),
+    path(
+        "cat-correccion-posicion/<str:posicion>/",
+        CatCorreccionPosicionDetailView.as_view(),
+        name="cat-correccion-posicion-detail",
     ),
     path(
         "cat-organigrama-anam/",

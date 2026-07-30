@@ -1131,27 +1131,52 @@ class CatNivelJerarquicoPlaza(models.Model):
         return f"{self.plaza} - {self.descripcion_nivel_jerarquico or 'sin asignar'}"
 
 
-class CatCodigoPosicion(models.Model):
+# Columnas admitidas en cat_correccion_posicion. Añadir aquí una nueva key es
+# suficiente para habilitarla (sin migración) — ver CatCorreccionPosicion.
+COLUMNAS_CORRECCION_VALIDAS = {"codigo", "tipo_de_aduana", "dg_o_aduana_compactada"}
+
+
+class CatCorreccionPosicion(models.Model):
     """
-    Catálogo estático posición → código federal.
+    Catálogo clave-valor por posición para que la plantilla del sistema
+    (EMPLEADOS_COMPLETOS_SIG) coincida con la plantilla del Excel de
+    referencia (``plantilla_con_columna_codigo.xlsx``) en columnas donde
+    ZAFIRO trae un valor incompleto, vacío o distinto — "Código" (ZAFIRO
+    nunca lo trae), "Tipo de Aduana"/"DG o Aduana compactada" (~33% vienen
+    vacíos en ZAFIRO pero el Excel siempre los trae). Se carga inicialmente
+    con `cargar_correcciones_plantilla` y a partir de ahí se corrige a mano
+    desde el tab "Catálogos" (ej. cuando una posición se realinea a otra
+    unidad y hay que actualizar su aduana) — ver CatCorreccionPosicionListView/
+    DetailView, que pivotan esta tabla clave-valor a un renglón por posición.
 
-    El código va ligado a la posición y NUNCA cambia; se carga una sola vez
-    desde el archivo Excel de referencia mediante el management command
-    `cargar_codigos`. No se toca en las sincronizaciones automáticas de Celery.
+    IMPORTANTE — separación deliberada de `TblColumnasPlantillaQuincenal`:
+    esta tabla es un catálogo simple (última edición gana, sin historial),
+    para "corrección automática de datos" que se edita ocasionalmente. Las
+    columnas AL–AV (candidato, reportada, CAP anual, etc.) son justo lo
+    opuesto — captura manual constante con auditoría completa vía
+    CeldaOverride (valor_original + historial de cada cambio) — por eso
+    viven en su propia tabla y no comparten mecanismo.
 
-    Se usa como lookup dict en las vistas que sirven Plantilla Detalle y
-    Movimientos de Posiciones para inyectar la columna 'Código' en respuesta.
+    Diseño clave-valor: agregar una columna nueva en el futuro no requiere
+    migración de BD, solo declarar la key en COLUMNAS_CORRECCION_VALIDAS.
     """
 
-    plaza = models.CharField(max_length=20, primary_key=True)
-    codigo = models.CharField(max_length=100, blank=True, null=True)
+    posicion = models.CharField(max_length=20, db_index=True)
+    columna = models.CharField(max_length=100)  # key de COLUMNAS_CORRECCION_VALIDAS
+    valor = models.TextField(blank=True, null=True)
+    modificado_por = models.CharField(max_length=150, blank=True, null=True)
+    fecha_modificacion = models.DateTimeField(auto_now=True)
 
     class Meta:
         managed = True
-        db_table = "cat_codigo_posicion"
+        db_table = "cat_correccion_posicion"
+        unique_together = [("posicion", "columna")]
+        indexes = [
+            models.Index(fields=["posicion"]),
+        ]
 
     def __str__(self):
-        return f"{self.plaza} → {self.codigo or '(sin código)'}"
+        return f"{self.posicion} · {self.columna} = {self.valor!r}"
 
 
 class EmpleadosCompletosSig(EmpleadosCompletosSigBase):
@@ -1419,13 +1444,19 @@ class CuadroVacancia(models.Model):
 
 # Columnas personalizadas admitidas en tbl_columnas_plantilla_quincenal.
 # Añadir aquí una nueva key es suficiente para habilitarla — no requiere migración.
+#
+# "fecha_genera_vacante" (columna AQ) NO está aquí: aunque el Excel la trae,
+# el sistema debe priorizar SIEMPRE la fecha calculada (fecha_vacancia de
+# MOV_POS, vía el SP de ZAFIRO sp_obtener_todas_vacancias) porque el Excel
+# tiene errores conocidos en esta columna — se unificó con el valor que ya
+# muestra Mov. Posiciones en su columna "Fecha de Vacancia", dejó de ser
+# editable y ya no se carga del Excel (ver plantilla.views._get_fecha_vacancia_bulk_map).
 COLUMNAS_QUINCENAL_VALIDAS = {
     "fecha_anuencia_detalle",                    # AL — texto libre (viene mixto en el Excel)
     "oficios_autorizacion_shcp",                 # AM
     "plazas_eventuales_autorizacion_2026",        # AN
     "candidato",                                 # AO
     "reportada",                                 # AP — Si / No (select en frontend)
-    "fecha_genera_vacante",                      # AQ
     "cap_anual",                                 # AR
     "cap_mensual",                               # AS
     "observaciones_plantillas_do",               # AT
@@ -1447,8 +1478,11 @@ class TblColumnasPlantillaQuincenal(models.Model):
     """
     BASELINE de solo lectura de las columnas AL–AV del Excel de plantilla
     (``plantilla_con_columna_codigo.xlsx``), cargada por el management
-    command ``cargar_columnas_quincenal`` — mismo patrón que
-    ``CatCodigoPosicion``/``cargar_codigos`` para la columna "Código".
+    command ``cargar_columnas_quincenal`` — mismo espíritu que
+    ``CatCorreccionPosicion``/``cargar_correcciones_plantilla`` (Código,
+    Tipo de Aduana, DG de Aduana compactada), pero deliberadamente en una
+    tabla separada porque estas SÍ son editables por el usuario (ver más
+    abajo), a diferencia de las correcciones de solo lectura.
 
     IMPORTANTE: esta tabla NUNCA la escribe un usuario. Las ediciones
     manuales de estas columnas NO se guardan aquí — se registran en

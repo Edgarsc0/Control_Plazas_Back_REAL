@@ -36,7 +36,8 @@ from .models import (
     AlineacionOrganizacionalHistorico,
     CatAcciones,
     CatAccionesMotivos,
-    CatCodigoPosicion,
+    CatCorreccionPosicion,
+    COLUMNAS_CORRECCION_VALIDAS,
     CatNivelJerarquicoPlaza,
     CatPtoFunc,
     COLUMNAS_QUINCENAL_VALIDAS,
@@ -950,18 +951,41 @@ def obtener_posiciones_activas():
     return result
 
 
-def _get_mapa_codigos():
+def _get_mapa_correccion(columna):
     """
-    Retorna un dict {plaza: codigo} cargado desde cat_codigo_posicion.
-    Se cachea 30 minutos para no repetir el query en cada request — el catálogo
-    es estático y solo cambia cuando el admin ejecuta `cargar_codigos` de nuevo.
+    Retorna un dict {posicion: valor} de una columna de corrección de solo
+    lectura (``cat_correccion_posicion`` — Código, Tipo de Aduana, DG de
+    Aduana compactada, ver CatCorreccionPosicion). Se cachea 30 minutos por
+    columna — el catálogo es estático y solo cambia cuando el admin ejecuta
+    `cargar_correcciones_plantilla` de nuevo.
     """
-    cache_key = "cat_codigo_posicion_mapa"
+    cache_key = f"cat_correccion_posicion_mapa_{columna}"
     mapa = cache.get(cache_key)
     if mapa is None:
-        mapa = dict(CatCodigoPosicion.objects.values_list("plaza", "codigo"))
+        mapa = dict(
+            CatCorreccionPosicion.objects.filter(columna=columna).values_list("posicion", "valor")
+        )
         cache.set(cache_key, mapa, 1800)  # 30 minutos
     return mapa
+
+
+def _get_mapa_codigos():
+    """{posicion: codigo} — ver `_get_mapa_correccion`."""
+    return _get_mapa_correccion("codigo")
+
+
+def _completar_aduana_row(r):
+    """
+    Completa `tipo_de_aduana`/`dg_o_aduana_compactada` con el valor del
+    catálogo de corrección SOLO si vienen vacíos de EMPLEADOS_COMPLETOS_SIG
+    (~33% de las posiciones — confirmado que ZAFIRO no los trae completos,
+    pero el Excel de referencia sí) — nunca se sobreescribe un valor real.
+    """
+    pos = r.get("posicion", "")
+    if not str(r.get("tipo_de_aduana") or "").strip():
+        r["tipo_de_aduana"] = _get_mapa_correccion("tipo_de_aduana").get(pos, "")
+    if not str(r.get("dg_o_aduana_compactada") or "").strip():
+        r["dg_o_aduana_compactada"] = _get_mapa_correccion("dg_o_aduana_compactada").get(pos, "")
 
 
 def _get_mapa_quincenal():
@@ -1048,6 +1072,86 @@ def _get_fecha_anuencia_bulk_map(posiciones):
         else:
             mapa[pos] = ""
     return mapa
+
+
+def _get_fecha_anuencia_override_map(posiciones):
+    """
+    ``{posicion: bool}`` — True si la posición tiene un override manual
+    activo de fecha_anuencia (fecha real o categoría de texto), para
+    resaltar en azul la celda en Plantilla Detalle — mismo criterio que
+    ``row["fecha_anuencia_override"]`` en ``corregir_fecha_anuencia_row``
+    (usado por Mov. Posiciones), aquí en versión bulk.
+    """
+    if not posiciones:
+        return {}
+    overrides_texto = get_fecha_anuencia_overrides_texto_map()
+    return {pos: (pos in overrides_texto) for pos in posiciones}
+
+
+def _get_fecha_vacancia_bulk_map(posiciones):
+    """
+    ``fecha_vacancia`` real de MOV_POS (calculada por el SP de ZAFIRO
+    ``sp_obtener_todas_vacancias``, ver ``MovPosDetalleView``) para un
+    conjunto de posiciones — SIN override ni baseline del Excel, a
+    diferencia de ``fecha_anuencia``: el Excel tiene errores conocidos en su
+    columna "Fecha que se genera la vacante", así que Plantilla Detalle debe
+    mostrar SIEMPRE este valor calculado, idéntico al que ya muestra
+    Mov. Posiciones en su columna "Fecha de Vacancia" (mismo criterio de
+    "ocupada" — se pone en blanco igual que allá). Devuelve
+    ``{posicion: 'YYYY-MM-DD'|""}``.
+    """
+    if not posiciones:
+        return {}
+
+    sub_ids = cache.get("latest_movpos_sub_ids")
+    if sub_ids is None:
+        with connection.cursor() as cursor:
+            cursor.execute(LATEST_MOVPOS_RAW_SQL)
+            sub_ids = [row[0] for row in cursor.fetchall() if row[0]]
+        cache.set("latest_movpos_sub_ids", sub_ids, 600)
+
+    posiciones_ocupadas = cache.get("mov_pos_ocupadas_set")
+    if posiciones_ocupadas is None:
+        with connection.cursor() as cursor:
+            cursor.execute(OCUPADAS_RAW_SQL)
+            posiciones_ocupadas = set(row[0] for row in cursor.fetchall() if row[0])
+        cache.set("mov_pos_ocupadas_set", posiciones_ocupadas, 600)
+
+    qs = MovPos.objects.filter(id__in=sub_ids, no_pos_actual__in=list(posiciones))
+
+    mapa = {}
+    for pos, fecha in qs.values_list("no_pos_actual", "fecha_vacancia"):
+        if pos in posiciones_ocupadas or not fecha:
+            mapa[pos] = ""
+        else:
+            mapa[pos] = str(fecha).split(" ")[0].split("T")[0]
+    return mapa
+
+
+def _get_mov_pos_id_bulk_map(posiciones):
+    """
+    ``{posicion: mov_pos_id}`` — id (PK) de la fila MÁS RECIENTE de MOV_POS
+    para cada posición (misma resolución "latest" que
+    ``_get_fecha_vacancia_bulk_map``). Plantilla Detalle lo necesita para
+    abrir el modal de Detalle de Vacancia (``VacanciaDetalleModal``, mismo
+    componente que ya usa Mov. Posiciones) al hacer clic en "Fecha que se
+    genera la vacante" — ``MovPosVacanciaDetalleView`` exige el id de ESE
+    renglón específico de MOV_POS (categoria_vacancia, id_registro_desicivo,
+    tuvo_insubsistencia son campos por-renglón, no derivables solo de la
+    posición).
+    """
+    if not posiciones:
+        return {}
+
+    sub_ids = cache.get("latest_movpos_sub_ids")
+    if sub_ids is None:
+        with connection.cursor() as cursor:
+            cursor.execute(LATEST_MOVPOS_RAW_SQL)
+            sub_ids = [row[0] for row in cursor.fetchall() if row[0]]
+        cache.set("latest_movpos_sub_ids", sub_ids, 600)
+
+    qs = MovPos.objects.filter(id__in=sub_ids, no_pos_actual__in=list(posiciones))
+    return dict(qs.values_list("no_pos_actual", "id"))
 
 
 def populate_movpos_occupant_details(resultados, posiciones_ocupadas):
@@ -1414,10 +1518,14 @@ class EmpleadosCompletosActivosDetalleView(APIView):
                 )
                 resultados = list(queryset.values())
 
-                # Inyectar código federal + columnas quincenal + fecha_anuencia
+                # Inyectar código federal + columnas quincenal + fecha_anuencia + fecha_vacancia
                 mapa_codigos = _get_mapa_codigos()
                 mapa_quincenal = _get_mapa_quincenal()
-                mapa_fa = _get_fecha_anuencia_bulk_map([r.get("posicion", "") for r in resultados])
+                _posiciones = [r.get("posicion", "") for r in resultados]
+                mapa_fa = _get_fecha_anuencia_bulk_map(_posiciones)
+                mapa_fa_override = _get_fecha_anuencia_override_map(_posiciones)
+                mapa_fv = _get_fecha_vacancia_bulk_map(_posiciones)
+                mapa_mov_id = _get_mov_pos_id_bulk_map(_posiciones)
                 _COLS_QUINCENAL = sorted(COLUMNAS_QUINCENAL_VALIDAS - {"fecha_anuencia_detalle"})
                 for r in resultados:
                     pos = r.get("posicion", "")
@@ -1426,6 +1534,17 @@ class EmpleadosCompletosActivosDetalleView(APIView):
                     for col in _COLS_QUINCENAL:
                         r[col] = custom.get(col, "")
                     r["fecha_anuencia_detalle"] = mapa_fa.get(pos, "")
+                    # Resalta en azul la celda si tiene un override manual
+                    # activo — mismo criterio que Mov. Posiciones.
+                    r["fecha_anuencia_detalle_override"] = mapa_fa_override.get(pos, False)
+                    # "Fecha que se genera la vacante": SIEMPRE la calculada
+                    # (fecha_vacancia de MOV_POS), nunca la del Excel — ver
+                    # docstring de _get_fecha_vacancia_bulk_map.
+                    r["fecha_genera_vacante"] = mapa_fv.get(pos, "")
+                    # id de MOV_POS para abrir el modal de Detalle de Vacancia
+                    # (VacanciaDetalleModal, mismo que Mov. Posiciones).
+                    r["mov_pos_id"] = mapa_mov_id.get(pos)
+                    _completar_aduana_row(r)
 
                 cache.set(cache_key, resultados, 300)
                 return Response(resultados, status=status.HTTP_200_OK)
@@ -1452,10 +1571,14 @@ class EmpleadosCompletosActivosDetalleView(APIView):
             # 3. Serializar directamente
             resultados = list(queryset.values())
 
-            # Inyectar código federal + columnas quincenal + fecha_anuencia
+            # Inyectar código federal + columnas quincenal + fecha_anuencia + fecha_vacancia
             mapa_codigos = _get_mapa_codigos()
             mapa_quincenal = _get_mapa_quincenal()
-            mapa_fa = _get_fecha_anuencia_bulk_map([r.get("posicion", "") for r in resultados])
+            _posiciones = [r.get("posicion", "") for r in resultados]
+            mapa_fa = _get_fecha_anuencia_bulk_map(_posiciones)
+            mapa_fa_override = _get_fecha_anuencia_override_map(_posiciones)
+            mapa_fv = _get_fecha_vacancia_bulk_map(_posiciones)
+            mapa_mov_id = _get_mov_pos_id_bulk_map(_posiciones)
             _COLS_QUINCENAL = sorted(COLUMNAS_QUINCENAL_VALIDAS - {"fecha_anuencia_detalle"})
             for r in resultados:
                 pos = r.get("posicion", "")
@@ -1464,6 +1587,17 @@ class EmpleadosCompletosActivosDetalleView(APIView):
                 for col in _COLS_QUINCENAL:
                     r[col] = custom.get(col, "")
                 r["fecha_anuencia_detalle"] = mapa_fa.get(pos, "")
+                # Resalta en azul la celda si tiene un override manual
+                # activo — mismo criterio que Mov. Posiciones.
+                r["fecha_anuencia_detalle_override"] = mapa_fa_override.get(pos, False)
+                # "Fecha que se genera la vacante": SIEMPRE la calculada
+                # (fecha_vacancia de MOV_POS), nunca la del Excel — ver
+                # docstring de _get_fecha_vacancia_bulk_map.
+                r["fecha_genera_vacante"] = mapa_fv.get(pos, "")
+                # id de MOV_POS para abrir el modal de Detalle de Vacancia
+                # (VacanciaDetalleModal, mismo que Mov. Posiciones).
+                r["mov_pos_id"] = mapa_mov_id.get(pos)
+                _completar_aduana_row(r)
 
             cache.set(cache_key, resultados, 1200)
             return Response(resultados, status=status.HTTP_200_OK)
@@ -1702,17 +1836,39 @@ def _completar_rango_excel(rango, tipo_personal):
 
 
 def _aplicar_mapeos_detalle_excel(rows):
-    """Aplica in-place los mapeos de Partida/Tipo de Contratación/Rango a
-    filas de EMPLEADOS_COMPLETOS_SIG antes de generar el Excel — para que la
-    descarga (con o sin fotos) siempre coincida con lo que se ve en pantalla
-    (ver mismas funciones en PlantillaDetalleTab.jsx)."""
+    """Aplica in-place los mapeos de Partida/Tipo de Contratación/Rango/Aduana
+    y la inyección de Código/columnas quincenal/Fecha de Anuencia/Fecha de
+    Vacancia a filas de EMPLEADOS_COMPLETOS_SIG antes de generar el Excel —
+    para que la descarga (con o sin fotos) siempre coincida con lo que se ve
+    en pantalla (ver mismas funciones en PlantillaDetalleTab.jsx y la
+    inyección equivalente en EmpleadosCompletosActivosDetalleView). Código,
+    quincenal, Fecha de Anuencia y Fecha de Vacancia NO son columnas reales
+    de EMPLEADOS_COMPLETOS_SIG — antes de esto, incluirlas en un export
+    producía celdas vacías."""
+    posiciones = [r.get("posicion", "") for r in rows]
+    mapa_codigos = _get_mapa_codigos()
+    mapa_quincenal = _get_mapa_quincenal()
+    mapa_fa = _get_fecha_anuencia_bulk_map(posiciones)
+    mapa_fv = _get_fecha_vacancia_bulk_map(posiciones)
+    cols_quincenal = sorted(COLUMNAS_QUINCENAL_VALIDAS - {"fecha_anuencia_detalle"})
+
     for r in rows:
+        pos = r.get("posicion", "")
         if "partida" in r:
-            r["partida"] = _mapear_partida_excel(r.get("partida"), r.get("posicion"))
+            r["partida"] = _mapear_partida_excel(r.get("partida"), pos)
         if "tipo_de_contratacion" in r:
             r["tipo_de_contratacion"] = _mapear_tipo_contratacion_excel(r.get("tipo_de_contratacion"))
         if "rango" in r:
             r["rango"] = _completar_rango_excel(r.get("rango"), r.get("tipo_de_personal_sedena_semar"))
+        if "tipo_de_aduana" in r or "dg_o_aduana_compactada" in r:
+            _completar_aduana_row(r)
+
+        r["codigo"] = mapa_codigos.get(pos, "")
+        custom = mapa_quincenal.get(pos, {})
+        for col in cols_quincenal:
+            r[col] = custom.get(col, "")
+        r["fecha_anuencia_detalle"] = mapa_fa.get(pos, "")
+        r["fecha_genera_vacante"] = mapa_fv.get(pos, "")
     return rows
 
 
@@ -6321,6 +6477,119 @@ class RcCatCodPresupuestalViewSet(AuditedViewSetMixin, viewsets.ModelViewSet):
         )
         self.check_object_permissions(self.request, obj)
         return obj
+
+
+def _pivotar_correccion_posicion(qs):
+    """Pivota filas (posicion, columna, valor) de CatCorreccionPosicion a un
+    renglón por posición con una key por columna — para el tab "Catálogos"
+    del frontend (edición fila-única, no clave-valor cruda)."""
+    pivot = {}
+    for r in qs.values("posicion", "columna", "valor", "modificado_por", "fecha_modificacion"):
+        entry = pivot.setdefault(
+            r["posicion"],
+            {"posicion": r["posicion"], **{c: "" for c in COLUMNAS_CORRECCION_VALIDAS},
+             "modificado_por": "", "fecha_modificacion": None},
+        )
+        entry[r["columna"]] = r["valor"] or ""
+        if entry["fecha_modificacion"] is None or (
+            r["fecha_modificacion"] and r["fecha_modificacion"] > entry["fecha_modificacion"]
+        ):
+            entry["fecha_modificacion"] = r["fecha_modificacion"]
+            entry["modificado_por"] = r["modificado_por"] or ""
+    return sorted(pivot.values(), key=lambda x: x["posicion"])
+
+
+def _invalidar_cache_correccion_posicion():
+    cache.delete_many([f"cat_correccion_posicion_mapa_{c}" for c in COLUMNAS_CORRECCION_VALIDAS])
+    _invalidar_cache_detalle_plantilla()
+
+
+class CatCorreccionPosicionListView(APIView):
+    """
+    CRUD (vista "ancha": un renglón por posición) del catálogo
+    cat_correccion_posicion — Código, Tipo de Aduana, DG de Aduana
+    compactada. Pivota la tabla clave-valor real (ver
+    `_pivotar_correccion_posicion`) para que editarlo desde el tab
+    "Catálogos" sea igual de simple que los demás catálogos, sin exponer el
+    diseño clave-valor interno. Ej. de uso real: una posición se realinea a
+    otra unidad administrativa y hay que corregir su Tipo de
+    Aduana/DG de Aduana compactada a mano.
+
+    Solo lectura para el resto del sistema (Plantilla Detalle la consulta
+    como fallback vía `_get_mapa_correccion`, nunca la escribe) — este es el
+    único punto de edición.
+    """
+
+    view_permission = "authentication.view_plantilla_catalogos"
+
+    def get(self, request):
+        qs = CatCorreccionPosicion.objects.filter(columna__in=COLUMNAS_CORRECCION_VALIDAS)
+        return Response(_pivotar_correccion_posicion(qs))
+
+    def post(self, request):
+        posicion = str(request.data.get("posicion", "")).strip()
+        if not posicion:
+            return Response({"detail": "posicion es requerida."}, status=status.HTTP_400_BAD_REQUEST)
+        if CatCorreccionPosicion.objects.filter(posicion=posicion, columna__in=COLUMNAS_CORRECCION_VALIDAS).exists():
+            return Response(
+                {"detail": f"La posición '{posicion}' ya existe en el catálogo."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        for columna in COLUMNAS_CORRECCION_VALIDAS:
+            valor = str(request.data.get(columna) or "").strip()
+            if valor:
+                CatCorreccionPosicion.objects.create(
+                    posicion=posicion, columna=columna, valor=valor, modificado_por=request.user.username,
+                )
+
+        _invalidar_cache_correccion_posicion()
+        fila = _pivotar_correccion_posicion(
+            CatCorreccionPosicion.objects.filter(posicion=posicion, columna__in=COLUMNAS_CORRECCION_VALIDAS)
+        )
+        return Response(
+            fila[0] if fila else {"posicion": posicion, **{c: "" for c in COLUMNAS_CORRECCION_VALIDAS}},
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class CatCorreccionPosicionDetailView(APIView):
+    """PUT/DELETE de una posición del catálogo — ver CatCorreccionPosicionListView."""
+
+    view_permission = "authentication.view_plantilla_catalogos"
+
+    def put(self, request, posicion):
+        existe = CatCorreccionPosicion.objects.filter(
+            posicion=posicion, columna__in=COLUMNAS_CORRECCION_VALIDAS
+        ).exists()
+        if not existe:
+            return Response(
+                {"detail": f"La posición '{posicion}' no existe en el catálogo."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        for columna in COLUMNAS_CORRECCION_VALIDAS:
+            if columna not in request.data:
+                continue
+            valor = str(request.data.get(columna) or "").strip()
+            if valor:
+                CatCorreccionPosicion.objects.update_or_create(
+                    posicion=posicion, columna=columna,
+                    defaults={"valor": valor, "modificado_por": request.user.username},
+                )
+            else:
+                CatCorreccionPosicion.objects.filter(posicion=posicion, columna=columna).delete()
+
+        _invalidar_cache_correccion_posicion()
+        fila = _pivotar_correccion_posicion(
+            CatCorreccionPosicion.objects.filter(posicion=posicion, columna__in=COLUMNAS_CORRECCION_VALIDAS)
+        )
+        return Response(fila[0] if fila else {"posicion": posicion, **{c: "" for c in COLUMNAS_CORRECCION_VALIDAS}})
+
+    def delete(self, request, posicion):
+        CatCorreccionPosicion.objects.filter(posicion=posicion, columna__in=COLUMNAS_CORRECCION_VALIDAS).delete()
+        _invalidar_cache_correccion_posicion()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class OrganigramaAnamViewSet(AuditedViewSetMixin, viewsets.ModelViewSet):

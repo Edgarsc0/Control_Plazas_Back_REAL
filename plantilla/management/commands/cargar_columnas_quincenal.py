@@ -3,11 +3,11 @@ Management command: cargar_columnas_quincenal
 ==============================================
 Pobla (recarga completa) el BASELINE de referencia de
 `tbl_columnas_plantilla_quincenal` a partir del archivo Excel de referencia
-— mismo archivo y mismo patrón que `cargar_codigos` (columna 'Código', col
-AC), pero para las 11 columnas editables AL–AV (Fecha de Anuencia, Oficios
-de Autorización SHCP, Plazas eventuales..., Candidato, Reportada, Fecha que
-se genera la vacante, CAP ANUAL, CAP MENSUAL, Observaciones - Plantillas DO,
-Observaciones - Proyectos y Alineaciones, Año de Vacancia).
+— mismo archivo y mismo patrón que `cargar_correcciones_plantilla`, pero
+para las 10 columnas editables AL–AV (Fecha de Anuencia, Oficios de
+Autorización SHCP, Plazas eventuales..., Candidato, Reportada, CAP ANUAL,
+CAP MENSUAL, Observaciones - Plantillas DO, Observaciones - Proyectos y
+Alineaciones, Año de Vacancia).
 
 Uso:
     python manage.py cargar_columnas_quincenal
@@ -31,6 +31,13 @@ Caso especial 'fecha_anuencia_detalle' (columna AL): la mayoría de filas
 traen solo '-' o vacío en el Excel — esas filas NO se cargan (así el sistema
 de Fecha de Anuencia cae a su cálculo automático de fecha_vacancia + 30 días).
 Solo se carga cuando el Excel trae una fecha real parseable.
+
+NO se carga "Fecha que se genera la vacante" (columna AQ, índice 42): el
+Excel tiene errores conocidos en esa columna — el sistema debe priorizar
+SIEMPRE la fecha calculada (`fecha_vacancia` de MOV_POS, vía el SP de ZAFIRO),
+unificada con la misma columna que ya muestra Mov. Posiciones — ver
+`plantilla.views._get_fecha_vacancia_bulk_map`. Deliberadamente ausente de
+COLUMNAS_EXCEL, no solo sin cargar.
 """
 
 import re
@@ -42,20 +49,20 @@ from django.db import transaction
 
 EXCEL_DEFAULT = Path(__file__).resolve().parents[3] / "plantilla_con_columna_codigo.xlsx"
 
-# Orden fijo de columnas AL(0-based 37) .. AV(0-based 47) del Excel de referencia.
-COLUMNAS_EXCEL_AL_AV = [
-    "fecha_anuencia_detalle",
-    "oficios_autorizacion_shcp",
-    "plazas_eventuales_autorizacion_2026",
-    "candidato",
-    "reportada",
-    "fecha_genera_vacante",
-    "cap_anual",
-    "cap_mensual",
-    "observaciones_plantillas_do",
-    "observaciones_proyectos_alineaciones",
-    "anno_vacancia",
-]
+# {columna en tbl_columnas_plantilla_quincenal: índice 0-based en el Excel de
+# referencia}. AL=37 .. AV=47, salteando AQ=42 (ver docstring del módulo).
+COLUMNAS_EXCEL = {
+    "fecha_anuencia_detalle": 37,
+    "oficios_autorizacion_shcp": 38,
+    "plazas_eventuales_autorizacion_2026": 39,
+    "candidato": 40,
+    "reportada": 41,
+    "cap_anual": 43,
+    "cap_mensual": 44,
+    "observaciones_plantillas_do": 45,
+    "observaciones_proyectos_alineaciones": 46,
+    "anno_vacancia": 47,
+}
 
 _FECHA_ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -110,25 +117,27 @@ class Command(BaseCommand):
 
         self.stdout.write(f"Leyendo {excel_path} ...")
 
+        columnas_ordenadas = sorted(COLUMNAS_EXCEL.values())
         try:
-            # col 0 = Posición (A), cols 37..47 (0-based) = AL..AV — por
-            # posición, no por nombre de encabezado (ver docstring del módulo).
+            # col 0 = Posición (A), el resto por posición (no por nombre de
+            # encabezado, ver docstring del módulo).
             # keep_default_na=False: pandas por default trata como NaN varios
             # textos literales (p.ej. 'N/A', 'NA', 'NULL', 'None') — la
             # columna "Plazas eventuales..." SÍ trae 'N/A' como valor real y
             # con el default se perdía silenciosamente (confirmado: la celda
             # cruda vale 'N/A' vía openpyxl, pero pandas la leía como NaN).
-            df = pd.read_excel(excel_path, header=0, usecols=[0, *range(37, 48)], keep_default_na=False)
+            df = pd.read_excel(excel_path, header=0, usecols=[0, *columnas_ordenadas], keep_default_na=False)
         except Exception as exc:
             raise CommandError(f"Error al leer el Excel: {exc}")
 
-        if df.shape[1] != 12:
+        if df.shape[1] != len(columnas_ordenadas) + 1:
             raise CommandError(
-                f"Se esperaban 12 columnas (Posición + AL..AV), se leyeron {df.shape[1]}. "
-                "¿Cambió la estructura del Excel?"
+                f"Se esperaban {len(columnas_ordenadas) + 1} columnas (Posición + {list(COLUMNAS_EXCEL)}), "
+                f"se leyeron {df.shape[1]}. ¿Cambió la estructura del Excel?"
             )
 
-        df.columns = ["posicion", *COLUMNAS_EXCEL_AL_AV]
+        nombre_por_indice = {idx: nombre for nombre, idx in COLUMNAS_EXCEL.items()}
+        df.columns = ["posicion", *[nombre_por_indice[idx] for idx in columnas_ordenadas]]
         df["posicion"] = df["posicion"].astype(str).str.strip()
         df = df[df["posicion"] != ""]
 
@@ -137,7 +146,7 @@ class Command(BaseCommand):
         nuevas = []
         for _, fila in df.iterrows():
             posicion = fila["posicion"]
-            for columna in COLUMNAS_EXCEL_AL_AV:
+            for columna in COLUMNAS_EXCEL:
                 valor_crudo = fila[columna]
 
                 if columna == "fecha_anuencia_detalle":
