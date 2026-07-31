@@ -1482,17 +1482,22 @@ COLUMNAS_QUINCENAL_VALIDAS = {
     "solicitante",                               # unidad + oficio que solicita ocupar la vacante
     "nombre_candidato",                          # nombre del candidato propuesto
     "motivo_solicitud",                          # motivo de la solicitud (Promoción, Ingreso, etc.)
+    "marca_no_disponible",                       # RFC='No Disponible' en el Excel (ej. plazas PASEM que no se pueden usar)
 }
 
 REPORTADA_CHOICES = ["Si", "No"]
 
-# Subconjunto de COLUMNAS_QUINCENAL_VALIDAS que captura datos de un candidato
-# para una plaza VACANTE que fue solicitada (ver EmpleadosCompletosActivosDetalleView
-# y _aplicar_mapeos_detalle_excel): se blanquean en cada lectura si la posición
-# ya está ocupada (mismo criterio mov_pos_ocupadas_set que fecha_genera_vacante),
-# para que nunca se muestre el dato de un candidato "viejo" una vez que la
-# plaza ya se llenó — sin que ningún job tenga que enterarse o limpiar nada.
-COLUMNAS_SOLICITUD_VACANTE = {"solicitante", "nombre_candidato", "motivo_solicitud"}
+# Subconjunto de COLUMNAS_QUINCENAL_VALIDAS que solo tiene sentido mientras la
+# posición siga VACANTE — datos de un candidato solicitado (solicitante/
+# nombre_candidato/motivo_solicitud) o la marca de "No Disponible" (RFC del
+# Excel). Se blanquean en cada lectura si la posición ya está ocupada (ver
+# EmpleadosCompletosActivosDetalleView y _aplicar_mapeos_detalle_excel; mismo
+# criterio mov_pos_ocupadas_set que fecha_genera_vacante), para que nunca se
+# muestre un dato "viejo" una vez que la plaza ya se llenó — sin que ningún
+# job tenga que enterarse o limpiar nada en el momento de la lectura (aparte
+# está el borrado PERMANENTE vía _limpiar_solicitudes_candidato_ocupadas en
+# tasks.py, que corre cada 30 min dentro de importar_zafiro).
+COLUMNAS_SOLICITUD_VACANTE = {"solicitante", "nombre_candidato", "motivo_solicitud", "marca_no_disponible"}
 
 # "Fecha de Anuencia" (columna AL) no siempre es una fecha en el Excel: además
 # de fechas reales y "-" (sin dato → cae al cálculo automático), existen estas

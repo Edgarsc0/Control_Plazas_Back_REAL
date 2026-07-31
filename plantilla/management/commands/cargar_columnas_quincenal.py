@@ -43,13 +43,15 @@ COLUMNAS_EXCEL, no solo sin cargar.
 
 Columnas de solicitud (Solicitante/Nombre del candidato/Motivo de solicitud):
 en el Excel, cuando alguien solicita ocupar una plaza vacante, el capturista
-escribe esos datos SOBRE las columnas RFC/CURP/Nombres/Motivo (RFC solo
-lleva el literal "Solicitada"/"No Disponible" — confirmado 100% redundante
-con CURP/Nombres, ver COLUMNAS_SOLICITUD_EXCEL — así que no se carga). Estas
-3 solo se cargan para filas con Estado Nómina vacío (vacante); en una
-posición ocupada, esas mismas columnas del Excel traen datos REALES del
-empleado, no de un candidato solicitado, así que cargarlas ahí sería
-incorrecto — ver ESTADO_NOMINA_EXCEL_IDX.
+escribe esos datos SOBRE las columnas RFC/CURP/Nombres/Motivo. CURP/Nombres/
+Motivo se cargan tal cual (ver COLUMNAS_SOLICITUD_EXCEL); RFC no aporta un
+dato de candidato en sí (solo trae el literal "Solicitada"/"No Disponible"),
+pero SÍ distingue entre una solicitud real y una plaza marcada "No
+Disponible" (ej. PASEM que no se puede usar) — ver marca_no_disponible más
+abajo. Estas 4 columnas solo se cargan para filas con Estado Nómina
+"Vacante"; en una posición ocupada, esas mismas columnas del Excel traen
+datos REALES del empleado, no de un candidato solicitado, así que cargarlas
+ahí sería incorrecto — ver ESTADO_NOMINA_EXCEL_IDX.
 """
 
 import re
@@ -77,10 +79,13 @@ COLUMNAS_EXCEL = {
 }
 
 # Columnas de solicitud de candidato (ver docstring del módulo) — se leen de
-# CURP/Nombres/Motivo (RFC, índice 3, se omite: solo trae el literal
-# "Solicitada"/"No Disponible", sin dato adicional) y solo se cargan cuando
-# Estado Nómina (índice 1) viene vacío en esa fila.
+# CURP/Nombres/Motivo y solo se cargan cuando Estado Nómina (índice 1) viene
+# "Vacante" en esa fila. RFC (índice 3) NO aporta dato de candidato (solo
+# trae el literal "Solicitada"/"No Disponible", redundante con CURP/Nombres
+# para saber SI hay solicitud), pero SÍ distingue "No Disponible" (plazas
+# PASEM que no se pueden usar) de una solicitud real — ver marca_no_disponible.
 ESTADO_NOMINA_EXCEL_IDX = 1
+RFC_EXCEL_IDX = 3
 COLUMNAS_SOLICITUD_EXCEL = {
     "solicitante": 4,        # CURP: unidad + oficio que solicita la plaza
     "nombre_candidato": 5,   # Nombres: nombre del candidato propuesto
@@ -141,7 +146,7 @@ class Command(BaseCommand):
         self.stdout.write(f"Leyendo {excel_path} ...")
 
         columnas_ordenadas = sorted(COLUMNAS_EXCEL.values())
-        extra_idx = sorted({ESTADO_NOMINA_EXCEL_IDX, *COLUMNAS_SOLICITUD_EXCEL.values()})
+        extra_idx = sorted({ESTADO_NOMINA_EXCEL_IDX, RFC_EXCEL_IDX, *COLUMNAS_SOLICITUD_EXCEL.values()})
         todas_idx = sorted({0, *extra_idx, *columnas_ordenadas})
         try:
             # col 0 = Posición (A), el resto por posición (no por nombre de
@@ -161,7 +166,7 @@ class Command(BaseCommand):
                 f"¿Cambió la estructura del Excel?"
             )
 
-        nombre_por_indice = {0: "posicion", ESTADO_NOMINA_EXCEL_IDX: "estado_nomina_raw"}
+        nombre_por_indice = {0: "posicion", ESTADO_NOMINA_EXCEL_IDX: "estado_nomina_raw", RFC_EXCEL_IDX: "rfc_raw"}
         nombre_por_indice.update({idx: nombre for nombre, idx in COLUMNAS_EXCEL.items()})
         nombre_por_indice.update({idx: nombre for nombre, idx in COLUMNAS_SOLICITUD_EXCEL.items()})
         df.columns = [nombre_por_indice[idx] for idx in todas_idx]
@@ -210,6 +215,14 @@ class Command(BaseCommand):
                     if not valor:
                         continue
                     nuevas.append(TblColumnasPlantillaQuincenal(posicion=posicion, columna=columna, valor=valor))
+
+                # "No Disponible" (ej. plazas PASEM que no se pueden usar):
+                # marca distinta de una solicitud real, aunque ambas comparten
+                # el mismo Estado Nómina="Vacante" — ver COLUMNAS_SOLICITUD_EXCEL.
+                if str(fila["rfc_raw"]).strip().upper() == "NO DISPONIBLE":
+                    nuevas.append(TblColumnasPlantillaQuincenal(
+                        posicion=posicion, columna="marca_no_disponible", valor="No Disponible",
+                    ))
 
         with transaction.atomic():
             TblColumnasPlantillaQuincenal.objects.all().delete()

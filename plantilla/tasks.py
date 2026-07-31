@@ -1162,6 +1162,98 @@ def _calcular_y_actualizar_vacancias(bitacora):
         )
 
 
+# Mismo criterio de "ocupada" que plantilla.views.OCUPADAS_RAW_SQL —
+# duplicado aquí (en vez de importarlo) para no crear un import a nivel de
+# módulo entre tasks.py y views.py (views.py ya importa tasks.importar_zafiro,
+# aunque de forma diferida dentro de una función).
+_OCUPADAS_RAW_SQL_TASKS = """
+    SELECT DISTINCT e.`Posición`
+    FROM EMPLEADOS_COMPLETOS_SIG e
+    WHERE (e.`Id Empleado` IS NOT NULL AND TRIM(e.`Id Empleado`) <> '')
+       OR (e.`Nombres` IS NOT NULL AND TRIM(e.`Nombres`) <> '');
+"""
+
+
+def _limpiar_solicitudes_candidato_ocupadas(bitacora=None):
+    """
+    Borra PERMANENTEMENTE los datos de solicitud de candidato de cualquier
+    posición que ya se detectó ocupada — no solo los oculta en la lectura
+    (eso ya lo hace `EmpleadosCompletosActivosDetalleView`/
+    `_aplicar_mapeos_detalle_excel` en cada request, ver
+    `COLUMNAS_SOLICITUD_VACANTE` en models.py). Sin este borrado, si esa
+    misma posición volviera a quedar vacante más adelante, el dato viejo de
+    una solicitud ya resuelta reaparecería sin corresponder a la vacante
+    actual.
+
+    Dos lugares distintos a limpiar:
+    - `TblColumnasPlantillaQuincenal` (baseline cargado del Excel, sin
+      auditoría que preservar — ver cargar_columnas_quincenal): se BORRA el
+      renglón.
+    - `CeldaOverride` (tabla=PLANTILLA_QUINCENAL, ediciones manuales de un
+      usuario desde la pantalla): se DESACTIVA (`activo=False`), igual que
+      cualquier otra edición manual que se revierte en el sistema — nunca se
+      borra físicamente un registro de auditoría, solo se deja de aplicar.
+
+    Se llama dentro de `importar_zafiro` (corre cada 30 min), justo después
+    de invalidar el cache de ocupación, para operar siempre sobre el
+    resultado más fresco posible del import recién terminado.
+    """
+    from .celda_override import TABLA_QUINCENAL, compute_clave_hash
+    from .models import CeldaOverride, COLUMNAS_SOLICITUD_VACANTE, TblColumnasPlantillaQuincenal
+
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(_OCUPADAS_RAW_SQL_TASKS)
+            posiciones_ocupadas = set(row[0] for row in cursor.fetchall() if row[0])
+
+        if not posiciones_ocupadas:
+            return
+
+        # Universo a revisar: solo posiciones que HOY tienen algún dato de
+        # solicitud guardado (baseline u override activo) — evita calcular un
+        # hash por cada una de las miles de posiciones ocupadas.
+        posiciones_con_solicitud = set(
+            TblColumnasPlantillaQuincenal.objects.filter(
+                columna__in=COLUMNAS_SOLICITUD_VACANTE
+            ).values_list("posicion", flat=True)
+        )
+        overrides_activos = CeldaOverride.objects.filter(
+            tabla=TABLA_QUINCENAL, columna__in=COLUMNAS_SOLICITUD_VACANTE, activo=True
+        )
+        for clave_negocio in overrides_activos.values_list("clave_negocio", flat=True):
+            pos = clave_negocio.get("posicion") if clave_negocio else None
+            if pos:
+                posiciones_con_solicitud.add(pos)
+
+        posiciones_a_limpiar = posiciones_con_solicitud & posiciones_ocupadas
+        if not posiciones_a_limpiar:
+            if bitacora is not None:
+                _append_log(bitacora, "Solicitudes de candidato: nada que limpiar (ninguna posición con datos de solicitud está ocupada).")
+            return
+
+        borrados_baseline, _ = TblColumnasPlantillaQuincenal.objects.filter(
+            columna__in=COLUMNAS_SOLICITUD_VACANTE, posicion__in=posiciones_a_limpiar
+        ).delete()
+
+        hashes = [compute_clave_hash({"posicion": p}) for p in posiciones_a_limpiar]
+        overrides_desactivados = CeldaOverride.objects.filter(
+            tabla=TABLA_QUINCENAL,
+            columna__in=COLUMNAS_SOLICITUD_VACANTE,
+            activo=True,
+            clave_negocio_hash__in=hashes,
+        ).update(activo=False)
+
+        mensaje = (
+            f"Solicitudes de candidato limpiadas en {len(posiciones_a_limpiar)} posición(es) ya ocupada(s): "
+            f"{borrados_baseline} renglón(es) de baseline borrados, {overrides_desactivados} override(s) manual(es) desactivado(s)."
+        )
+        _append_log(bitacora, mensaje)
+        logger.info(mensaje)
+    except Exception as e:
+        _append_log(bitacora, f"Error limpiando solicitudes de candidato: {e}", is_error=True)
+        logger.error("Error en _limpiar_solicitudes_candidato_ocupadas: %s", e, exc_info=True)
+
+
 def _invalidar_cache_ocupacion_vacancia(bitacora=None):
     """
     Invalida cuanto antes los caches que determinan "¿está esta posición
@@ -1456,6 +1548,9 @@ def importar_zafiro(self):
         # Invalida YA los caches de ocupación/fecha de vacancia — no esperar
         # a que termine toda la tarea (ver _invalidar_cache_ocupacion_vacancia).
         _invalidar_cache_ocupacion_vacancia(bitacora)
+
+        # ── 8.5. Borrar permanentemente solicitudes de candidato ya resueltas ─
+        _limpiar_solicitudes_candidato_ocupadas(bitacora)
 
         # ── 9. Sincronizar cat_nivel_jerarquico_plaza desde MOV_POS ────────
         _sincronizar_plazas_nivel_jerarquico(bitacora)
