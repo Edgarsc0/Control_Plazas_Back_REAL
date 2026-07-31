@@ -421,6 +421,20 @@ def apply_advanced_filters(
         for f in model._meta.get_fields()
         if f.get_internal_type() in ("DateField", "DateTimeField")
     }
+    # Campos numéricos "reales" del modelo — la mayoría de las tablas
+    # importadas (MovPos, etc.) guardan hasta los montos como CharField, así
+    # que las condiciones >, <, >=, <= solo se ofrecen (front) y aplican
+    # (aquí) donde el dato de verdad está tipado como número; el resto sigue
+    # comparándose como texto.
+    numeric_fields = {
+        f.name
+        for f in model._meta.get_fields()
+        if f.get_internal_type() in (
+            "IntegerField", "SmallIntegerField", "BigIntegerField",
+            "PositiveIntegerField", "PositiveSmallIntegerField", "PositiveBigIntegerField",
+            "FloatField", "DecimalField",
+        )
+    }
     datetime_fields = {
         f.name
         for f in model._meta.get_fields()
@@ -439,6 +453,16 @@ def apply_advanced_filters(
         "before_or_equal": "lte",
         "after_or_equal": "gte",
     }
+    number_lookup_by_condition = {
+        "greater_than": "gt",
+        "less_than": "lt",
+        "greater_or_equal": "gte",
+        "less_or_equal": "lte",
+    }
+    # Unifica fecha+número para compareType=='campo': ahí el lookup Django
+    # (lt/gt/lte/gte) es el mismo sin importar el tipo de campo, así que da
+    # igual si el front mandó una u otra familia de claves de condición.
+    ORDERING_LOOKUP_BY_CONDITION = {**date_lookup_by_condition, **number_lookup_by_condition}
     text_lookup_by_condition = {
         "contains": ("icontains", False),
         "not_contains": ("icontains", True),
@@ -524,14 +548,9 @@ def apply_advanced_filters(
                 return Q(**{target_field: f_expr})
             if condition == "not_equals":
                 return ~Q(**{target_field: f_expr})
-            if condition == "before":
-                return Q(**{f"{target_field}__lt": f_expr})
-            if condition == "after":
-                return Q(**{f"{target_field}__gt": f_expr})
-            if condition == "before_or_equal":
-                return Q(**{f"{target_field}__lte": f_expr})
-            if condition == "after_or_equal":
-                return Q(**{f"{target_field}__gte": f_expr})
+            lookup = ORDERING_LOOKUP_BY_CONDITION.get(condition)
+            if lookup:
+                return Q(**{f"{target_field}__{lookup}": f_expr})
             return None
 
         # compare_type == 'valor'
@@ -553,6 +572,20 @@ def apply_advanced_filters(
                 # es igual a", no desaparecer por "NOT (NULL = x)" = NULL en SQL
                 # (mismo patrón que BUG-F06, aquí invertido: NULL sí debe pasar).
                 return Q(**{f"{date_target}__isnull": True}) | ~Q(**{date_target: value})
+            return None
+
+        if column in numeric_fields:
+            try:
+                numeric_value = float(value)
+            except ValueError:
+                return None
+            lookup = number_lookup_by_condition.get(condition)
+            if lookup:
+                return Q(**{f"{target_field}__{lookup}": numeric_value})
+            if condition == "equals":
+                return Q(**{target_field: numeric_value})
+            if condition == "not_equals":
+                return ~Q(**{target_field: numeric_value})
             return None
 
         if is_text and condition in text_lookup_by_condition:
