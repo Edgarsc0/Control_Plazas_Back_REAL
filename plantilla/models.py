@@ -1462,9 +1462,20 @@ COLUMNAS_QUINCENAL_VALIDAS = {
     "observaciones_plantillas_do",               # AT
     "observaciones_proyectos_alineaciones",      # AU
     "anno_vacancia",                             # AV
+    "solicitante",                               # unidad + oficio que solicita ocupar la vacante
+    "nombre_candidato",                          # nombre del candidato propuesto
+    "motivo_solicitud",                          # motivo de la solicitud (Promoción, Ingreso, etc.)
 }
 
 REPORTADA_CHOICES = ["Si", "No"]
+
+# Subconjunto de COLUMNAS_QUINCENAL_VALIDAS que captura datos de un candidato
+# para una plaza VACANTE que fue solicitada (ver EmpleadosCompletosActivosDetalleView
+# y _aplicar_mapeos_detalle_excel): se blanquean en cada lectura si la posición
+# ya está ocupada (mismo criterio mov_pos_ocupadas_set que fecha_genera_vacante),
+# para que nunca se muestre el dato de un candidato "viejo" una vez que la
+# plaza ya se llenó — sin que ningún job tenga que enterarse o limpiar nada.
+COLUMNAS_SOLICITUD_VACANTE = {"solicitante", "nombre_candidato", "motivo_solicitud"}
 
 # "Fecha de Anuencia" (columna AL) no siempre es una fecha en el Excel: además
 # de fechas reales y "-" (sin dato → cae al cálculo automático), existen estas

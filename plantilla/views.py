@@ -41,6 +41,7 @@ from .models import (
     CatNivelJerarquicoPlaza,
     CatPtoFunc,
     COLUMNAS_QUINCENAL_VALIDAS,
+    COLUMNAS_SOLICITUD_VACANTE,
     CuadroVacancia,
     DESCRIPCION_NJ_CHOICES,
     EmpleadosCompletosSig,
@@ -1017,6 +1018,24 @@ def _get_mapa_quincenal():
     return mapa
 
 
+def _get_posiciones_ocupadas_set():
+    """
+    ``set`` de posiciones actualmente ocupadas — mismo cache/criterio
+    (``mov_pos_ocupadas_set``/``OCUPADAS_RAW_SQL``) que ya usan
+    ``_get_fecha_anuencia_bulk_map``/``_get_fecha_vacancia_bulk_map``. Se
+    reutiliza para blanquear ``COLUMNAS_SOLICITUD_VACANTE`` (ver
+    ``EmpleadosCompletosActivosDetalleView``/``_aplicar_mapeos_detalle_excel``)
+    una vez que la plaza ya se ocupó.
+    """
+    posiciones_ocupadas = cache.get("mov_pos_ocupadas_set")
+    if posiciones_ocupadas is None:
+        with connection.cursor() as cursor:
+            cursor.execute(OCUPADAS_RAW_SQL)
+            posiciones_ocupadas = set(row[0] for row in cursor.fetchall() if row[0])
+        cache.set("mov_pos_ocupadas_set", posiciones_ocupadas, 600)
+    return posiciones_ocupadas
+
+
 def _get_fecha_anuencia_bulk_map(posiciones):
     """
     Calcula ``fecha_anuencia`` para un conjunto de posiciones con la MISMA
@@ -1526,6 +1545,7 @@ class EmpleadosCompletosActivosDetalleView(APIView):
                 mapa_fa_override = _get_fecha_anuencia_override_map(_posiciones)
                 mapa_fv = _get_fecha_vacancia_bulk_map(_posiciones)
                 mapa_mov_id = _get_mov_pos_id_bulk_map(_posiciones)
+                posiciones_ocupadas = _get_posiciones_ocupadas_set()
                 _COLS_QUINCENAL = sorted(COLUMNAS_QUINCENAL_VALIDAS - {"fecha_anuencia_detalle"})
                 for r in resultados:
                     pos = r.get("posicion", "")
@@ -1533,6 +1553,12 @@ class EmpleadosCompletosActivosDetalleView(APIView):
                     custom = mapa_quincenal.get(pos, {})
                     for col in _COLS_QUINCENAL:
                         r[col] = custom.get(col, "")
+                    # Datos de un candidato "solicitado" solo tienen sentido
+                    # mientras la plaza siga vacante — si ya se ocupó, se
+                    # blanquean sin importar lo que haya quedado guardado.
+                    if pos in posiciones_ocupadas:
+                        for col in COLUMNAS_SOLICITUD_VACANTE:
+                            r[col] = ""
                     r["fecha_anuencia_detalle"] = mapa_fa.get(pos, "")
                     # Resalta en azul la celda si tiene un override manual
                     # activo — mismo criterio que Mov. Posiciones.
@@ -1579,6 +1605,7 @@ class EmpleadosCompletosActivosDetalleView(APIView):
             mapa_fa_override = _get_fecha_anuencia_override_map(_posiciones)
             mapa_fv = _get_fecha_vacancia_bulk_map(_posiciones)
             mapa_mov_id = _get_mov_pos_id_bulk_map(_posiciones)
+            posiciones_ocupadas = _get_posiciones_ocupadas_set()
             _COLS_QUINCENAL = sorted(COLUMNAS_QUINCENAL_VALIDAS - {"fecha_anuencia_detalle"})
             for r in resultados:
                 pos = r.get("posicion", "")
@@ -1586,6 +1613,12 @@ class EmpleadosCompletosActivosDetalleView(APIView):
                 custom = mapa_quincenal.get(pos, {})
                 for col in _COLS_QUINCENAL:
                     r[col] = custom.get(col, "")
+                # Datos de un candidato "solicitado" solo tienen sentido
+                # mientras la plaza siga vacante — si ya se ocupó, se
+                # blanquean sin importar lo que haya quedado guardado.
+                if pos in posiciones_ocupadas:
+                    for col in COLUMNAS_SOLICITUD_VACANTE:
+                        r[col] = ""
                 r["fecha_anuencia_detalle"] = mapa_fa.get(pos, "")
                 # Resalta en azul la celda si tiene un override manual
                 # activo — mismo criterio que Mov. Posiciones.
@@ -1850,6 +1883,7 @@ def _aplicar_mapeos_detalle_excel(rows):
     mapa_quincenal = _get_mapa_quincenal()
     mapa_fa = _get_fecha_anuencia_bulk_map(posiciones)
     mapa_fv = _get_fecha_vacancia_bulk_map(posiciones)
+    posiciones_ocupadas = _get_posiciones_ocupadas_set()
     cols_quincenal = sorted(COLUMNAS_QUINCENAL_VALIDAS - {"fecha_anuencia_detalle"})
 
     for r in rows:
@@ -1867,6 +1901,12 @@ def _aplicar_mapeos_detalle_excel(rows):
         custom = mapa_quincenal.get(pos, {})
         for col in cols_quincenal:
             r[col] = custom.get(col, "")
+        # Mismo criterio que EmpleadosCompletosActivosDetalleView: el export
+        # tampoco debe mostrar un candidato "solicitado" para una plaza que ya
+        # se ocupó.
+        if pos in posiciones_ocupadas:
+            for col in COLUMNAS_SOLICITUD_VACANTE:
+                r[col] = ""
         r["fecha_anuencia_detalle"] = mapa_fa.get(pos, "")
         r["fecha_genera_vacante"] = mapa_fv.get(pos, "")
     return rows
