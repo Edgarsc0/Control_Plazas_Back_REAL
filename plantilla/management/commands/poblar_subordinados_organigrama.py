@@ -9,7 +9,13 @@ class Command(BaseCommand):
         "Calcula la columna subordinados (hijos directos por código de "
         "departamento) de ORGANIGRAMA_ANAM, corriendo la misma lógica de "
         "segmentación de determinante que organigrama_tree.build_tree, "
-        "por cada unidad_negocio."
+        "por cada unidad_negocio. El cálculo de padres usa TODAS las filas "
+        "de la unidad (hace falta el conjunto completo para resolver "
+        "correctamente el determinante), pero el resultado solo se "
+        "PERSISTE en las filas con isSIGInfo=1 (las que administra el "
+        "pipeline automático) — las filas curadas a mano en Vista "
+        "Institucional (isSIGInfo=0/NULL, nunca tocadas por el pipeline) "
+        "quedan protegidas y conservan su subordinados manual/reordenado."
     )
 
     def handle(self, *args, **options):
@@ -30,6 +36,7 @@ class Command(BaseCommand):
                     "doaf",
                     "num_posicion_gerente",
                     "posicion_director",
+                    "isSIGInfo",
                 )
             )
             if not rows:
@@ -40,15 +47,20 @@ class Command(BaseCommand):
 
             objs = []
             for row in rows:
+                if not row["isSIGInfo"]:
+                    continue
                 code = row["departamento"]
                 children = by_parent.get(code, [])
                 subordinados = ",".join(c["departamento"] for c in children)
                 objs.append(OrganigramaAnam(departamento=code, subordinados=subordinados or None))
 
+            if not objs:
+                continue
+
             OrganigramaAnam.objects.bulk_update(objs, ["subordinados"], batch_size=500)
             total_updated += len(objs)
             self.stdout.write(
-                f"unidad_negocio={unidad_negocio}: {len(objs)} departamentos actualizados"
+                f"unidad_negocio={unidad_negocio}: {len(objs)} departamentos actualizados (isSIGInfo=1)"
             )
 
         self.stdout.write(self.style.SUCCESS(f"Total actualizado: {total_updated}"))
