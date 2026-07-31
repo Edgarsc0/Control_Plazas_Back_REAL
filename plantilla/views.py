@@ -6616,6 +6616,9 @@ class OrganigramaAnamViewSet(AuditedViewSetMixin, viewsets.ModelViewSet):
     """
     queryset = OrganigramaAnam.objects.filter(isSIGInfo=False)
     lookup_field = "departamento"
+    # URL conf usa <str:pk>/ (no <str:departamento>/); sin esto DRF busca
+    # self.kwargs["departamento"] y truena con AssertionError en get_object.
+    lookup_url_kwarg = "pk"
     serializer_class = OrganigramaAnamSerializer
     # Se usa desde 2 superficies: tab Catálogos de Plantilla (tabla cruda) y
     # el botón "Editar departamento"/alta-baja de nodo en el módulo
