@@ -7,7 +7,9 @@ Pobla (recarga completa) el BASELINE de referencia de
 para las 10 columnas editables AL–AV (Fecha de Anuencia, Oficios de
 Autorización SHCP, Plazas eventuales..., Candidato, Reportada, CAP ANUAL,
 CAP MENSUAL, Observaciones - Plantillas DO, Observaciones - Proyectos y
-Alineaciones, Año de Vacancia).
+Alineaciones, Año de Vacancia) MÁS las 3 columnas de solicitud de candidato
+(Solicitante, Nombre del candidato, Motivo de solicitud — ver
+COLUMNAS_SOLICITUD_EXCEL más abajo).
 
 Uso:
     python manage.py cargar_columnas_quincenal
@@ -38,6 +40,16 @@ SIEMPRE la fecha calculada (`fecha_vacancia` de MOV_POS, vía el SP de ZAFIRO),
 unificada con la misma columna que ya muestra Mov. Posiciones — ver
 `plantilla.views._get_fecha_vacancia_bulk_map`. Deliberadamente ausente de
 COLUMNAS_EXCEL, no solo sin cargar.
+
+Columnas de solicitud (Solicitante/Nombre del candidato/Motivo de solicitud):
+en el Excel, cuando alguien solicita ocupar una plaza vacante, el capturista
+escribe esos datos SOBRE las columnas RFC/CURP/Nombres/Motivo (RFC solo
+lleva el literal "Solicitada"/"No Disponible" — confirmado 100% redundante
+con CURP/Nombres, ver COLUMNAS_SOLICITUD_EXCEL — así que no se carga). Estas
+3 solo se cargan para filas con Estado Nómina vacío (vacante); en una
+posición ocupada, esas mismas columnas del Excel traen datos REALES del
+empleado, no de un candidato solicitado, así que cargarlas ahí sería
+incorrecto — ver ESTADO_NOMINA_EXCEL_IDX.
 """
 
 import re
@@ -62,6 +74,17 @@ COLUMNAS_EXCEL = {
     "observaciones_plantillas_do": 45,
     "observaciones_proyectos_alineaciones": 46,
     "anno_vacancia": 47,
+}
+
+# Columnas de solicitud de candidato (ver docstring del módulo) — se leen de
+# CURP/Nombres/Motivo (RFC, índice 3, se omite: solo trae el literal
+# "Solicitada"/"No Disponible", sin dato adicional) y solo se cargan cuando
+# Estado Nómina (índice 1) viene vacío en esa fila.
+ESTADO_NOMINA_EXCEL_IDX = 1
+COLUMNAS_SOLICITUD_EXCEL = {
+    "solicitante": 4,        # CURP: unidad + oficio que solicita la plaza
+    "nombre_candidato": 5,   # Nombres: nombre del candidato propuesto
+    "motivo_solicitud": 6,   # Motivo: motivo de la solicitud
 }
 
 _FECHA_ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -118,6 +141,8 @@ class Command(BaseCommand):
         self.stdout.write(f"Leyendo {excel_path} ...")
 
         columnas_ordenadas = sorted(COLUMNAS_EXCEL.values())
+        extra_idx = sorted({ESTADO_NOMINA_EXCEL_IDX, *COLUMNAS_SOLICITUD_EXCEL.values()})
+        todas_idx = sorted({0, *extra_idx, *columnas_ordenadas})
         try:
             # col 0 = Posición (A), el resto por posición (no por nombre de
             # encabezado, ver docstring del módulo).
@@ -126,18 +151,20 @@ class Command(BaseCommand):
             # columna "Plazas eventuales..." SÍ trae 'N/A' como valor real y
             # con el default se perdía silenciosamente (confirmado: la celda
             # cruda vale 'N/A' vía openpyxl, pero pandas la leía como NaN).
-            df = pd.read_excel(excel_path, header=0, usecols=[0, *columnas_ordenadas], keep_default_na=False)
+            df = pd.read_excel(excel_path, header=0, usecols=todas_idx, keep_default_na=False)
         except Exception as exc:
             raise CommandError(f"Error al leer el Excel: {exc}")
 
-        if df.shape[1] != len(columnas_ordenadas) + 1:
+        if df.shape[1] != len(todas_idx):
             raise CommandError(
-                f"Se esperaban {len(columnas_ordenadas) + 1} columnas (Posición + {list(COLUMNAS_EXCEL)}), "
-                f"se leyeron {df.shape[1]}. ¿Cambió la estructura del Excel?"
+                f"Se esperaban {len(todas_idx)} columnas, se leyeron {df.shape[1]}. "
+                f"¿Cambió la estructura del Excel?"
             )
 
-        nombre_por_indice = {idx: nombre for nombre, idx in COLUMNAS_EXCEL.items()}
-        df.columns = ["posicion", *[nombre_por_indice[idx] for idx in columnas_ordenadas]]
+        nombre_por_indice = {0: "posicion", ESTADO_NOMINA_EXCEL_IDX: "estado_nomina_raw"}
+        nombre_por_indice.update({idx: nombre for nombre, idx in COLUMNAS_EXCEL.items()})
+        nombre_por_indice.update({idx: nombre for nombre, idx in COLUMNAS_SOLICITUD_EXCEL.items()})
+        df.columns = [nombre_por_indice[idx] for idx in todas_idx]
         df["posicion"] = df["posicion"].astype(str).str.strip()
         df = df[df["posicion"] != ""]
 
@@ -167,6 +194,22 @@ class Command(BaseCommand):
                         continue
 
                 nuevas.append(TblColumnasPlantillaQuincenal(posicion=posicion, columna=columna, valor=valor))
+
+            # Solicitud de candidato: solo si la fila viene vacante en el
+            # Excel (ver docstring del módulo) — en una posición ocupada,
+            # CURP/Nombres/Motivo son datos reales del empleado, no de un
+            # candidato solicitado. OJO: a diferencia de EMPLEADOS_COMPLETOS_SIG
+            # (donde estado_nomina es un código A/S/L/P o vacío), en el Excel
+            # "Estado Nómina" es el texto completo ("Vacante", "Activo", ...).
+            if str(fila["estado_nomina_raw"]).strip() == "Vacante":
+                for columna in COLUMNAS_SOLICITUD_EXCEL:
+                    valor_crudo = fila[columna]
+                    if valor_crudo is None or (isinstance(valor_crudo, float) and valor_crudo != valor_crudo):
+                        continue
+                    valor = str(valor_crudo).strip()
+                    if not valor:
+                        continue
+                    nuevas.append(TblColumnasPlantillaQuincenal(posicion=posicion, columna=columna, valor=valor))
 
         with transaction.atomic():
             TblColumnasPlantillaQuincenal.objects.all().delete()
