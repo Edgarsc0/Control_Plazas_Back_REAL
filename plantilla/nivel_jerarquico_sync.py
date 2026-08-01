@@ -12,6 +12,11 @@ Se usa desde:
     `plantilla.tasks._reaplicar_prioridad_nivel_jerarquico` (reaplicación
     automática tras cada import ZAFIRO, porque esas dos tablas se truncan y
     recargan completas cada 30 min).
+  - `CatNivelJerarquicoPlazaViewSet.bulk_assign` (propagación inmediata, vía
+    `aplicar_nivel_a_plazas`, del nivel recién asignado a esas plazas
+    puntuales — sin importar qué `fuente` esté configurada como prioridad;
+    si luego corre un import ZAFIRO con `fuente=nvl_direc_origen`, ese
+    import revierte el valor, igual que ya ocurría antes de este cambio).
 """
 
 import logging
@@ -116,7 +121,17 @@ def aplicar_prioridad_nivel_jerarquico(fuente):
     reciente por posición, vía MOV_POS_LATEST), sobreescribiendo NJ/NJ
     COMP/NJ OK/nombreNJ/NJOperativoComb y Nvl Direc respectivamente.
     """
-    plaza_a_nivel = _mapa_plaza_a_nivel(fuente)
+    return aplicar_nivel_a_plazas(_mapa_plaza_a_nivel(fuente))
+
+
+def aplicar_nivel_a_plazas(plaza_a_nivel):
+    """
+    Igual que `aplicar_prioridad_nivel_jerarquico`, pero con un mapeo
+    plaza -> nivel (int) explícito en vez de derivarlo de `fuente`. La usa
+    `CatNivelJerarquicoPlazaViewSet.bulk_assign` para propagar de inmediato
+    el nivel recién asignado a esas plazas puntuales, sin esperar a que se
+    dispare "aplicar prioridad" ni al próximo import ZAFIRO.
+    """
     if not plaza_a_nivel:
         return {"empleados_actualizados": 0, "posiciones_actualizadas": 0}
 

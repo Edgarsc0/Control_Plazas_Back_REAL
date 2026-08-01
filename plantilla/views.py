@@ -6776,7 +6776,10 @@ class CatNivelJerarquicoPlazaViewSet(AuditedViewSetMixin, viewsets.ModelViewSet)
     propio override, en vez de con el dato original de ZAFIRO.
 
     - `bulk-assign`: asigna una misma descripción de nivel jerárquico (enum)
-      a varias plazas seleccionadas desde el frontend.
+      a varias plazas seleccionadas desde el frontend, y de inmediato
+      propaga ese nivel a EMPLEADOS_COMPLETOS_SIG y MOV_POS (fila vigente)
+      para esas plazas, sin importar la `fuente` de prioridad configurada
+      (ver `nivel_jerarquico_sync.aplicar_nivel_a_plazas`).
     """
     queryset = CatNivelJerarquicoPlaza.objects.all()
     serializer_class = CatNivelJerarquicoPlazaSerializer
@@ -6808,6 +6811,7 @@ class CatNivelJerarquicoPlazaViewSet(AuditedViewSetMixin, viewsets.ModelViewSet)
 
         usuario = request.user.username
         actualizadas = 0
+        plaza_a_nivel = {}
         with transaction.atomic():
             for plaza in plazas:
                 obj, _ = CatNivelJerarquicoPlaza.objects.get_or_create(plaza=plaza)
@@ -6815,7 +6819,23 @@ class CatNivelJerarquicoPlazaViewSet(AuditedViewSetMixin, viewsets.ModelViewSet)
                 obj.modificado_por = usuario
                 obj.save()
                 actualizadas += 1
-        return Response({"actualizadas": actualizadas})
+                if obj.nivel_jerarquico is not None:
+                    plaza_a_nivel[obj.plaza] = obj.nivel_jerarquico
+
+            # Fija "nivel_jerarquico" como fuente de prioridad (si no lo era
+            # ya) para que el próximo import ZAFIRO la reaplique — si no,
+            # el truncado/recarga de MOV_POS/EMPLEADOS_COMPLETOS_SIG en cada
+            # import (ver plantilla.tasks) borraría este cambio en <30 min.
+            config, _ = NivelJerarquicoPrioridadConfig.objects.get_or_create(pk=1)
+            if config.fuente != "nivel_jerarquico":
+                config.fuente = "nivel_jerarquico"
+                config.modificado_por = usuario
+                config.save()
+
+        from .nivel_jerarquico_sync import aplicar_nivel_a_plazas
+
+        stats = aplicar_nivel_a_plazas(plaza_a_nivel)
+        return Response({"actualizadas": actualizadas, **stats})
 
     @action(detail=False, methods=["get"], url_path="prioridad")
     def prioridad(self, request):
