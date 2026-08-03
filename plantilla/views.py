@@ -48,6 +48,7 @@ from .models import (
     MovPos,
     MovPosLatest,
     NIVEL_JERARQUICO_LABELS,
+    NIVELES_JERARQUICOS,
     NivelJerarquicoPrioridadConfig,
     OrganigramaAnam,
     Plantilla1800Plazas,
@@ -1942,6 +1943,11 @@ def _aplicar_mapeos_detalle_excel(rows):
                 r[col] = ""
         r["fecha_anuencia_detalle"] = mapa_fa.get(pos, "")
         r["fecha_genera_vacante"] = mapa_fv.get(pos, "")
+        # Alias bajo la clave "fecha_vacancia" — es la que usa el export de
+        # ExportarEmpleadosPorPosicionConFotosView (columna del EmployeesModal
+        # compartido, ver ALL_AVAILABLE_COLUMNS en EmployeesModal.jsx); sin
+        # esto la columna salía vacía porque solo se poblaba "fecha_genera_vacante".
+        r["fecha_vacancia"] = mapa_fv.get(pos, "")
     return rows
 
 
@@ -7252,6 +7258,133 @@ class DesgloseJerarquicoOcupadosView(APIView):
 
             cache.set(cache_key, results, 1200)
             return Response(results, status=status.HTTP_200_OK)
+        except Exception:
+            logger.exception("Error inesperado en {}".format(request.path))
+            return Response(
+                {"error": "Error interno del servidor"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class AduanasOcupacionVacanciaView(APIView):
+    """
+    Subtab "Aduanas Ocupación vs Vacantes" (Movimientos > Mov. Posiciones).
+    Agrega conteos de personal por Aduana x Nivel Jerárquico x Nivel, separando
+    ocupación y vacancia, con el mismo criterio de "plaza activa" que
+    DesgloseJerarquicoView/DesgloseJerarquicoOcupadosView (Cuadros Vacancia),
+    para que los totales cuadren entre subtabs.
+    """
+
+    view_permission = "authentication.view_plantilla_mov_posiciones"
+
+    def get(self, request, *args, **kwargs):
+        cache_key = "aduanas_ocupacion_vacancia"
+        cached_data = cache.get(cache_key)
+        if cached_data is not None:
+            return Response(cached_data, status=status.HTTP_200_OK)
+
+        def agg_query(estado_nomina_op):
+            return f"""
+            SELECT
+                TRIM(e.`Aduana`) AS aduana,
+                TRIM(e.`tipo`) AS tipo,
+                TRIM(e.`latitud`) AS latitud,
+                TRIM(e.`longitud`) AS longitud,
+                TRIM(e.`NJ`) AS nj,
+                TRIM(e.`Nivel`) AS nivel,
+                COUNT(*) AS cantidad
+            FROM EMPLEADOS_COMPLETOS_SIG e
+            INNER JOIN MOV_POS m ON e.`Posición` = m.`Nº Pos Actual`
+            INNER JOIN MOV_POS_LATEST latest ON m.id = latest.id
+            WHERE m.`Estado Psn` = 'A'
+              AND e.`Estado Nómina` {estado_nomina_op} ' '
+              AND m.`Nº Pos Actual` NOT LIKE '103L%%'
+              AND m.`Nº Pos Actual` NOT LIKE '1039%%'
+              AND m.`Partida Ptal` <> '11401'
+              AND e.`Unidad Administrativa` LIKE 'Aduana %%'
+              AND e.`Aduana` IS NOT NULL AND e.`Aduana` <> ''
+            GROUP BY TRIM(e.`Aduana`), TRIM(e.`tipo`), TRIM(e.`latitud`), TRIM(e.`longitud`), TRIM(e.`NJ`), TRIM(e.`Nivel`);
+            """
+
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(agg_query("="))
+                columns = [col[0] for col in cursor.description]
+                vac_rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+                cursor.execute(agg_query("<>"))
+                columns = [col[0] for col in cursor.description]
+                ocu_rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+            # dict() sobre tuplas con clave duplicada se queda con la última:
+            # NIVELES_JERARQUICOS define (3, "Director") antes que (3, "Titular de
+            # Aduana"), así que nj_labels[3] resuelve a "Titular de Aduana", que es
+            # lo correcto aquí porque esta vista siempre filtra Unidad
+            # Administrativa LIKE 'Aduana %'.
+            nj_labels = dict(NIVELES_JERARQUICOS)
+
+            combos = {}
+            for r in vac_rows + ocu_rows:
+                nj = r["nj"] or ""
+                nivel = r["nivel"] or ""
+                combos.setdefault(nj, set()).add(nivel)
+
+            def nj_sort_key(nj):
+                try:
+                    return (0, int(nj))
+                except (TypeError, ValueError):
+                    return (1, nj)
+
+            grupos_nj = []
+            for nj in sorted(combos.keys(), key=nj_sort_key):
+                try:
+                    nombre_nj = nj_labels.get(int(nj), nj or "Sin Nivel Jerárquico")
+                except (TypeError, ValueError):
+                    nombre_nj = nj or "Sin Nivel Jerárquico"
+                label = f"{nj}. {nombre_nj}" if nj else nombre_nj
+                niveles = sorted(n for n in combos[nj] if n) or [""]
+                grupos_nj.append({"nj": nj, "label": label, "niveles": niveles})
+
+            all_keys = [f"{g['nj']}|{n}" for g in grupos_nj for n in g["niveles"]]
+
+            def build_pivot(rows):
+                por_aduana = {}
+                for r in rows:
+                    nombre = r["aduana"]
+                    if not nombre:
+                        continue
+                    entry = por_aduana.get(nombre)
+                    if entry is None:
+                        entry = {
+                            "aduana": nombre,
+                            "tipo": r["tipo"] or "",
+                            "latitud": None,
+                            "longitud": None,
+                            "valores": {},
+                        }
+                        por_aduana[nombre] = entry
+                    if entry["latitud"] is None and r["latitud"]:
+                        try:
+                            entry["latitud"] = float(r["latitud"])
+                            entry["longitud"] = float(r["longitud"])
+                        except (TypeError, ValueError):
+                            pass
+                    key = f"{r['nj'] or ''}|{r['nivel'] or ''}"
+                    entry["valores"][key] = entry["valores"].get(key, 0) + r["cantidad"]
+
+                for entry in por_aduana.values():
+                    for k in all_keys:
+                        entry["valores"].setdefault(k, 0)
+
+                return sorted(por_aduana.values(), key=lambda a: a["aduana"] or "")
+
+            resultado = {
+                "grupos_nj": grupos_nj,
+                "ocupacion": build_pivot(ocu_rows),
+                "vacancia": build_pivot(vac_rows),
+            }
+
+            cache.set(cache_key, resultado, 1200)
+            return Response(resultado, status=status.HTTP_200_OK)
         except Exception:
             logger.exception("Error inesperado en {}".format(request.path))
             return Response(

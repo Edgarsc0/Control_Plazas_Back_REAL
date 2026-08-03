@@ -64,6 +64,7 @@ from .views import (
     CuadroVacanciaView,
     DesgloseJerarquicoView,
     DesgloseJerarquicoOcupadosView,
+    AduanasOcupacionVacanciaView,
     ColumnasQuincenalView,
 )
 
@@ -449,5 +450,10 @@ urlpatterns = [
         "desglose_jerarquico_ocupados/",
         DesgloseJerarquicoOcupadosView.as_view(),
         name="desglose_jerarquico_ocupados",
+    ),
+    path(
+        "aduanas_ocupacion_vacancia/",
+        AduanasOcupacionVacanciaView.as_view(),
+        name="aduanas_ocupacion_vacancia",
     ),
 ]
