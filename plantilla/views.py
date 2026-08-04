@@ -5800,7 +5800,12 @@ class MovimientosPersonalListView(APIView):
         # Check if requesting distinct values for a field
         distinct_field = request.query_params.get("distinct_field", "").strip()
 
-        # Search query
+        # Search query. Además de los campos sueltos, se anota `full_name`
+        # (nombre + ap_pat + ap_mat unidos por espacio, igual que
+        # `buildFullName` en MovimientosPersonalTab.jsx) para que buscar el
+        # nombre completo ("Juan Pérez López") también matchee aunque esté
+        # repartido en los 3 campos reales.
+        queryset = _annotate_full_name(queryset, "full_name")
         queryset = apply_text_search(
             queryset,
             request.query_params.get("search", ""),
@@ -5810,6 +5815,7 @@ class MovimientosPersonalListView(APIView):
                 "nombre",
                 "ap_pat",
                 "ap_mat",
+                "full_name",
                 "accion_nombre",
                 "motivo_nombre",
                 "un_admin",
