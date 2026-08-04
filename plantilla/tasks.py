@@ -44,6 +44,7 @@ import re
 import subprocess
 import sys
 import time
+import unicodedata
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -53,7 +54,7 @@ import requests
 from celery import shared_task
 from celery.utils.log import get_task_logger
 from django.conf import settings
-from django.db import connection, transaction
+from django.db import connection, connections, transaction
 
 from .models import (
     BajasSigHistorico,
@@ -247,6 +248,43 @@ def _corregir_csv(csv_path: str, script_path: str, bitacora=None) -> str:
             bitacora, f"Error al ejecutar corrector heurístico: {e}", is_error=True
         )
         return csv_path
+
+
+def _limpiar_perfiles_temporales_edge(bitacora=None):
+    """
+    Borra los perfiles temporales de Microsoft Edge (carpetas `scoped_dir*`
+    en %TEMP%) que quedan huérfanos cuando el script Node.js/Selenium falla
+    o se corta a medio camino (ej. timeout de descarga). Edge normalmente los
+    limpia solo vía `driver.quit()`, pero si el proceso muere antes de eso,
+    la carpeta del perfil (~100-150 MB c/u) queda para siempre.
+
+    Como el lock distribuido garantiza una sola instancia de esta tarea a la
+    vez, cualquier `scoped_dir*` que exista al iniciar es basura de una
+    corrida anterior: es seguro borrarlo. Sin esta limpieza, en unos días se
+    acumulan cientos de estas carpetas y llenan el disco (pasó en producción:
+    399 carpetas / 22 GB en pocos días).
+    """
+    import shutil
+    import tempfile
+
+    temp_dir = Path(tempfile.gettempdir())
+    borrados = 0
+    liberado_bytes = 0
+    for carpeta in temp_dir.glob("scoped_dir*"):
+        try:
+            size = sum(f.stat().st_size for f in carpeta.rglob("*") if f.is_file())
+            shutil.rmtree(carpeta, ignore_errors=True)
+            borrados += 1
+            liberado_bytes += size
+        except Exception:
+            pass
+
+    if borrados:
+        _append_log(
+            bitacora,
+            f"Limpieza de perfiles temporales de Edge: {borrados} carpeta(s) "
+            f"borrada(s), {liberado_bytes / (1024**3):.2f} GB liberados.",
+        )
 
 
 def _capturar_indices_secundarios(table):
@@ -1290,98 +1328,6 @@ def _calcular_y_actualizar_vacancias(bitacora):
         )
 
 
-# Mismo criterio de "ocupada" que plantilla.views.OCUPADAS_RAW_SQL —
-# duplicado aquí (en vez de importarlo) para no crear un import a nivel de
-# módulo entre tasks.py y views.py (views.py ya importa tasks.importar_zafiro,
-# aunque de forma diferida dentro de una función).
-_OCUPADAS_RAW_SQL_TASKS = """
-    SELECT DISTINCT e.`Posición`
-    FROM EMPLEADOS_COMPLETOS_SIG e
-    WHERE (e.`Id Empleado` IS NOT NULL AND TRIM(e.`Id Empleado`) <> '')
-       OR (e.`Nombres` IS NOT NULL AND TRIM(e.`Nombres`) <> '');
-"""
-
-
-def _limpiar_solicitudes_candidato_ocupadas(bitacora=None):
-    """
-    Borra PERMANENTEMENTE los datos de solicitud de candidato de cualquier
-    posición que ya se detectó ocupada — no solo los oculta en la lectura
-    (eso ya lo hace `EmpleadosCompletosActivosDetalleView`/
-    `_aplicar_mapeos_detalle_excel` en cada request, ver
-    `COLUMNAS_SOLICITUD_VACANTE` en models.py). Sin este borrado, si esa
-    misma posición volviera a quedar vacante más adelante, el dato viejo de
-    una solicitud ya resuelta reaparecería sin corresponder a la vacante
-    actual.
-
-    Dos lugares distintos a limpiar:
-    - `TblColumnasPlantillaQuincenal` (baseline cargado del Excel, sin
-      auditoría que preservar — ver cargar_columnas_quincenal): se BORRA el
-      renglón.
-    - `CeldaOverride` (tabla=PLANTILLA_QUINCENAL, ediciones manuales de un
-      usuario desde la pantalla): se DESACTIVA (`activo=False`), igual que
-      cualquier otra edición manual que se revierte en el sistema — nunca se
-      borra físicamente un registro de auditoría, solo se deja de aplicar.
-
-    Se llama dentro de `importar_zafiro` (corre cada 30 min), justo después
-    de invalidar el cache de ocupación, para operar siempre sobre el
-    resultado más fresco posible del import recién terminado.
-    """
-    from .celda_override import TABLA_QUINCENAL, compute_clave_hash
-    from .models import CeldaOverride, COLUMNAS_SOLICITUD_VACANTE, TblColumnasPlantillaQuincenal
-
-    try:
-        with connection.cursor() as cursor:
-            cursor.execute(_OCUPADAS_RAW_SQL_TASKS)
-            posiciones_ocupadas = set(row[0] for row in cursor.fetchall() if row[0])
-
-        if not posiciones_ocupadas:
-            return
-
-        # Universo a revisar: solo posiciones que HOY tienen algún dato de
-        # solicitud guardado (baseline u override activo) — evita calcular un
-        # hash por cada una de las miles de posiciones ocupadas.
-        posiciones_con_solicitud = set(
-            TblColumnasPlantillaQuincenal.objects.filter(
-                columna__in=COLUMNAS_SOLICITUD_VACANTE
-            ).values_list("posicion", flat=True)
-        )
-        overrides_activos = CeldaOverride.objects.filter(
-            tabla=TABLA_QUINCENAL, columna__in=COLUMNAS_SOLICITUD_VACANTE, activo=True
-        )
-        for clave_negocio in overrides_activos.values_list("clave_negocio", flat=True):
-            pos = clave_negocio.get("posicion") if clave_negocio else None
-            if pos:
-                posiciones_con_solicitud.add(pos)
-
-        posiciones_a_limpiar = posiciones_con_solicitud & posiciones_ocupadas
-        if not posiciones_a_limpiar:
-            if bitacora is not None:
-                _append_log(bitacora, "Solicitudes de candidato: nada que limpiar (ninguna posición con datos de solicitud está ocupada).")
-            return
-
-        borrados_baseline, _ = TblColumnasPlantillaQuincenal.objects.filter(
-            columna__in=COLUMNAS_SOLICITUD_VACANTE, posicion__in=posiciones_a_limpiar
-        ).delete()
-
-        hashes = [compute_clave_hash({"posicion": p}) for p in posiciones_a_limpiar]
-        overrides_desactivados = CeldaOverride.objects.filter(
-            tabla=TABLA_QUINCENAL,
-            columna__in=COLUMNAS_SOLICITUD_VACANTE,
-            activo=True,
-            clave_negocio_hash__in=hashes,
-        ).update(activo=False)
-
-        mensaje = (
-            f"Solicitudes de candidato limpiadas en {len(posiciones_a_limpiar)} posición(es) ya ocupada(s): "
-            f"{borrados_baseline} renglón(es) de baseline borrados, {overrides_desactivados} override(s) manual(es) desactivado(s)."
-        )
-        _append_log(bitacora, mensaje)
-        logger.info(mensaje)
-    except Exception as e:
-        _append_log(bitacora, f"Error limpiando solicitudes de candidato: {e}", is_error=True)
-        logger.error("Error en _limpiar_solicitudes_candidato_ocupadas: %s", e, exc_info=True)
-
-
 def _invalidar_cache_ocupacion_vacancia(bitacora=None):
     """
     Invalida cuanto antes los caches que determinan "¿está esta posición
@@ -1585,35 +1531,45 @@ def importar_zafiro(self):
         )
         return {"status": "skipped", "reason": "otra instancia ya está en ejecución"}
 
-    download_dir = settings.ZAFIRO_DOWNLOAD_DIR
-    script_path = settings.ZAFIRO_SCRIPT_PATH
     resultados = {}
-
-    logger.info("=== Iniciando tarea importar_zafiro ===")
+    bitacora = None
     inicio = time.time()
 
-    # Asegurar que el directorio de descarga existe
-    Path(download_dir).mkdir(parents=True, exist_ok=True)
-
-    from datetime import datetime
-
-    ahora = datetime.now()
-    # Si son las 23:00 o más tarde, consideramos que es el último run del día para el histórico
-    es_historico = ahora.hour >= 23
-
-    bitacora = ZafiroBitacora.objects.create(
-        status="RUNNING",
-        es_historico=es_historico,
-        logs_en_vivo="",
-        registros_posiciones=0,
-        registros_completos=0,
-        registros_bajas=0,
-        registros_historial=0,
-        registros_datos_personales=0,
-    )
-    _append_log(bitacora, "=== Iniciando tarea importar_zafiro ===")
-
     try:
+        from django.db import close_old_connections
+
+        # Cierra conexiones de BD que pudieran haber quedado muertas (ej. un
+        # corte de red mientras el worker estaba idle) antes de escribir
+        # nada, para no arrastrar un socket roto a la primera query.
+        close_old_connections()
+
+        download_dir = settings.ZAFIRO_DOWNLOAD_DIR
+        script_path = settings.ZAFIRO_SCRIPT_PATH
+
+        logger.info("=== Iniciando tarea importar_zafiro ===")
+
+        # Asegurar que el directorio de descarga existe
+        Path(download_dir).mkdir(parents=True, exist_ok=True)
+
+        from datetime import datetime
+
+        ahora = datetime.now()
+        # Si son las 23:00 o más tarde, consideramos que es el último run del día para el histórico
+        es_historico = ahora.hour >= 23
+
+        bitacora = ZafiroBitacora.objects.create(
+            status="RUNNING",
+            es_historico=es_historico,
+            logs_en_vivo="",
+            registros_posiciones=0,
+            registros_completos=0,
+            registros_bajas=0,
+            registros_historial=0,
+            registros_datos_personales=0,
+        )
+        _append_log(bitacora, "=== Iniciando tarea importar_zafiro ===")
+        _limpiar_perfiles_temporales_edge(bitacora)
+
         # ── 1. Posiciones (argIndex=1) ─────────────────────────────────────
         _append_log(bitacora, "Descargando Posiciones (argIndex=1)...")
 
@@ -1690,9 +1646,6 @@ def importar_zafiro(self):
         # Invalida YA los caches de ocupación/fecha de vacancia — no esperar
         # a que termine toda la tarea (ver _invalidar_cache_ocupacion_vacancia).
         _invalidar_cache_ocupacion_vacancia(bitacora)
-
-        # ── 8.5. Borrar permanentemente solicitudes de candidato ya resueltas ─
-        _limpiar_solicitudes_candidato_ocupadas(bitacora)
 
         # ── 9. Sincronizar cat_nivel_jerarquico_plaza desde MOV_POS ────────
         _sincronizar_plazas_nivel_jerarquico(bitacora)
@@ -1792,6 +1745,21 @@ def importar_zafiro(self):
         # ── 12. Actualizar histórico diario de % Alineación General ────────
         _actualizar_historico_alineacion_general(bitacora)
 
+        # ── 13. Encadenar Poblado para credenciales ─────────────────────────
+        # .delay() solo encola la tarea y retorna de inmediato (no ejecuta nada
+        # aquí ni espera resultado) — por diseño no puede alentar ni interrumpir
+        # importar_zafiro. Va dentro de un try/except propio para que un fallo
+        # al encolar (ej. Redis caído) jamás tumbe el resultado ya exitoso de
+        # esta tarea.
+        try:
+            importar_poblado_credenciales.delay()
+        except Exception as exc:
+            logger.error(
+                "No se pudo encolar importar_poblado_credenciales tras "
+                "importar_zafiro: %s",
+                exc,
+            )
+
         _append_log(
             bitacora,
             f"=== Tarea completada en {duracion}s | Posiciones: {total_posiciones} | Completos: {total_completos} | Bajas: {total_bajas} | Historial: {total_historial} | Datos Personales: {total_datos_personales} ===",
@@ -1805,15 +1773,45 @@ def importar_zafiro(self):
 
     except Exception as exc:
         duracion = round(time.time() - inicio, 1)
-        bitacora.duracion_segundos = duracion
-        bitacora.status = "ERROR"
-        bitacora.error_message = str(exc)
-        bitacora.save()
-        _append_log(bitacora, f"Error en importar_zafiro: {exc}", is_error=True)
+        logger.error("Error en importar_zafiro: %s", exc)
+
+        if bitacora is not None:
+            # La BD pudo haberse caído justo en medio del fallo (ej. el mismo
+            # corte de red que causó el error original) — reintentamos un par
+            # de veces cerrando conexiones muertas de por medio, para no
+            # perder el registro del error y dejar la bitácora atascada en
+            # RUNNING para siempre.
+            from django.db import close_old_connections
+
+            for intento in range(3):
+                try:
+                    close_old_connections()
+                    bitacora.duracion_segundos = duracion
+                    bitacora.status = "ERROR"
+                    bitacora.error_message = str(exc)
+                    bitacora.save()
+                    _append_log(bitacora, f"Error en importar_zafiro: {exc}", is_error=True)
+                    break
+                except Exception as db_exc:
+                    logger.error(
+                        "No se pudo guardar el estado de error en ZafiroBitacora "
+                        "(intento %s/3): %s",
+                        intento + 1,
+                        db_exc,
+                    )
+                    time.sleep(2)
+        else:
+            logger.error(
+                "importar_zafiro falló antes de poder crear la bitácora "
+                "(probablemente la BD era inalcanzable en ese momento)."
+            )
+
         raise self.retry(exc=exc)
 
     finally:
-        # Siempre liberar el lock al terminar (éxito, error, o retry)
+        # Siempre liberar el lock al terminar (éxito, error antes o después
+        # de crear la bitácora, o retry) — el lock nunca debe sobrevivir a
+        # la tarea que lo tomó.
         r.delete(LOCK_KEY)
 
 
@@ -2388,3 +2386,321 @@ def generar_excel_estatus_task(self, uas_param, levels_param, group_by):
         state="SUCCESS", meta={"progress": 100, "message": "¡Completado!"}
     )
     return True
+
+
+# =============================================================================
+# NUEVO: Poblado para credenciales (tarea aislada, no modifica importar_zafiro)
+# =============================================================================
+#
+# Descarga la consulta "Poblado para credenciales" (Recursos Humanos >
+# Planeación RRHH > Procesos Especiales > Poblado para credenciales), un
+# módulo distinto de "Informacion ZAFIRO" (que usa index.js). Vive en su
+# propio script (poblado_credenciales.js) y su propia tarea a propósito:
+# así importar_zafiro —que corre cada 30 min y ya es la tarea más crítica
+# del sistema— nunca se ve afectada si este flujo nuevo falla, tarda, o se
+# reescribe mientras capturamos la navegación real.
+#
+# Se dispara con .delay() al final de importar_zafiro (ver el bloque
+# "Encadenar Poblado para credenciales" en esa tarea) — no bloquea ni
+# alenta la tarea principal porque .delay() solo encola y retorna de
+# inmediato; el trabajo real lo hace un worker de Celery por separado.
+
+POBLADO_CREDENCIALES_LOCK_KEY = "lock:importar_poblado_credenciales"
+POBLADO_CREDENCIALES_LOCK_TTL = 900  # 15 minutos (safety net)
+
+
+def _ejecutar_script_node_generico(
+    script_path: str, download_dir: str, timeout_seg: int = 900
+) -> subprocess.CompletedProcess:
+    """
+    Lanza un script Node.js pasando <download_dir> como único argumento
+    posicional (a diferencia de _ejecutar_script_node, que además maneja
+    argIndex/nombres de archivo fijos específicos de ZAFIRO_FILES).
+    """
+    return subprocess.run(
+        ["node", script_path, download_dir],
+        capture_output=True,
+        text=True,
+        timeout=timeout_seg,
+        cwd=str(Path(script_path).parent),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Parseo del CSV de "Poblado para credenciales" -> sicre_tbl_sig
+#
+# Encabezados capturados en vivo del portal (2026-08-03), 15 columnas en
+# total -- exactamente los mismos campos de SicreTblSig (modelo del proyecto
+# credencializacionBack) salvo `id` y `fecha_actualizacion`, que esta fuente
+# no trae. Esos dos se dejan sin poblar (NULL / seteado por esta tarea) en
+# vez de alterar el esquema de una tabla que pertenece a otro proyecto.
+# ---------------------------------------------------------------------------
+
+def _normalizar_encabezado_poblado(texto: str) -> str:
+    """Mayúsculas, sin acentos, espacios colapsados -- para matchear encabezados
+    del CSV de forma tolerante a variaciones de acentuación/espaciado."""
+    texto = unicodedata.normalize("NFKD", texto or "").encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"\s+", " ", texto).strip().upper()
+
+
+# encabezado del CSV (normalizado) -> (columna real en sicre_tbl_sig, longitud máxima)
+_POBLADO_CREDENCIALES_MAPA = {
+    _normalizar_encabezado_poblado("EMPLEADO ANAM"): ("EMPLEADO_ANAM", 50),
+    _normalizar_encabezado_poblado("NO EMPLEADO"): ("NO_EMPLEADO", 50),
+    _normalizar_encabezado_poblado("CURP"): ("CURP", 18),
+    _normalizar_encabezado_poblado("NOMBRES"): ("NOMBRES", 150),
+    _normalizar_encabezado_poblado("PRIMER APELLIDO"): ("PRIMER_APELLIDO", 100),
+    _normalizar_encabezado_poblado("SEGUNDO APELLIDO"): ("SEGUNDO_APELLIDO", 100),
+    _normalizar_encabezado_poblado("AREA"): ("AREA", 150),
+    _normalizar_encabezado_poblado("CARGO"): ("CARGO", 150),
+    _normalizar_encabezado_poblado("FECHA EXPEDICION"): ("FECHA_EXPEDICION", None),  # date
+    _normalizar_encabezado_poblado("FIRMA DRH"): ("FIRMA_DRH", 255),
+    _normalizar_encabezado_poblado("CARGO DRH"): ("CARGO_DRH", 255),
+    _normalizar_encabezado_poblado("QR"): ("QR", None),  # TextField
+    _normalizar_encabezado_poblado("ESTATUS"): ("ESTATUS", 100),
+    _normalizar_encabezado_poblado("ESTADO_HUM"): ("ESTADO_HUM", 100),
+    # El CSV la llama "ESTADO_NOMINA"; en sicre_tbl_sig la columna es ESTADO_NOM.
+    _normalizar_encabezado_poblado("ESTADO_NOMINA"): ("ESTADO_NOM", 100),
+}
+
+# Orden fijo de columnas para el INSERT a sicre_tbl_sig_staging (no depende
+# del orden en que vengan las columnas en el CSV). FECHA_ACTUALIZACION no
+# viene del mapa de arriba -- la llena esta tarea con el momento del sync.
+_SICRE_TBL_SIG_COLUMNAS_STAGING = [
+    "EMPLEADO_ANAM", "NO_EMPLEADO", "CURP", "NOMBRES", "PRIMER_APELLIDO",
+    "SEGUNDO_APELLIDO", "AREA", "CARGO", "FECHA_EXPEDICION", "FIRMA_DRH",
+    "CARGO_DRH", "QR", "ESTATUS", "ESTADO_HUM", "ESTADO_NOM", "FECHA_ACTUALIZACION",
+]
+
+
+def _parsear_fecha_poblado_credenciales(valor: str):
+    """'04/01/2026' (MM/DD/YYYY) -> date. None si viene vacío o no parsea."""
+    valor = (valor or "").strip()
+    if not valor:
+        return None
+    try:
+        from datetime import datetime
+        return datetime.strptime(valor, "%m/%d/%Y").date()
+    except ValueError:
+        return None
+
+
+def _leer_csv_poblado_credenciales(csv_path: str, bitacora=None) -> list:
+    """
+    Lee el CSV de "Poblado para credenciales" (delimitador '|', UTF-8 --
+    confirmado al inspeccionar el archivo real, a diferencia de los CSV de
+    ZAFIRO que son cp1252) y regresa una lista de tuplas listas para INSERT
+    en sicre_tbl_sig_staging, en el orden de _SICRE_TBL_SIG_COLUMNAS_STAGING.
+    """
+    ahora = timezone.now()
+    filas = []
+
+    with open(csv_path, encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f, delimiter="|")
+        if not reader.fieldnames:
+            raise RuntimeError("El CSV de Poblado para credenciales llegó vacío o sin encabezados.")
+
+        # Encabezado real del archivo -> (columna BD, longitud máxima)
+        columnas_archivo = {}
+        for encabezado in reader.fieldnames:
+            clave = _normalizar_encabezado_poblado(encabezado)
+            if clave in _POBLADO_CREDENCIALES_MAPA:
+                columnas_archivo[encabezado] = _POBLADO_CREDENCIALES_MAPA[clave]
+
+        columnas_bd_encontradas = {col for col, _ in columnas_archivo.values()}
+        columnas_bd_esperadas = {col for col, _ in _POBLADO_CREDENCIALES_MAPA.values()}
+        faltantes = columnas_bd_esperadas - columnas_bd_encontradas
+        if faltantes:
+            _append_log(
+                bitacora,
+                f"Poblado para credenciales: columnas esperadas no encontradas en el CSV: {', '.join(sorted(faltantes))}",
+                is_error=True,
+            )
+
+        for row in reader:
+            valores = {}
+            for encabezado, (columna_bd, max_len) in columnas_archivo.items():
+                valor = (row.get(encabezado) or "").strip()
+                if columna_bd == "FECHA_EXPEDICION":
+                    valores[columna_bd] = _parsear_fecha_poblado_credenciales(valor)
+                elif not valor:
+                    valores[columna_bd] = None
+                elif max_len:
+                    valores[columna_bd] = valor[:max_len]
+                else:
+                    valores[columna_bd] = valor
+
+            if not valores.get("EMPLEADO_ANAM"):
+                continue  # sin llave primaria, no se puede insertar
+
+            fila = tuple(
+                ahora if col == "FECHA_ACTUALIZACION" else valores.get(col)
+                for col in _SICRE_TBL_SIG_COLUMNAS_STAGING
+            )
+            filas.append(fila)
+
+    _append_log(bitacora, f"Poblado para credenciales: {len(filas)} filas leídas del CSV.")
+    return filas
+
+
+def _cargar_staging_sicre_tbl_sig(filas: list, bitacora=None) -> int:
+    """
+    Crea sicre_tbl_sig_staging si no existe (CREATE TABLE ... LIKE clona el
+    esquema exacto de sicre_tbl_sig automáticamente -- no hay que mantener
+    una lista de columnas duplicada a mano), la trunca, y carga las filas.
+
+    Usa la conexión 'sicre' (ver DATABASES en settings.py), que apunta a
+    sicre_db_backup -- la BD del proyecto credencializacionBack, NO a la BD
+    de este proyecto.
+    """
+    with connections["sicre"].cursor() as cursor:
+        cursor.execute("CREATE TABLE IF NOT EXISTS sicre_tbl_sig_staging LIKE sicre_tbl_sig")
+        cursor.execute("TRUNCATE TABLE sicre_tbl_sig_staging")
+
+        if filas:
+            columnas_sql = ", ".join(f"`{c}`" for c in _SICRE_TBL_SIG_COLUMNAS_STAGING)
+            placeholders = ", ".join(["%s"] * len(_SICRE_TBL_SIG_COLUMNAS_STAGING))
+            cursor.executemany(
+                f"INSERT INTO sicre_tbl_sig_staging ({columnas_sql}) VALUES ({placeholders})",
+                filas,
+            )
+
+    _append_log(bitacora, f"sicre_tbl_sig_staging: {len(filas)} filas cargadas.")
+    return len(filas)
+
+
+def _swap_sicre_tbl_sig(bitacora=None):
+    """
+    Swap atómico entre sicre_tbl_sig (activa, leída en vivo por
+    credencializacionBack) y sicre_tbl_sig_staging -- mismo patrón que
+    _swap_blue_green_tables para las tablas de ZAFIRO. Nunca hay una ventana
+    donde sicre_tbl_sig esté vacía o a medio cargar para quien la esté
+    consultando (búsqueda de empleados, sincronización a Enrolamiento, etc.).
+    """
+    with connections["sicre"].cursor() as cursor:
+        cursor.execute("""
+            RENAME TABLE
+                sicre_tbl_sig TO sicre_tbl_sig_temp,
+                sicre_tbl_sig_staging TO sicre_tbl_sig,
+                sicre_tbl_sig_temp TO sicre_tbl_sig_staging
+        """)
+
+    _append_log(bitacora, "sicre_tbl_sig: swap atómico completado.")
+
+
+@shared_task(
+    bind=True,
+    name="plantilla.tasks.importar_poblado_credenciales",
+    max_retries=2,
+    default_retry_delay=300,
+)
+def importar_poblado_credenciales(self):
+    """
+    Tarea Celery independiente para "Poblado para credenciales".
+
+    Descarga el CSV (checkbox "Poblado Excel" -- preferido sobre "Poblado
+    SQL" porque trae ESTADO_HUM/ESTADO_NOMINA, necesarias para no perder el
+    histórico de personal dado de baja), lo parsea, y actualiza sicre_tbl_sig
+    (BD sicre_db_backup, del proyecto credencializacionBack) con un swap
+    Blue-Green: se carga todo en sicre_tbl_sig_staging primero y solo al
+    final se intercambia atómicamente con la tabla activa, así nunca hay una
+    ventana donde alguien consultando sicre_tbl_sig en vivo (el sistema de
+    credencialización) vea la tabla vacía o a medio cargar.
+
+    `id` y `fecha_actualizacion` de sicre_tbl_sig no se pueblan desde esta
+    fuente (el CSV no las trae) -- se dejan sin tocar (NULL / seteada por
+    esta tarea, respectivamente) en vez de alterar el esquema de una tabla
+    que pertenece a otro proyecto Django.
+    """
+    import redis as redis_lib
+
+    r = redis_lib.Redis.from_url(settings.CELERY_BROKER_URL)
+    lock_acquired = r.set(
+        POBLADO_CREDENCIALES_LOCK_KEY,
+        self.request.id,
+        nx=True,
+        ex=POBLADO_CREDENCIALES_LOCK_TTL,
+    )
+
+    if not lock_acquired:
+        logger.warning(
+            "importar_poblado_credenciales ya está en ejecución (lock=%s). "
+            "Descartando tarea duplicada %s.",
+            r.get(POBLADO_CREDENCIALES_LOCK_KEY),
+            self.request.id,
+        )
+        return {"status": "skipped", "reason": "otra instancia ya está en ejecución"}
+
+    try:
+        download_dir = settings.ZAFIRO_DOWNLOAD_DIR
+        script_path = settings.POBLADO_CREDENCIALES_SCRIPT_PATH
+
+        logger.info("=== Iniciando tarea importar_poblado_credenciales ===")
+
+        if not Path(script_path).exists():
+            logger.warning(
+                "poblado_credenciales.js no encontrado en %s — tarea omitida "
+                "(pendiente de configurar POBLADO_CREDENCIALES_SCRIPT_PATH).",
+                script_path,
+            )
+            return {"status": "skipped", "reason": "script no encontrado"}
+
+        # Limpiar cualquier archivo previo para no leer una copia vieja si el
+        # script llegara a fallar antes de generar uno nuevo.
+        for previo in Path(download_dir).glob("poblado_credenciales.*"):
+            try:
+                previo.unlink()
+            except OSError:
+                pass
+
+        resultado = _ejecutar_script_node_generico(script_path, download_dir)
+
+        if resultado.returncode != 0:
+            logger.error(
+                "poblado_credenciales.js falló (código %s):\n%s",
+                resultado.returncode,
+                resultado.stderr,
+            )
+            raise RuntimeError(
+                f"poblado_credenciales.js falló con código {resultado.returncode}: "
+                f"{resultado.stderr}"
+            )
+
+        logger.info(
+            "=== importar_poblado_credenciales: script completado ===\n%s",
+            resultado.stdout,
+        )
+
+        candidatos = sorted(Path(download_dir).glob("poblado_credenciales.*"))
+        if not candidatos:
+            raise RuntimeError(
+                f"No se encontró poblado_credenciales.* en {download_dir} "
+                "tras ejecutar el script."
+            )
+        ruta_csv = candidatos[0]
+
+        filas = _leer_csv_poblado_credenciales(str(ruta_csv))
+
+        if not filas:
+            raise RuntimeError(
+                "El CSV de Poblado para credenciales se procesó pero no arrojó "
+                "ninguna fila válida -- se aborta antes de tocar sicre_tbl_sig "
+                "para no dejarla vacía."
+            )
+
+        total_cargado = _cargar_staging_sicre_tbl_sig(filas)
+        _swap_sicre_tbl_sig()
+
+        logger.info(
+            "=== importar_poblado_credenciales completado: %s filas en sicre_tbl_sig ===",
+            total_cargado,
+        )
+
+        return {"status": "ok", "filas": total_cargado}
+
+    except Exception as exc:
+        logger.error("Error en importar_poblado_credenciales: %s", exc)
+        raise self.retry(exc=exc)
+
+    finally:
+        r.delete(POBLADO_CREDENCIALES_LOCK_KEY)
