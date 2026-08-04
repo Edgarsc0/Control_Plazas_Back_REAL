@@ -14,6 +14,8 @@ from .views import (
     EmpleadosCompletosActivosDetalleView,
     EmpleadoFotoView,
     DatosPersonalesEmpleadoView,
+    DatosPersonalesBulkView,
+    DatosPersonalesCeldaOverrideView,
     ExportarPlantillaDetalleConFotosView,
     ExportarMovimientosPersonalConFotosView,
     ExportarBajasConFotosView,
@@ -301,6 +303,16 @@ urlpatterns = [
         "datos_personales/<str:no_empleado>/",
         DatosPersonalesEmpleadoView.as_view(),
         name="datos_personales_empleado",
+    ),
+    path(
+        "datos_personales_bulk/",
+        DatosPersonalesBulkView.as_view(),
+        name="datos_personales_bulk",
+    ),
+    path(
+        "datos_personales/override/",
+        DatosPersonalesCeldaOverrideView.as_view(),
+        name="datos_personales_override",
     ),
     path(
         "exportar_plantilla_detalle_con_fotos/",

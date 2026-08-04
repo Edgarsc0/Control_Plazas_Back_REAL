@@ -41,6 +41,7 @@ class ModulePermission(models.Model):
             ("view_plantilla_geografia", "Plantilla de Empleados: ver tab Distribución Geográfica"),
             ("view_plantilla_catalogos", "Plantilla de Empleados: ver tab Catálogos"),
             ("edit_plantilla_detalle", "Plantilla de Empleados: editar celdas en tab Detalle"),
+            ("edit_datos_personales", "Plantilla de Empleados: editar Escolaridad/Contacto/Domicilio en Datos Personales"),
             # Fotografía de empleado — permiso independiente por tab/componente
             # (un rol puede ver el tab pero no la fotografía dentro de él).
             ("view_plantilla_detalle_foto", "Plantilla de Empleados: ver fotografía en tab Detalle"),

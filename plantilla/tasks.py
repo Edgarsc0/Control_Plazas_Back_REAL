@@ -1248,6 +1248,26 @@ def _reaplicar_celda_overrides_empleados(bitacora):
         logger.error("Error en _reaplicar_celda_overrides_empleados: %s", e, exc_info=True)
 
 
+def _reaplicar_celda_overrides_datos_personales(bitacora):
+    """
+    Reaplica las ediciones manuales de celda (CeldaOverride, tabla
+    DATOS_PERSONALES) sobre DATOS_PERSONALES, recién truncada y recargada por
+    el swap Blue-Green. Mismo motivo que `_reaplicar_celda_overrides_empleados`.
+    """
+    from .celda_override import aplicar_overrides_datos_personales
+
+    try:
+        stats = aplicar_overrides_datos_personales(bitacora)
+        _append_log(
+            bitacora,
+            f"CeldaOverride reaplicados sobre DATOS_PERSONALES: "
+            f"{stats['aplicados']} aplicado(s), {stats['huerfanos']} huérfano(s).",
+        )
+    except Exception as e:
+        _append_log(bitacora, f"Error reaplicando CeldaOverride de DATOS_PERSONALES: {str(e)}", is_error=True)
+        logger.error("Error en _reaplicar_celda_overrides_datos_personales: %s", e, exc_info=True)
+
+
 def _calcular_y_actualizar_vacancias(bitacora):
     """
     Ejecuta el Stored Procedure sp_obtener_todas_vacancias, el cual
@@ -1683,6 +1703,10 @@ def importar_zafiro(self):
         # ── 10.5. Reaplicar ediciones manuales (CeldaOverride) sobre
         # EMPLEADOS_COMPLETOS_SIG, que se acaba de truncar y recargar ───────
         _reaplicar_celda_overrides_empleados(bitacora)
+
+        # ── 10.6. Reaplicar ediciones manuales (CeldaOverride) sobre
+        # DATOS_PERSONALES, que también se acaba de truncar y recargar ─────
+        _reaplicar_celda_overrides_datos_personales(bitacora)
 
         # ── 11. Generar/Actualizar Cuadro de Vacancia ──────────────────────
         _append_log(bitacora, "Generando/Actualizando Cuadro de Vacancia Diario...")

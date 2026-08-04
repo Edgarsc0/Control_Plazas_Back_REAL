@@ -72,6 +72,7 @@ from .celda_override import (
     obtener_estadisticas_overrides,
     obtener_historial_overrides,
     registrar_override_fecha_anuencia,
+    registrar_y_aplicar_override_datos_personales,
     registrar_y_aplicar_override_empleado,
     registrar_y_aplicar_override_quincenal,
     serializar_override,
@@ -1932,6 +1933,137 @@ class DatosPersonalesEmpleadoView(APIView):
         return Response(data, status=status.HTTP_200_OK)
 
 
+# Campos de DATOS_PERSONALES ofrecidos por la opción "Incluir datos
+# personales" del export a Excel de Plantilla Detalle (ver
+# DatosPersonalesBulkView y _aplicar_mapeos_detalle_excel). Se excluye
+# no_empleado (ya es la clave de cruce, viene como "numempleado" en
+# Plantilla Detalle) y se etiquetan con "(Datos Personales)" los campos que
+# también existen con otro significado/valor en la plantilla, para no
+# confundirlos en el Excel.
+DATOS_PERSONALES_EXPORT_FIELDS = [
+    ("hr_id_persona", "HR ID Persona"),
+    ("position_nbr", "Position NBR (Datos Personales)"),
+    ("nombre_completo", "Nombre Completo (Datos Personales)"),
+    ("rfc", "RFC (Datos Personales)"),
+    ("curp", "CURP (Datos Personales)"),
+    ("puesto_estructural", "Puesto Estructural (Datos Personales)"),
+    ("puesto_funcional", "Puesto Funcional (Datos Personales)"),
+    ("puesto", "Puesto (Datos Personales)"),
+    ("escolaridad_tipo", "Escolaridad Tipo"),
+    ("escolaridad_nivrl", "Escolaridad Nivel"),
+    ("escolaridad_area", "Escolaridad Área"),
+    ("carrera", "Carrera"),
+    ("centro_escolar", "Centro Escolar"),
+    ("humanos_status", "Status RH"),
+    ("estatus_nomina", "Estatus Nómina (Datos Personales)"),
+    ("phone", "Teléfono"),
+    ("phone1", "Teléfono 2"),
+    ("extension", "Extensión"),
+    ("email_addr", "Correo Electrónico"),
+    ("email_addr2", "Correo Electrónico 2"),
+    ("calle", "Calle"),
+    ("hr_numero_exterior", "Número Exterior"),
+    ("hr_numero_interior", "Número Interior"),
+    ("colonia", "Colonia"),
+    ("postal", "Código Postal"),
+    ("hr_municipio", "Municipio"),
+    ("estado", "Estado (Domicilio)"),
+    ("deptid", "Dept ID (Datos Personales)"),
+    ("unidad_administrativa", "Unidad Administrativa (Datos Personales)"),
+]
+
+
+def _get_datos_personales_bulk_map(no_empleados):
+    """no_empleado -> dict de DATOS_PERSONALES_EXPORT_FIELDS, para varios
+    empleados en una sola consulta (cruce por numempleado en el export)."""
+    limpios = sorted({str(n).strip() for n in no_empleados if str(n or "").strip()})
+    if not limpios:
+        return {}
+    campos = [f for f, _ in DATOS_PERSONALES_EXPORT_FIELDS]
+    registros = DatosPersonales.objects.filter(no_empleado__in=limpios).values(
+        "no_empleado", *campos
+    )
+    return {r["no_empleado"]: r for r in registros}
+
+
+class DatosPersonalesBulkView(APIView):
+    """
+    Datos personales de VARIOS empleados en una sola consulta — usado por la
+    opción "Incluir datos personales" del export a Excel de Plantilla
+    Detalle (100% client-side vía ExcelJS en PlantillaDetalleTab.jsx): el
+    front manda los `numempleado` visibles y arma las columnas extra
+    localmente. Mismos permisos que DatosPersonalesEmpleadoView (consulta
+    individual del expediente).
+    """
+
+    view_permission = (
+        "authentication.view_plantilla_detalle",
+        "authentication.view_plantilla_estatus_nomina",
+        "authentication.view_plantilla_mov_posiciones",
+        "authentication.view_plantilla_movimientos",
+        "authentication.view_plantilla_bajas",
+        "authentication.view_plantilla_geografia",
+    )
+
+    def post(self, request):
+        no_empleados = request.data.get("no_empleados")
+        if not isinstance(no_empleados, list) or not no_empleados:
+            return Response(
+                {"detail": "no_empleados (lista) es requerido."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        mapa = _get_datos_personales_bulk_map(no_empleados)
+        return Response({"results": mapa}, status=status.HTTP_200_OK)
+
+
+class DatosPersonalesCeldaOverrideView(APIView):
+    """
+    Edición manual de una celda de DATOS_PERSONALES (Escolaridad/Contacto/
+    Domicilio) desde el tab "Datos personales" del expediente. Registra el
+    cambio en CeldaOverride (tabla=DATOS_PERSONALES, clave no_empleado) y lo
+    aplica de inmediato sobre la fila viva (ver plantilla.celda_override).
+    Se reaplica tras cada importar_zafiro, ya que la tabla se trunca y
+    recarga completa (blue-green swap).
+    """
+
+    edit_permission = "authentication.edit_datos_personales"
+
+    def post(self, request):
+        no_empleado = request.data.get("no_empleado")
+        columna = request.data.get("columna")
+        valor_nuevo = request.data.get("valor_nuevo")
+        if not no_empleado or not columna:
+            return Response(
+                {"detail": "no_empleado y columna son requeridos."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            override = registrar_y_aplicar_override_datos_personales(
+                no_empleado, columna, valor_nuevo, request.user
+            )
+        except ValueError as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        if override is None:
+            return Response({
+                "no_empleado": no_empleado,
+                "columna": columna,
+                "valor_nuevo": valor_nuevo,
+                "sin_cambios": True,
+            })
+
+        return Response({
+            "no_empleado": no_empleado,
+            "columna": columna,
+            "valor_nuevo": override.valor_nuevo,
+            "valor_original": override.valor_original,
+            "usuario": request.user.username,
+            "fecha_modificacion": override.fecha_modificacion,
+        })
+
+
 def _mapear_estado_nomina_excel(val):
     """Réplica exacta de ``mapEstadoNomina`` (frontend, PlantillaDetalleTab.jsx)
     para que el export server-side muestre las mismas etiquetas que la tabla."""
@@ -2060,6 +2192,7 @@ class ExportarPlantillaDetalleConFotosView(APIView):
         incluir_fotos = bool(request.data.get("incluir_fotos")) and request.user.has_perm(
             "authentication.view_plantilla_detalle_foto"
         )
+        incluir_datos_personales = bool(request.data.get("incluir_datos_personales"))
 
         if not posiciones or not columnas:
             return Response({"error": "Faltan 'posiciones' o 'columnas'."}, status=status.HTTP_400_BAD_REQUEST)
@@ -2081,6 +2214,19 @@ class ExportarPlantillaDetalleConFotosView(APIView):
                 {"error": f"El conjunto tiene {len(rows)} filas — el máximo para incluir fotografías es 15,000."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        # "Incluir datos personales": cruce por numempleado con DATOS_PERSONALES,
+        # agregando sus columnas (prefijo "dp_" para no pisar columnas homónimas
+        # de Plantilla Detalle, ver DATOS_PERSONALES_EXPORT_FIELDS) al final.
+        if incluir_datos_personales:
+            mapa_dp = _get_datos_personales_bulk_map([r.get("numempleado") for r in rows])
+            for r in rows:
+                registro_dp = mapa_dp.get(str(r.get("numempleado") or "").strip(), {})
+                for campo, _label in DATOS_PERSONALES_EXPORT_FIELDS:
+                    r[f"dp_{campo}"] = registro_dp.get(campo, "")
+            columnas = list(columnas) + [
+                {"key": f"dp_{campo}", "label": label} for campo, label in DATOS_PERSONALES_EXPORT_FIELDS
+            ]
 
         buffer = generar_workbook_excel_con_fotos(
             columnas=columnas, rows=rows, incluir_fotos=incluir_fotos,
