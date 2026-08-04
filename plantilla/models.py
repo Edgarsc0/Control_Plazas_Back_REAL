@@ -1319,6 +1319,125 @@ class MovPosStaging(MovPosBase):
         ]
 
 
+class DatosPersonalesBase(models.Model):
+    """
+    Modelo para la tabla DATOS_PERSONALES.
+    Se importa automáticamente vía tarea Celery desde el CSV de ZAFIRO
+    (zafiro_info, argIndex por definir). Celery trunca y recarga esta tabla
+    en cada ejecución. Todas las columnas son varchar(255) (esquema fuente:
+    zafiro_info.csv, delimitado por "|").
+    """
+
+    no_empleado = models.CharField(
+        db_column="NO_EMPLEADO", max_length=255, blank=True, null=True, db_index=True
+    )
+    hr_id_persona = models.CharField(
+        db_column="HR_ID_PERSONA", max_length=255, blank=True, null=True
+    )
+    position_nbr = models.CharField(
+        db_column="POSITION_NBR", max_length=255, blank=True, null=True
+    )
+    nombre_completo = models.CharField(
+        db_column="NOMBRE_COMPLETO", max_length=255, blank=True, null=True
+    )
+    rfc = models.CharField(db_column="RFC", max_length=255, blank=True, null=True)
+    curp = models.CharField(db_column="CURP", max_length=255, blank=True, null=True)
+    puesto_estructural = models.CharField(
+        db_column="PUESTO_ESTRUCTURAL", max_length=255, blank=True, null=True
+    )
+    puesto_funcional = models.CharField(
+        db_column="PUESTO_FUNCIONAL", max_length=255, blank=True, null=True
+    )
+    puesto = models.CharField(db_column="PUESTO", max_length=255, blank=True, null=True)
+    escolaridad_tipo = models.CharField(
+        db_column="ESCOLARIDAD_TIPO", max_length=255, blank=True, null=True
+    )
+    escolaridad_nivrl = models.CharField(
+        db_column="ESCOLARIDAD_NIVRL", max_length=255, blank=True, null=True
+    )
+    escolaridad_area = models.CharField(
+        db_column="ESCOLARIDAD_AREA", max_length=255, blank=True, null=True
+    )
+    carrera = models.CharField(
+        db_column="CARRERA", max_length=255, blank=True, null=True
+    )
+    centro_escolar = models.CharField(
+        db_column="CENTRO_ESCOLAR", max_length=255, blank=True, null=True
+    )
+    humanos_status = models.CharField(
+        db_column="HUMANOS_STATUS", max_length=255, blank=True, null=True
+    )
+    estatus_nomina = models.CharField(
+        db_column="ESTATUS_NOMINA", max_length=255, blank=True, null=True
+    )
+    phone = models.CharField(db_column="PHONE", max_length=255, blank=True, null=True)
+    phone1 = models.CharField(
+        db_column="PHONE1", max_length=255, blank=True, null=True
+    )
+    calle = models.CharField(db_column="CALLE", max_length=255, blank=True, null=True)
+    hr_numero_exterior = models.CharField(
+        db_column="HR_NUMERO_EXTERIOR", max_length=255, blank=True, null=True
+    )
+    hr_numero_interior = models.CharField(
+        db_column="HR_NUMERO_INTERIOR", max_length=255, blank=True, null=True
+    )
+    postal = models.CharField(
+        db_column="POSTAL", max_length=255, blank=True, null=True
+    )
+    colonia = models.CharField(
+        db_column="COLONIA", max_length=255, blank=True, null=True
+    )
+    hr_municipio = models.CharField(
+        db_column="HR_MUNICIPIO", max_length=255, blank=True, null=True
+    )
+    estado = models.CharField(
+        db_column="ESTADO", max_length=255, blank=True, null=True
+    )
+    email_addr2 = models.CharField(
+        db_column="EMAIL_ADDR2", max_length=255, blank=True, null=True
+    )
+    email_addr = models.CharField(
+        db_column="EMAIL_ADDR", max_length=255, blank=True, null=True
+    )
+    deptid = models.CharField(
+        db_column="DEPTID", max_length=255, blank=True, null=True
+    )
+    unidad_administrativa = models.CharField(
+        db_column="UNIDAD_ADMINISTRATIVA", max_length=255, blank=True, null=True
+    )
+    # No viene en el CSV fuente: columna extra solicitada, queda NULL en la
+    # importación automática de Celery (llenado manual/futuro).
+    extension = models.CharField(
+        db_column="extension", max_length=255, blank=True, null=True
+    )
+
+    class Meta:
+        abstract = True
+
+    def __str__(self):
+        return f"{self.nombre_completo} ({self.no_empleado})"
+
+
+class DatosPersonales(DatosPersonalesBase):
+    class Meta:
+        managed = True
+        db_table = "DATOS_PERSONALES"
+
+
+class DatosPersonalesHistorico(DatosPersonalesBase):
+    fecha_descarga = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        managed = True
+        db_table = "DATOS_PERSONALES_HISTORICO"
+
+
+class DatosPersonalesStaging(DatosPersonalesBase):
+    class Meta:
+        managed = True
+        db_table = "DATOS_PERSONALES_STAGING"
+
+
 class ZafiroBitacora(models.Model):
     fecha_ejecucion = models.DateTimeField(auto_now_add=True)
     duracion_segundos = models.FloatField(null=True, blank=True)
@@ -1326,6 +1445,7 @@ class ZafiroBitacora(models.Model):
     registros_completos = models.IntegerField(default=0)
     registros_bajas = models.IntegerField(default=0)
     registros_historial = models.IntegerField(default=0)
+    registros_datos_personales = models.IntegerField(default=0)
     status = models.CharField(max_length=50, default="OK")
     error_message = models.TextField(null=True, blank=True)
     es_historico = models.BooleanField(default=False)

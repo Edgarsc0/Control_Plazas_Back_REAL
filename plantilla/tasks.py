@@ -1,8 +1,9 @@
 """
 Tarea Celery para descargar e importar datos de ZAFIRO a la BD.
 
-Flujo (tarea `importar_zafiro`), por cada uno de los 4 reportes
-(Posiciones, Empleados Completos, Empleados Bajas, Historial Posición):
+Flujo (tarea `importar_zafiro`), por cada uno de los 5 reportes
+(Posiciones, Empleados Completos, Empleados Bajas, Historial Posición,
+Datos Personales):
   1. Ejecuta el script Node.js index.js con el argIndex correspondiente
      para descargar el CSV.
   2. Corrige el CSV con el corrector heurístico (binario externo), si existe.
@@ -10,7 +11,7 @@ Flujo (tarea `importar_zafiro`), por cada uno de los 4 reportes
      bulk_create (quitando antes los índices secundarios para acelerar la
      carga masiva, y recreándolos al terminar).
 
-Tras importar los 4 reportes:
+Tras importar los 5 reportes:
   4. Hace un swap atómico (RENAME TABLE) entre las tablas activas y las de
      staging (Blue-Green), dejando los datos nuevos en producción al
      instante, y trunca las tablas staging (que quedan con los datos viejos).
@@ -59,6 +60,8 @@ from .models import (
     BajasSigStaging,
     CpTblMovCompleto290526Historico,
     CpTblMovCompleto290526Staging,
+    DatosPersonalesHistorico,
+    DatosPersonalesStaging,
     EmpleadosCompletosSig,
     EmpleadosCompletosSigHistorico,
     EmpleadosCompletosSigStaging,
@@ -77,6 +80,7 @@ ZAFIRO_FILES = {
     3: "zafiro_info_Empleados_Bajas.csv",  # argIndex=3 → Empleados Bajas
     1: "zafiro_info_Posiciones.csv",  # argIndex=1 → Posiciones
     0: "zafiro_info_Historial_Posición.csv",  # argIndex=0 → Historial Posición
+    7: "zafiro_info_Datos_Personales.csv",  # argIndex=7 → ZAFIRO_WRK_FLAG7_LBL (Datos Personales)
 }
 
 
@@ -617,6 +621,106 @@ def _importar_csv_bajas(
     return len(registros)
 
 
+def _importar_csv_datos_personales(
+    csv_path: str, guardar_historico: bool = False, bitacora=None
+) -> int:
+    """
+    Lee el CSV de Datos Personales (zafiro_info, argIndex=7) y hace
+    bulk_create en DATOS_PERSONALES. Retorna el número de registros
+    insertados. La columna `extension` no viene en el CSV y queda NULL.
+    """
+    registros = []
+    registros_historico = []
+    with open(csv_path, encoding="cp1252", newline="") as f:
+        reader = csv.DictReader(f, delimiter="|")
+        reader.fieldnames = _preparar_columnas_csv(reader.fieldnames)
+        for row in reader:
+            registros.append(
+                DatosPersonalesStaging(
+                    no_empleado=row.get("NO_EMPLEADO") or None,
+                    hr_id_persona=row.get("HR_ID_PERSONA") or None,
+                    position_nbr=row.get("POSITION_NBR") or None,
+                    nombre_completo=row.get("NOMBRE_COMPLETO") or None,
+                    rfc=row.get("RFC") or None,
+                    curp=row.get("CURP") or None,
+                    puesto_estructural=row.get("PUESTO_ESTRUCTURAL") or None,
+                    puesto_funcional=row.get("PUESTO_FUNCIONAL") or None,
+                    puesto=row.get("PUESTO") or None,
+                    escolaridad_tipo=row.get("ESCOLARIDAD_TIPO") or None,
+                    escolaridad_nivrl=row.get("ESCOLARIDAD_NIVRL") or None,
+                    escolaridad_area=row.get("ESCOLARIDAD_AREA") or None,
+                    carrera=row.get("CARRERA") or None,
+                    centro_escolar=row.get("CENTRO_ESCOLAR") or None,
+                    humanos_status=row.get("HUMANOS_STATUS") or None,
+                    estatus_nomina=row.get("ESTATUS_NOMINA") or None,
+                    phone=row.get("PHONE") or None,
+                    phone1=row.get("PHONE1") or None,
+                    calle=row.get("CALLE") or None,
+                    hr_numero_exterior=row.get("HR_NUMERO_EXTERIOR") or None,
+                    hr_numero_interior=row.get("HR_NUMERO_INTERIOR") or None,
+                    postal=row.get("POSTAL") or None,
+                    colonia=row.get("COLONIA") or None,
+                    hr_municipio=row.get("HR_MUNICIPIO") or None,
+                    estado=row.get("ESTADO") or None,
+                    email_addr2=row.get("EMAIL_ADDR2") or None,
+                    email_addr=row.get("EMAIL_ADDR") or None,
+                    deptid=row.get("DEPTID") or None,
+                    unidad_administrativa=row.get("UNIDAD_ADMINISTRATIVA") or None,
+                )
+            )
+            if guardar_historico:
+                registros_historico.append(
+                    DatosPersonalesHistorico(
+                        no_empleado=row.get("NO_EMPLEADO") or None,
+                        hr_id_persona=row.get("HR_ID_PERSONA") or None,
+                        position_nbr=row.get("POSITION_NBR") or None,
+                        nombre_completo=row.get("NOMBRE_COMPLETO") or None,
+                        rfc=row.get("RFC") or None,
+                        curp=row.get("CURP") or None,
+                        puesto_estructural=row.get("PUESTO_ESTRUCTURAL") or None,
+                        puesto_funcional=row.get("PUESTO_FUNCIONAL") or None,
+                        puesto=row.get("PUESTO") or None,
+                        escolaridad_tipo=row.get("ESCOLARIDAD_TIPO") or None,
+                        escolaridad_nivrl=row.get("ESCOLARIDAD_NIVRL") or None,
+                        escolaridad_area=row.get("ESCOLARIDAD_AREA") or None,
+                        carrera=row.get("CARRERA") or None,
+                        centro_escolar=row.get("CENTRO_ESCOLAR") or None,
+                        humanos_status=row.get("HUMANOS_STATUS") or None,
+                        estatus_nomina=row.get("ESTATUS_NOMINA") or None,
+                        phone=row.get("PHONE") or None,
+                        phone1=row.get("PHONE1") or None,
+                        calle=row.get("CALLE") or None,
+                        hr_numero_exterior=row.get("HR_NUMERO_EXTERIOR") or None,
+                        hr_numero_interior=row.get("HR_NUMERO_INTERIOR") or None,
+                        postal=row.get("POSTAL") or None,
+                        colonia=row.get("COLONIA") or None,
+                        hr_municipio=row.get("HR_MUNICIPIO") or None,
+                        estado=row.get("ESTADO") or None,
+                        email_addr2=row.get("EMAIL_ADDR2") or None,
+                        email_addr=row.get("EMAIL_ADDR") or None,
+                        deptid=row.get("DEPTID") or None,
+                        unidad_administrativa=row.get("UNIDAD_ADMINISTRATIVA") or None,
+                    )
+                )
+
+    with (
+        _staging_sin_indices(DatosPersonalesStaging._meta.db_table, bitacora),
+        transaction.atomic(),
+    ):
+        _truncar_tabla(DatosPersonalesStaging, bitacora)
+        DatosPersonalesStaging.objects.bulk_create(registros, batch_size=1000)
+        if guardar_historico:
+            DatosPersonalesHistorico.objects.bulk_create(
+                registros_historico, batch_size=1000
+            )
+
+    _append_log(
+        bitacora,
+        f"DatosPersonalesStaging: {len(registros)} registros insertados en staging.",
+    )
+    return len(registros)
+
+
 def _importar_csv_posiciones(
     csv_path: str, guardar_historico: bool = False, bitacora=None
 ) -> int:
@@ -936,7 +1040,10 @@ def _swap_blue_green_tables(bitacora=None):
             BAJAS_SIG_TEMP TO BAJAS_SIG_STAGING,
             cp_tbl_mov_completo_29_05_26 TO cp_tbl_mov_completo_29_05_26_temp,
             cp_tbl_mov_completo_29_05_26_staging TO cp_tbl_mov_completo_29_05_26,
-            cp_tbl_mov_completo_29_05_26_temp TO cp_tbl_mov_completo_29_05_26_staging;
+            cp_tbl_mov_completo_29_05_26_temp TO cp_tbl_mov_completo_29_05_26_staging,
+            DATOS_PERSONALES TO DATOS_PERSONALES_TEMP,
+            DATOS_PERSONALES_STAGING TO DATOS_PERSONALES,
+            DATOS_PERSONALES_TEMP TO DATOS_PERSONALES_STAGING;
     """
     with connection.cursor() as cursor:
         cursor.execute(sql)
@@ -950,6 +1057,7 @@ def _swap_blue_green_tables(bitacora=None):
     _truncar_tabla(EmpleadosCompletosSigStaging, bitacora)
     _truncar_tabla(BajasSigStaging, bitacora)
     _truncar_tabla(CpTblMovCompleto290526Staging, bitacora)
+    _truncar_tabla(DatosPersonalesStaging, bitacora)
 
 
 def _materializar_mov_pos_latest(bitacora=None):
@@ -1409,6 +1517,8 @@ def importar_zafiro(self):
       4. Descarga e importa CSV de Historial Posición (argIndex=0) →
          cp_tbl_mov_completo_29_05_26_staging (conservando además los
          registros previos a 2026 que ya estaban en producción)
+      5. Descarga e importa CSV de Datos Personales (argIndex=7) →
+         DATOS_PERSONALES_STAGING
 
          Cada CSV es procesado por el corrector heurístico antes de la
          importación. Si `es_historico` (run después de las 23:00), cada
@@ -1479,6 +1589,7 @@ def importar_zafiro(self):
         registros_completos=0,
         registros_bajas=0,
         registros_historial=0,
+        registros_datos_personales=0,
     )
     _append_log(bitacora, "=== Iniciando tarea importar_zafiro ===")
 
@@ -1517,6 +1628,17 @@ def importar_zafiro(self):
             csv_historial_corregido, es_historico, bitacora
         )
         resultados["historial_posicion"] = total_historial
+
+        # ── 4.5. Datos Personales (argIndex=7) ─────────────────────────────
+        _append_log(bitacora, "Descargando Datos Personales (argIndex=7)...")
+        csv_datos_personales = _ejecutar_script_node(7, download_dir, script_path, bitacora)
+        csv_datos_personales_corregido = _corregir_csv(
+            csv_datos_personales, script_path, bitacora
+        )
+        total_datos_personales = _importar_csv_datos_personales(
+            csv_datos_personales_corregido, es_historico, bitacora
+        )
+        resultados["datos_personales"] = total_datos_personales
 
         # Realizar el intercambio atómico (Blue-Green Swap)
         _swap_blue_green_tables(bitacora)
@@ -1582,6 +1704,7 @@ def importar_zafiro(self):
         bitacora.registros_completos = total_completos
         bitacora.registros_bajas = total_bajas
         bitacora.registros_historial = total_historial
+        bitacora.registros_datos_personales = total_datos_personales
         bitacora.status = "EXITO"
         bitacora.save()
 
@@ -1647,7 +1770,7 @@ def importar_zafiro(self):
 
         _append_log(
             bitacora,
-            f"=== Tarea completada en {duracion}s | Posiciones: {total_posiciones} | Completos: {total_completos} | Bajas: {total_bajas} | Historial: {total_historial} ===",
+            f"=== Tarea completada en {duracion}s | Posiciones: {total_posiciones} | Completos: {total_completos} | Bajas: {total_bajas} | Historial: {total_historial} | Datos Personales: {total_datos_personales} ===",
         )
 
         return {

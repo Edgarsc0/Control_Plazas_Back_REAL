@@ -43,6 +43,7 @@ from .models import (
     COLUMNAS_QUINCENAL_VALIDAS,
     COLUMNAS_SOLICITUD_VACANTE,
     CuadroVacancia,
+    DatosPersonales,
     DESCRIPCION_NJ_CHOICES,
     EmpleadosCompletosSig,
     MovPos,
@@ -1862,6 +1863,73 @@ class EmpleadoFotoView(APIView):
         response["ETag"] = etag
         response["Cache-Control"] = "private, max-age=86400"
         return response
+
+
+class DatosPersonalesEmpleadoView(APIView):
+    """
+    Datos personales (tabla DATOS_PERSONALES, importada por Celery desde el
+    CSV de ZAFIRO) de un solo empleado — consumida por el tab "Datos
+    personales" del expediente (EmployeeRecordModal), cargados bajo demanda
+    igual que la fotografía. Comparte permisos con el expediente en general:
+    basta con poder ver cualquiera de los tabs que lo abren.
+    """
+
+    view_permission = (
+        "authentication.view_plantilla_detalle",
+        "authentication.view_plantilla_estatus_nomina",
+        "authentication.view_plantilla_mov_posiciones",
+        "authentication.view_plantilla_movimientos",
+        "authentication.view_plantilla_bajas",
+        "authentication.view_plantilla_geografia",
+    )
+
+    def get(self, request, no_empleado):
+        no_empleado = str(no_empleado).strip()
+        if not no_empleado:
+            return Response(
+                {"detail": "no_empleado es requerido."}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        registro = DatosPersonales.objects.filter(no_empleado=no_empleado).first()
+        if registro is None:
+            return Response(
+                {"detail": "No se encontraron datos personales para este empleado."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        data = {
+            "no_empleado": registro.no_empleado,
+            "hr_id_persona": registro.hr_id_persona,
+            "position_nbr": registro.position_nbr,
+            "nombre_completo": registro.nombre_completo,
+            "rfc": registro.rfc,
+            "curp": registro.curp,
+            "puesto": registro.puesto,
+            "puesto_estructural": registro.puesto_estructural,
+            "puesto_funcional": registro.puesto_funcional,
+            "deptid": registro.deptid,
+            "unidad_administrativa": registro.unidad_administrativa,
+            "humanos_status": registro.humanos_status,
+            "estatus_nomina": registro.estatus_nomina,
+            "escolaridad_tipo": registro.escolaridad_tipo,
+            "escolaridad_nivrl": registro.escolaridad_nivrl,
+            "escolaridad_area": registro.escolaridad_area,
+            "carrera": registro.carrera,
+            "centro_escolar": registro.centro_escolar,
+            "phone": registro.phone,
+            "phone1": registro.phone1,
+            "extension": registro.extension,
+            "email_addr": registro.email_addr,
+            "email_addr2": registro.email_addr2,
+            "calle": registro.calle,
+            "hr_numero_exterior": registro.hr_numero_exterior,
+            "hr_numero_interior": registro.hr_numero_interior,
+            "colonia": registro.colonia,
+            "postal": registro.postal,
+            "hr_municipio": registro.hr_municipio,
+            "estado": registro.estado,
+        }
+        return Response(data, status=status.HTTP_200_OK)
 
 
 def _mapear_estado_nomina_excel(val):

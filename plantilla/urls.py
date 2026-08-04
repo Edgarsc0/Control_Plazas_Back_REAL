@@ -13,6 +13,7 @@ from .views import (
     EmpleadosCompletosEstatusNominaResumenView,
     EmpleadosCompletosActivosDetalleView,
     EmpleadoFotoView,
+    DatosPersonalesEmpleadoView,
     ExportarPlantillaDetalleConFotosView,
     ExportarMovimientosPersonalConFotosView,
     ExportarBajasConFotosView,
@@ -295,6 +296,11 @@ urlpatterns = [
         "empleado_foto/<str:numempleado>/",
         EmpleadoFotoView.as_view(),
         name="empleado_foto",
+    ),
+    path(
+        "datos_personales/<str:no_empleado>/",
+        DatosPersonalesEmpleadoView.as_view(),
+        name="datos_personales_empleado",
     ),
     path(
         "exportar_plantilla_detalle_con_fotos/",
