@@ -3637,6 +3637,23 @@ class MovPosDetalleView(APIView):
                 results = []
             return Response(results)
 
+        # "codigo" se inyecta post-query desde CatCorreccionPosicion (ver
+        # `_get_mapa_codigos`/`r["codigo"] = ...` más abajo), no es un campo
+        # real de MovPos -> no está en `valid_fields` y sin esta rama caía al
+        # fallback de abajo, devolviendo el listado paginado completo en vez
+        # de valores distintos (rompía el dropdown de filtro de esa columna).
+        if distinct_field == "codigo":
+            mapa_codigos = _get_mapa_codigos()
+            all_pos = list(queryset.values_list("no_pos_actual", flat=True))
+            counts = {}
+            for pos in all_pos:
+                val = mapa_codigos.get(pos, "")
+                counts[val] = counts.get(val, 0) + 1
+            results = [
+                {"value": k, "count": v} for k, v in sorted(counts.items())
+            ]
+            return Response(results)
+
         if distinct_field in valid_fields:
             is_text = distinct_field in text_fields
             target_distinct_field = (
