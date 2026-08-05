@@ -4188,7 +4188,7 @@ def _cargar_catalogos_alineacion():
     with connection.cursor() as cursor:
         cursor.execute("SELECT codigo, nombre FROM ua_unidadadministrativa")
         ua_lookup = {(row[0] or "").strip().upper(): row[1] for row in cursor.fetchall()}
-        cursor.execute("SELECT departamento, descripcion_larga FROM ORGANIGRAMA_ANAM WHERE isSIGInfo = 0")
+        cursor.execute("SELECT departamento, descripcion_larga FROM ORGANIGRAMA_ANAM WHERE isSIGInfo = 1")
         depto_lookup = {(row[0] or "").strip().upper(): row[1] for row in cursor.fetchall()}
     return {"ua": ua_lookup, "depto": depto_lookup}
 
