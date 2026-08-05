@@ -8,7 +8,9 @@ from rest_framework.response import Response
 from rest_framework.authtoken.models import Token
 from django.contrib.auth.models import Group, User
 from django.contrib.auth import login
-from django.core.mail import send_mail
+from django.core.mail import EmailMultiAlternatives, send_mail
+from email.mime.image import MIMEImage
+import os
 from django.db.models import Count
 from django.db.models.functions import ExtractHour, TruncDate
 from django.template.loader import render_to_string
@@ -314,20 +316,32 @@ class CheckEmailView(views.APIView):
             VerificationCode.objects.create(email=email, code=code)
 
             # Preparar correo
-            subject = f"{code} es tu código de verificación de Eje Central"
+            subject = f"{code} es tu código de verificación del Sistema de Control de Plazas"
             html_message = render_to_string("emails/otp_code.html", {"code": code})
             plain_message = strip_tags(html_message)
             from_email = settings.EMAIL_HOST_USER
 
             try:
-                send_mail(
-                    subject,
-                    plain_message,
-                    from_email,
-                    [email],
-                    html_message=html_message,
-                    fail_silently=False,
+                msg = EmailMultiAlternatives(
+                    subject, plain_message, from_email, [email]
                 )
+                msg.attach_alternative(html_message, "text/html")
+
+                assets_dir = os.path.join(
+                    os.path.dirname(__file__), "templates", "emails", "assets"
+                )
+                inline_images = {
+                    "anam_logo": "anam_logo.png",
+                    "icon_control_plazas": "icon_control_plazas.png",
+                }
+                for content_id, filename in inline_images.items():
+                    with open(os.path.join(assets_dir, filename), "rb") as f:
+                        image = MIMEImage(f.read())
+                    image.add_header("Content-ID", f"<{content_id}>")
+                    image.add_header("Content-Disposition", "inline", filename=filename)
+                    msg.attach(image)
+
+                msg.send(fail_silently=False)
             except Exception as e:
                 return Response(
                     {"error": f"Error al enviar correo: {str(e)}"},

@@ -15,7 +15,7 @@ import re
 from datetime import datetime, timedelta
 
 from django.conf import settings
-from django.db import transaction
+from django.db import connection, transaction
 from django.db.models import Count, JSONField, Q
 
 from .models import (
@@ -292,61 +292,29 @@ def aplicar_overrides_datos_personales(bitacora=None):
     recién importada (blue-green swap, ver tasks._swap_blue_green_tables).
     No falla si un `no_empleado` ya no existe — solo lo cuenta como huérfano.
 
-    Bulk (una query para traer las filas + un `bulk_update` por cada
-    combinación de columnas tocadas, en vez de un `UPDATE` por override):
-    con cientos/miles de overrides activos (p.ej. conmutador/extension
-    cargados para toda la Plantilla vía Directorio ANAM), la versión
-    anterior —un `.filter(no_empleado=...).update(...)` por cada override,
-    dentro de una única transacción larga— tardaba minutos contra la BD
-    remota y quedaba expuesta a perder todo el trabajo si esa transacción
-    no llegaba a cerrar (p.ej. worker reiniciado a la mitad).
+    Delega en el SP `sp_aplicar_overrides_datos_personales`
+    (plantilla/sql/sp_aplicar_overrides_datos_personales.sql): 1 UPDATE...JOIN
+    por columna distinta, ejecutado dentro de MySQL, en vez de traer filas a
+    Python y hacer bulk_update. Contra la BD remota (alta latencia WAN), la
+    versión anterior en Python (una query para traer las filas + un
+    `bulk_update` por cada combinación de columnas tocadas) tardaba ~40s con
+    ~16k overrides activos por los round-trips Python<->MySQL; el SP resuelve
+    lo mismo en <1s porque todo el trabajo ocurre server-side.
+
+    IMPORTANTE: el SP tiene hardcodeado el mapeo columna Django -> columna
+    real de DATOS_PERSONALES como whitelist. Si se agrega/quita una columna
+    editable en EDITABLE_COLUMNS_DATOS_PERSONALES, hay que actualizar también
+    el CASE del SP (ver el .sql) y re-ejecutarlo en la BD.
     """
-    overrides = list(
-        CeldaOverride.objects.filter(tabla=TABLA_DATOS_PERSONALES, activo=True)
-    )
-    if not overrides:
-        return {"aplicados": 0, "huerfanos": 0}
+    with transaction.atomic():
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "CALL sp_aplicar_overrides_datos_personales(@aplicados, @huerfanos)"
+            )
+            cursor.execute("SELECT @aplicados, @huerfanos")
+            aplicados, huerfanos = cursor.fetchone()
 
-    no_empleados = {ov.clave_negocio.get("no_empleado") for ov in overrides}
-    no_empleados.discard(None)
-    filas = {
-        f.no_empleado: f
-        for f in DatosPersonales.objects.filter(no_empleado__in=no_empleados)
-    }
-
-    aplicados, huerfanos = 0, 0
-    columnas_por_empleado = {}
-
-    for ov in overrides:
-        no_empleado = ov.clave_negocio.get("no_empleado")
-        fila = filas.get(no_empleado)
-        if fila is None:
-            huerfanos += 1
-            continue
-
-        valor = ov.valor_nuevo
-        if _es_columna_json_datos_personales(ov.columna) and valor is not None:
-            try:
-                valor = json.loads(valor)
-            except (TypeError, ValueError):
-                valor = None
-
-        setattr(fila, ov.columna, valor)
-        columnas_por_empleado.setdefault(no_empleado, set()).add(ov.columna)
-        aplicados += 1
-
-    if columnas_por_empleado:
-        grupos = {}
-        for no_empleado, columnas in columnas_por_empleado.items():
-            grupos.setdefault(frozenset(columnas), []).append(filas[no_empleado])
-
-        with transaction.atomic():
-            for columnas, filas_grupo in grupos.items():
-                DatosPersonales.objects.bulk_update(
-                    filas_grupo, list(columnas), batch_size=500
-                )
-
-    return {"aplicados": aplicados, "huerfanos": huerfanos}
+    return {"aplicados": aplicados or 0, "huerfanos": huerfanos or 0}
 
 
 def aplicar_overrides_empleados_completos(bitacora=None):

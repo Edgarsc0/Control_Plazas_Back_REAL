@@ -2,39 +2,189 @@
 <html>
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f4f4; margin: 0; padding: 0; }
-        .container { max-width: 600px; margin: 20px auto; background-color: #ffffff; border-radius: 16px; overflow: hidden; shadow: 0 4px 6px rgba(0,0,0,0.1); }
-        .header { background-color: #621f32; padding: 40px 20px; text-align: center; }
-        .logo { max-height: 80px; margin-bottom: 20px; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.2)); }
-        .content { padding: 40px; text-align: center; color: #333333; }
-        .title { color: #621f32; font-size: 24px; font-weight: bold; margin-bottom: 20px; }
-        .code-container { background-color: #f9f9f9; border: 2px dashed #bc955c; border-radius: 12px; padding: 30px; margin: 30px 0; }
-        .code { font-size: 48px; font-weight: 900; letter-spacing: 10px; color: #621f32; margin: 0; }
-        .footer { background-color: #f4f4f4; padding: 20px; text-align: center; color: #777777; font-size: 12px; }
-        .accent { color: #bc955c; font-weight: bold; }
-        .btn { background-color: #621f32; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block; margin-top: 20px; }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #ece7e3;
+            margin: 0;
+            padding: 0;
+        }
+        .wrapper {
+            width: 100%;
+            padding: 32px 16px;
+        }
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+            background-color: #ffffff;
+            border-radius: 16px;
+            overflow: hidden;
+            box-shadow: 0 10px 30px rgba(98, 31, 50, 0.15);
+        }
+        .header {
+            background: linear-gradient(135deg, #7a2740 0%, #621f32 60%, #4a1826 100%);
+            padding: 32px 20px 30px;
+            text-align: center;
+        }
+        .logo-badge {
+            display: inline-block;
+            background-color: #ffffff;
+            border-radius: 12px;
+            padding: 10px 18px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+            margin-bottom: 20px;
+        }
+        .logo-badge img {
+            display: block;
+            height: 32px;
+        }
+        .header-title {
+            color: #ffffff;
+            margin: 0;
+            font-size: 19px;
+            font-weight: 700;
+            letter-spacing: 1px;
+        }
+        .header-title .accent {
+            color: #d9b789;
+        }
+        .header-subtitle {
+            color: rgba(255, 255, 255, 0.7);
+            font-size: 11px;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            margin: 6px 0 0;
+        }
+        .content {
+            padding: 40px 36px 32px;
+            text-align: center;
+            color: #333333;
+        }
+        .title {
+            color: #621f32;
+            font-size: 22px;
+            font-weight: 700;
+            margin: 0 0 16px;
+        }
+        .lead {
+            font-size: 15px;
+            line-height: 1.6;
+            color: #4a4a4a;
+            margin: 0 0 8px;
+        }
+        .accent {
+            color: #a8783f;
+            font-weight: 600;
+        }
+        .code-container {
+            background: linear-gradient(180deg, #fbf8f4 0%, #f6efe6 100%);
+            border: 1.5px dashed #bc955c;
+            border-radius: 14px;
+            padding: 26px 20px;
+            margin: 28px 0 20px;
+        }
+        .code-label {
+            font-size: 11px;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            color: #a8783f;
+            margin: 0 0 12px;
+            font-weight: 700;
+        }
+        .code {
+            font-size: 44px;
+            font-weight: 800;
+            letter-spacing: 12px;
+            color: #621f32;
+            margin: 0;
+            font-family: 'Courier New', Courier, monospace;
+        }
+        .expiry {
+            font-size: 13px;
+            color: #a8783f;
+            margin: 18px 0 0;
+            font-weight: 600;
+        }
+        .divider {
+            border: none;
+            border-top: 1px solid #ece7e3;
+            margin: 28px 0 20px;
+        }
+        .notice {
+            background-color: #fbf7f2;
+            border-left: 3px solid #bc955c;
+            border-radius: 6px;
+            padding: 14px 16px;
+            text-align: left;
+            font-size: 13px;
+            line-height: 1.5;
+            color: #6b6b6b;
+        }
+        .footer {
+            background-color: #f4f0ec;
+            padding: 22px 20px;
+            text-align: center;
+            color: #8a8a8a;
+            font-size: 12px;
+        }
+        .footer-brand-row {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            margin-bottom: 6px;
+        }
+        .footer-brand-row img {
+            width: 18px;
+            height: 18px;
+            vertical-align: middle;
+        }
+        .footer .footer-brand {
+            color: #621f32;
+            font-weight: 600;
+            font-size: 13px;
+        }
+        .footer p {
+            margin: 4px 0;
+        }
     </style>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <h1 style="color: white; margin: 0; font-size: 28px; letter-spacing: 2px;">EJE <span style="color: #bc955c;">CENTRAL</span></h1>
-        </div>
-        <div class="content">
-            <div class="title">Código de Verificación</div>
-            <p>Se ha solicitado un acceso al sistema de la <span class="accent">Agencia Nacional de Aduanas de México</span>.</p>
-            <p>Utiliza el siguiente código para completar tu inicio de sesión. Este código expirará en 10 minutos.</p>
-            
-            <div class="code-container">
-                <p class="code">{{ code }}</p>
+    <div class="wrapper">
+        <div class="container">
+            <div class="header">
+                <div class="logo-badge">
+                    <img src="cid:anam_logo" alt="ANAM" />
+                </div>
+                <h1 class="header-title">SISTEMA DE <span class="accent">CONTROL DE PLAZAS</span></h1>
+                <p class="header-subtitle">Agencia Nacional de Aduanas de M&eacute;xico</p>
             </div>
-            
-            <p style="font-size: 14px; color: #666;">Si no has solicitado este código, por favor ignora este correo o contacta a soporte técnico.</p>
-        </div>
-        <div class="footer">
-            <p>© 2026 Agencia Nacional de Aduanas de México - Eje Central</p>
-            <p>Este es un correo automático, por favor no respondas.</p>
+            <div class="content">
+                <div class="title">C&oacute;digo de Verificaci&oacute;n</div>
+                <p class="lead">Se ha solicitado un acceso al <span class="accent">Sistema de Control de Plazas</span>.</p>
+                <p class="lead">Utiliza el siguiente c&oacute;digo para completar tu inicio de sesi&oacute;n:</p>
+
+                <div class="code-container">
+                    <p class="code-label">Tu c&oacute;digo</p>
+                    <p class="code">{{ code }}</p>
+                    <p class="expiry">&#9200; Expira en 10 minutos</p>
+                </div>
+
+                <hr class="divider">
+
+                <div class="notice">
+                    Si no has solicitado este c&oacute;digo, ignora este correo o contacta a soporte t&eacute;cnico. Nunca compartas este c&oacute;digo con nadie.
+                </div>
+            </div>
+            <div class="footer">
+                <div class="footer-brand-row">
+                    <img src="cid:icon_control_plazas" alt="" />
+                    <span class="footer-brand">Sistema de Control de Plazas</span>
+                </div>
+                <p>&copy; 2026 Agencia Nacional de Aduanas de M&eacute;xico</p>
+                <p>Este es un correo autom&aacute;tico, por favor no respondas.</p>
+            </div>
         </div>
     </div>
 </body>
