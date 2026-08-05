@@ -300,6 +300,11 @@ urlpatterns = [
         name="empleado_foto",
     ),
     path(
+        "datos_personales/override/",
+        DatosPersonalesCeldaOverrideView.as_view(),
+        name="datos_personales_override",
+    ),
+    path(
         "datos_personales/<str:no_empleado>/",
         DatosPersonalesEmpleadoView.as_view(),
         name="datos_personales_empleado",
@@ -308,11 +313,6 @@ urlpatterns = [
         "datos_personales_bulk/",
         DatosPersonalesBulkView.as_view(),
         name="datos_personales_bulk",
-    ),
-    path(
-        "datos_personales/override/",
-        DatosPersonalesCeldaOverrideView.as_view(),
-        name="datos_personales_override",
     ),
     path(
         "exportar_plantilla_detalle_con_fotos/",

@@ -1920,6 +1920,7 @@ class DatosPersonalesEmpleadoView(APIView):
             "phone": registro.phone,
             "phone1": registro.phone1,
             "extension": registro.extension,
+            "conmutador": registro.conmutador,
             "email_addr": registro.email_addr,
             "email_addr2": registro.email_addr2,
             "calle": registro.calle,

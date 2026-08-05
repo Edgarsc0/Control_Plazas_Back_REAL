@@ -1405,10 +1405,19 @@ class DatosPersonalesBase(models.Model):
     unidad_administrativa = models.CharField(
         db_column="UNIDAD_ADMINISTRATIVA", max_length=255, blank=True, null=True
     )
-    # No viene en el CSV fuente: columna extra solicitada, queda NULL en la
-    # importación automática de Celery (llenado manual/futuro).
-    extension = models.CharField(
-        db_column="extension", max_length=255, blank=True, null=True
+    # No vienen en el CSV fuente: columnas extra solicitadas, quedan NULL en
+    # la importación automática de Celery (llenado manual vía CeldaOverride,
+    # ver plantilla.celda_override.registrar_y_aplicar_override_datos_personales).
+    # `extension` es JSON porque algunas personas cubren varias áreas/módulos
+    # con extensión propia cada una: valor simple (string) si solo tiene una,
+    # o lista `[{"extension": "...", "area": "..."}, ...]` si tiene varias
+    # (ver Directorio ANAM, personas como "Luis Ernesto Sena Hernandez" en
+    # Nuevo Laredo con 14 extensiones distintas, una por módulo).
+    extension = models.JSONField(
+        db_column="extension", blank=True, null=True
+    )
+    conmutador = models.CharField(
+        db_column="Conmutador", max_length=255, blank=True, null=True
     )
 
     class Meta:

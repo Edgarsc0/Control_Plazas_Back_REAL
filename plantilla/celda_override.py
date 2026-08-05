@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Count, Q
+from django.db.models import Count, JSONField, Q
 
 from .models import (
     CeldaOverride,
@@ -45,7 +45,7 @@ TABLA_DATOS_PERSONALES = "DATOS_PERSONALES"
 # puesto/adscripción) no es editable desde este permiso.
 EDITABLE_COLUMNS_DATOS_PERSONALES = {
     "escolaridad_tipo", "escolaridad_nivrl", "escolaridad_area", "carrera", "centro_escolar",
-    "phone", "phone1", "extension", "email_addr", "email_addr2",
+    "phone", "phone1", "extension", "conmutador", "email_addr", "email_addr2",
     "calle", "hr_numero_exterior", "hr_numero_interior", "colonia", "postal", "hr_municipio", "estado",
 }
 
@@ -54,6 +54,24 @@ def compute_clave_hash(clave_negocio: dict) -> str:
     return hashlib.sha256(
         json.dumps(clave_negocio, sort_keys=True).encode()
     ).hexdigest()
+
+
+def _es_columna_json_datos_personales(columna: str) -> bool:
+    """
+    True si `columna` es un JSONField en DatosPersonales (hoy solo
+    `extension`, ver DatosPersonalesBase — personas con más de una extensión
+    guardan `[{"extension": ..., "area": ...}, ...]` en vez de un string).
+    CeldaOverride.valor_nuevo/valor_original son TextField (siempre texto),
+    así que para estas columnas se guarda el JSON serializado (json.dumps) y
+    se deserializa (json.loads) al reaplicar sobre la tabla viva — de lo
+    contrario `str(lista_de_dicts)` produce repr de Python (comillas
+    simples), no JSON válido, y el UPDATE dejaría un string en vez de un
+    array/objeto real en la columna JSON.
+    """
+    try:
+        return isinstance(DatosPersonales._meta.get_field(columna), JSONField)
+    except Exception:
+        return False
 
 
 def registrar_y_aplicar_override_empleado(posicion, columna, valor_nuevo, usuario):
@@ -209,6 +227,7 @@ def registrar_y_aplicar_override_datos_personales(no_empleado, columna, valor_nu
 
     clave_negocio = {"no_empleado": no_empleado}
     clave_hash = compute_clave_hash(clave_negocio)
+    es_json = _es_columna_json_datos_personales(columna)
 
     with transaction.atomic():
         fila = (
@@ -221,9 +240,23 @@ def registrar_y_aplicar_override_datos_personales(no_empleado, columna, valor_nu
                 f"Empleado '{no_empleado}' no existe en DATOS_PERSONALES."
             )
 
-        valor_original = getattr(fila, columna)
-        valor_original = None if valor_original is None else str(valor_original)
-        valor_nuevo_str = None if valor_nuevo is None else str(valor_nuevo)
+        valor_original_raw = getattr(fila, columna)
+        if es_json:
+            # Se guarda serializado en CeldaOverride (TextField) pero se
+            # aplica nativo (list/dict) sobre la columna JSON viva.
+            valor_original = (
+                None if valor_original_raw is None
+                else json.dumps(valor_original_raw, ensure_ascii=False, sort_keys=True)
+            )
+            valor_nuevo_str = (
+                None if valor_nuevo is None
+                else json.dumps(valor_nuevo, ensure_ascii=False, sort_keys=True)
+            )
+            valor_para_columna = valor_nuevo
+        else:
+            valor_original = None if valor_original_raw is None else str(valor_original_raw)
+            valor_nuevo_str = None if valor_nuevo is None else str(valor_nuevo)
+            valor_para_columna = valor_nuevo_str
 
         if (valor_original or "").strip() == (valor_nuevo_str or "").strip():
             return None
@@ -247,7 +280,7 @@ def registrar_y_aplicar_override_datos_personales(no_empleado, columna, valor_nu
         )
 
         DatosPersonales.objects.filter(no_empleado=no_empleado).update(
-            **{columna: valor_nuevo_str}
+            **{columna: valor_para_columna}
         )
 
     return override
@@ -258,19 +291,61 @@ def aplicar_overrides_datos_personales(bitacora=None):
     Reaplica todos los overrides activos de DATOS_PERSONALES sobre la tabla
     recién importada (blue-green swap, ver tasks._swap_blue_green_tables).
     No falla si un `no_empleado` ya no existe — solo lo cuenta como huérfano.
+
+    Bulk (una query para traer las filas + un `bulk_update` por cada
+    combinación de columnas tocadas, en vez de un `UPDATE` por override):
+    con cientos/miles de overrides activos (p.ej. conmutador/extension
+    cargados para toda la Plantilla vía Directorio ANAM), la versión
+    anterior —un `.filter(no_empleado=...).update(...)` por cada override,
+    dentro de una única transacción larga— tardaba minutos contra la BD
+    remota y quedaba expuesta a perder todo el trabajo si esa transacción
+    no llegaba a cerrar (p.ej. worker reiniciado a la mitad).
     """
-    overrides = CeldaOverride.objects.filter(tabla=TABLA_DATOS_PERSONALES, activo=True)
+    overrides = list(
+        CeldaOverride.objects.filter(tabla=TABLA_DATOS_PERSONALES, activo=True)
+    )
+    if not overrides:
+        return {"aplicados": 0, "huerfanos": 0}
+
+    no_empleados = {ov.clave_negocio.get("no_empleado") for ov in overrides}
+    no_empleados.discard(None)
+    filas = {
+        f.no_empleado: f
+        for f in DatosPersonales.objects.filter(no_empleado__in=no_empleados)
+    }
+
     aplicados, huerfanos = 0, 0
-    with transaction.atomic():
-        for ov in overrides:
-            no_empleado = ov.clave_negocio.get("no_empleado")
-            updated = DatosPersonales.objects.filter(no_empleado=no_empleado).update(
-                **{ov.columna: ov.valor_nuevo}
-            )
-            if updated:
-                aplicados += 1
-            else:
-                huerfanos += 1
+    columnas_por_empleado = {}
+
+    for ov in overrides:
+        no_empleado = ov.clave_negocio.get("no_empleado")
+        fila = filas.get(no_empleado)
+        if fila is None:
+            huerfanos += 1
+            continue
+
+        valor = ov.valor_nuevo
+        if _es_columna_json_datos_personales(ov.columna) and valor is not None:
+            try:
+                valor = json.loads(valor)
+            except (TypeError, ValueError):
+                valor = None
+
+        setattr(fila, ov.columna, valor)
+        columnas_por_empleado.setdefault(no_empleado, set()).add(ov.columna)
+        aplicados += 1
+
+    if columnas_por_empleado:
+        grupos = {}
+        for no_empleado, columnas in columnas_por_empleado.items():
+            grupos.setdefault(frozenset(columnas), []).append(filas[no_empleado])
+
+        with transaction.atomic():
+            for columnas, filas_grupo in grupos.items():
+                DatosPersonales.objects.bulk_update(
+                    filas_grupo, list(columnas), batch_size=500
+                )
+
     return {"aplicados": aplicados, "huerfanos": huerfanos}
 
 
