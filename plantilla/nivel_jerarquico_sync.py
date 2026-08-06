@@ -25,7 +25,15 @@ from django.conf import settings
 from django.core.cache import cache
 from django.db import transaction
 
-from .models import CatNivelJerarquicoPlaza, EmpleadosCompletosSig, MovPos, MovPosLatest, NIVEL_JERARQUICO_LABELS
+from .models import (
+    CatNivelJerarquicoPlaza,
+    EmpleadosCompletosSig,
+    MovPos,
+    MovPosLatest,
+    NIVEL_3_PREFIJO_TITULAR_ADUANA,
+    NIVEL_JERARQUICO_LABELS,
+    NIVEL_JERARQUICO_LABELS_NIVEL_3_TITULAR_ADUANA,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -137,10 +145,19 @@ def aplicar_nivel_a_plazas(plaza_a_nivel):
 
     empleados = list(
         EmpleadosCompletosSig.objects.filter(posicion__in=plaza_a_nivel.keys())
-        .only("id", "posicion", "nj", "nj_comp", "nj_ok", "nombre_nj", "nj_operativo_comb")
+        .only("id", "posicion", "nj", "nj_comp", "nj_ok", "nombre_nj", "nj_operativo_comb", "nombre_puesto_funcional")
     )
     for emp in empleados:
-        labels = NIVEL_JERARQUICO_LABELS[plaza_a_nivel[emp.posicion]]
+        nivel = plaza_a_nivel[emp.posicion]
+        # Nivel 3 es "Director" por default, salvo "Titular de Aduana" cuando
+        # el puesto funcional del empleado es un Administrador de Aduana
+        # (mismo nivel jerárquico 3, sólo cambia la etiqueta).
+        if nivel == 3 and str(emp.nombre_puesto_funcional or "").strip().upper().startswith(
+            NIVEL_3_PREFIJO_TITULAR_ADUANA.upper()
+        ):
+            labels = NIVEL_JERARQUICO_LABELS_NIVEL_3_TITULAR_ADUANA
+        else:
+            labels = NIVEL_JERARQUICO_LABELS[nivel]
         emp.nj = labels["nj"]
         emp.nj_comp = labels["nj_comp"]
         emp.nj_ok = labels["nj_ok"]

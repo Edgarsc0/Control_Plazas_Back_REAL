@@ -1070,20 +1070,34 @@ NIVELES_JERARQUICOS = (
 NIVEL_JERARQUICO_POR_DESCRIPCION = {descripcion: nivel for nivel, descripcion in NIVELES_JERARQUICOS}
 DESCRIPCION_NJ_CHOICES = [(descripcion, f"{nivel} — {descripcion}") for nivel, descripcion in NIVELES_JERARQUICOS]
 
-# Convención corta ya usada por ZAFIRO en las columnas NJ de EMPLEADOS_COMPLETOS_SIG
-# (no coincide textualmente con NIVELES_JERARQUICOS: p.ej. nivel 1 es "Titular", no
-# "Director General"; niveles 2 y 3 comparten "Director"). Verificada contra datos
-# reales de producción; nivel 0 no tiene precedente (sin empleados hoy en ese nivel).
+# Convención corta ya usada por ZAFIRO en las columnas NJ de EMPLEADOS_COMPLETOS_SIG.
+# Verificada contra datos reales de producción; nivel 0 no tiene precedente (sin
+# empleados hoy en ese nivel).
+#
+# Nivel 3 es especial: por default es "Director", pero si el "Nombre Puesto
+# Funcional" del empleado empieza con "Administrador de Aduana" es "Titular de
+# Aduana" (mismo nivel jerárquico 3, sólo cambia la etiqueta) — ver
+# `NIVEL_JERARQUICO_LABELS_NIVEL_3_TITULAR_ADUANA` y
+# `nivel_jerarquico_sync.aplicar_nivel_a_plazas`.
 NIVEL_JERARQUICO_LABELS = {
     0: {"nj": "0", "nj_comp": "0 Titular ANAM", "nj_ok": "0 TITULAR ANAM", "nombre_nj": "TITULAR ANAM", "nj_operativo_comb": "TITULAR ANAM"},
-    1: {"nj": "1", "nj_comp": "1 Titular", "nj_ok": "1 TITULAR", "nombre_nj": "TITULAR", "nj_operativo_comb": "TITULAR"},
-    2: {"nj": "2", "nj_comp": "2 Director", "nj_ok": "2 DIRECTOR", "nombre_nj": "DIRECTOR", "nj_operativo_comb": "DIRECTOR"},
+    1: {"nj": "1", "nj_comp": "1 Director General", "nj_ok": "1 DIRECTOR GENERAL", "nombre_nj": "DIRECTOR GENERAL", "nj_operativo_comb": "DIRECTOR GENERAL"},
+    2: {"nj": "2", "nj_comp": "2 Director Central", "nj_ok": "2 DIRECTOR CENTRAL", "nombre_nj": "DIRECTOR CENTRAL", "nj_operativo_comb": "DIRECTOR CENTRAL"},
     3: {"nj": "3", "nj_comp": "3 Director", "nj_ok": "3 DIRECTOR", "nombre_nj": "DIRECTOR", "nj_operativo_comb": "DIRECTOR"},
     4: {"nj": "4", "nj_comp": "4 Subdirector", "nj_ok": "4 SUBDIRECTOR", "nombre_nj": "SUBDIRECTOR", "nj_operativo_comb": "SUBDIRECTOR"},
     5: {"nj": "5", "nj_comp": "5 Jefe de Depto", "nj_ok": "5 JEFE DE DEPTO", "nombre_nj": "JEFE DE DEPTO", "nj_operativo_comb": "JEFE DE DEPTO"},
     6: {"nj": "6", "nj_comp": "6 Enlace", "nj_ok": "6 ENLACE", "nombre_nj": "ENLACE", "nj_operativo_comb": "ENLACE"},
     7: {"nj": "7", "nj_comp": "7 Operativo Confianza", "nj_ok": "7 OPERATIVO CONFIANZA", "nombre_nj": "OPERATIVO CONFIANZA", "nj_operativo_comb": "OPERATIVOS"},
     8: {"nj": "8", "nj_comp": "8 Operativo Base", "nj_ok": "8 OPERATIVO BASE", "nombre_nj": "OPERATIVO BASE", "nj_operativo_comb": "OPERATIVOS"},
+}
+
+# Variante de nivel 3 cuando el "Nombre Puesto Funcional" del empleado empieza
+# con "Administrador de Aduana": mismo nivel jerárquico (3), pero etiqueta
+# "Titular de Aduana" en vez de "Director". Ver `NIVELES_JERARQUICOS` arriba.
+NIVEL_3_PREFIJO_TITULAR_ADUANA = "Administrador de Aduana"
+NIVEL_JERARQUICO_LABELS_NIVEL_3_TITULAR_ADUANA = {
+    "nj": "3", "nj_comp": "3 Titular de Aduana", "nj_ok": "3 TITULAR DE ADUANA",
+    "nombre_nj": "TITULAR DE ADUANA", "nj_operativo_comb": "TITULAR DE ADUANA",
 }
 
 FUENTE_PRIORIDAD_CHOICES = [

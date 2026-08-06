@@ -48,7 +48,9 @@ from .models import (
     EmpleadosCompletosSig,
     MovPos,
     MovPosLatest,
+    NIVEL_3_PREFIJO_TITULAR_ADUANA,
     NIVEL_JERARQUICO_LABELS,
+    NIVEL_JERARQUICO_LABELS_NIVEL_3_TITULAR_ADUANA,
     NIVELES_JERARQUICOS,
     NivelJerarquicoPrioridadConfig,
     OrganigramaAnam,
@@ -4193,12 +4195,20 @@ def _cargar_catalogos_alineacion():
     return {"ua": ua_lookup, "depto": depto_lookup}
 
 
-def _nombre_nivel_jerarquico(codigo):
+def _nombre_nivel_jerarquico(codigo, nombre_puesto_funcional=None):
     s = (codigo or "").strip()
     if not s:
         return None
     try:
-        return NIVEL_JERARQUICO_LABELS[int(s)]["nombre_nj"]
+        nivel = int(s)
+        # Nivel 3 es "Director" por default, salvo "Titular de Aduana" cuando
+        # el puesto funcional es un Administrador de Aduana — mismo criterio
+        # que `nivel_jerarquico_sync.aplicar_nivel_a_plazas`.
+        if nivel == 3 and str(nombre_puesto_funcional or "").strip().upper().startswith(
+            NIVEL_3_PREFIJO_TITULAR_ADUANA.upper()
+        ):
+            return NIVEL_JERARQUICO_LABELS_NIVEL_3_TITULAR_ADUANA["nombre_nj"]
+        return NIVEL_JERARQUICO_LABELS[nivel]["nombre_nj"]
     except (ValueError, KeyError):
         return None
 
@@ -4212,7 +4222,10 @@ def _resolver_nombres_tooltip(key, mov_row, emp_row, catalogos):
         mov_nombre = catalogos["ua"].get((mov_row.get("unidad_adva") or "").strip().upper())
         return mov_nombre, emp_row.get("unidad_administrativa")
     if key == "nivel_jerarquico":
-        return _nombre_nivel_jerarquico(mov_row.get("nvl_direc")), _nombre_nivel_jerarquico(emp_row.get("nj"))
+        return (
+            _nombre_nivel_jerarquico(mov_row.get("nvl_direc"), mov_row.get("nombre_puesto")),
+            _nombre_nivel_jerarquico(emp_row.get("nj"), emp_row.get("nombre_puesto_funcional")),
+        )
     if key == "id_departamento":
         mov_nombre = catalogos["depto"].get((mov_row.get("cd_departamento") or "").strip().upper())
         return mov_nombre, emp_row.get("departamento")
