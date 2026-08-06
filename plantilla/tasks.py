@@ -1328,6 +1328,32 @@ def _calcular_y_actualizar_vacancias(bitacora):
         )
 
 
+def _obtener_vacancias_posiciones_inactivas(bitacora):
+    """
+    Ejecuta el Stored Procedure sp_obtener_vacancias_posiciones_inactivas.
+    """
+    _append_log(
+        bitacora, "Calculando fechas de vacancia de posiciones inactivas..."
+    )
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("CALL sp_obtener_vacancias_posiciones_inactivas();")
+            _append_log(
+                bitacora,
+                "Fechas de vacancia de posiciones inactivas actualizadas exitosamente.",
+            )
+    except Exception as e:
+        _append_log(
+            bitacora,
+            f"Error calculando fechas de vacancia de posiciones inactivas: {str(e)}",
+            is_error=True,
+        )
+        logger.error(
+            f"Error en _obtener_vacancias_posiciones_inactivas: {str(e)}",
+            exc_info=True,
+        )
+
+
 def _invalidar_cache_ocupacion_vacancia(bitacora=None):
     """
     Invalida cuanto antes los caches que determinan "¿está esta posición
@@ -1642,6 +1668,9 @@ def importar_zafiro(self):
 
         # ── 8. Calcular y Actualizar Fechas de Vacancia ─────────────────────
         _calcular_y_actualizar_vacancias(bitacora)
+
+        # ── 8.1. Calcular fechas de vacancia de posiciones inactivas ───────
+        _obtener_vacancias_posiciones_inactivas(bitacora)
 
         # Invalida YA los caches de ocupación/fecha de vacancia — no esperar
         # a que termine toda la tarea (ver _invalidar_cache_ocupacion_vacancia).
