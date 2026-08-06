@@ -286,6 +286,7 @@ def apply_dynamic_column_filters(
     extra_valid_fields=None,
     full_name_column=None,
     full_name_fields=("nombre", "ap_pat", "ap_mat"),
+    computed_field_resolver=None,
 ):
     """Aplica los filtros dinámicos de columna del frontend.
 
@@ -305,6 +306,15 @@ def apply_dynamic_column_filters(
     del modelo) se trata como texto sobre la concatenación de
     ``full_name_fields`` (ver `_annotate_full_name`) en vez de exigir que sea
     un campo válido del modelo.
+
+    ``computed_field_resolver(base_field, suffix, val_list, is_exclude) -> Q | None``:
+    para columnas que sí pasaron ``extra_valid_fields`` pero cuyo valor no vive
+    tal cual en la anotación del queryset (ej. ``fecha_anuencia``: es DateField
+    a nivel SQL, pero puede mostrar 4 categorías de texto fijo resueltas sólo
+    en Python — filtrar `fecha_anuencia__in=[...]` directo contra la anotación
+    tiraba 500 en cuanto el valor no era una fecha real). Si el resolver
+    devuelve un ``Q``, se aplica en vez de la lógica genérica de abajo (que
+    asume que el campo es filtrable tal cual).
     """
     valid_fields = {f.name for f in model._meta.get_fields()} | set(extra_valid_fields or ())
     text_fields = {
@@ -325,6 +335,18 @@ def apply_dynamic_column_filters(
             continue
         if is_full_name and not val:
             continue
+
+        if computed_field_resolver is not None:
+            suffix_for_resolver = actual_param.split("__", 1)[1] if "__" in actual_param else None
+            val_list_for_resolver = [
+                "" if v.strip() == EMPTY_VALUE_TOKEN else v.strip()
+                for v in val.split(",")
+                if v.strip()
+            ]
+            resolved_q = computed_field_resolver(base_field, suffix_for_resolver, val_list_for_resolver, is_exclude)
+            if resolved_q is not None:
+                queryset = queryset.exclude(resolved_q) if is_exclude else queryset.filter(resolved_q)
+                continue
 
         is_text = True if is_full_name else base_field in text_fields
         if is_full_name:
@@ -971,6 +993,43 @@ from django.core.cache import cache
 from django.db import connection
 
 from eje_central_back.renderers import orjson_dumps, orjson_response
+
+
+def get_posiciones_ocupadas_set():
+    """``{no_pos_actual}`` de posiciones ocupadas (``OCUPADAS_RAW_SQL``),
+    cacheado 10 min — repetido inline en varias vistas de MovPos; ver
+    ``corregir_fecha_anuencia_row``/``annotate_fecha_anuencia`` para el porqué
+    (una posición ocupada nunca debe mostrar `fecha_anuencia`/`fecha_vacancia`
+    obsoleta, el SP no las limpia al re-ocuparse)."""
+    cache_key_ocupadas = "mov_pos_ocupadas_set"
+    posiciones_ocupadas = cache.get(cache_key_ocupadas)
+    if posiciones_ocupadas is None:
+        with connection.cursor() as cursor:
+            cursor.execute(OCUPADAS_RAW_SQL)
+            posiciones_ocupadas = set(row[0] for row in cursor.fetchall() if row[0])
+        cache.set(cache_key_ocupadas, posiciones_ocupadas, 600)
+    return posiciones_ocupadas
+
+
+def resolve_fecha_anuencia_value(pos, fa, posiciones_ocupadas, overrides_texto, baseline_texto):
+    """Replica, campo a campo, la prioridad que aplica
+    ``corregir_fecha_anuencia_row`` a nivel de fila: ocupada -> vacío;
+    override de texto -> ese texto; baseline de texto -> ese texto; fecha
+    real anotada -> 'YYYY-MM-DD'; si no, vacío. Usado para que filtrar/listar
+    valores distintos de `fecha_anuencia` coincida exactamente con lo que
+    pinta la tabla (incl. las 4 categorías de texto fijo que sólo viven en
+    CeldaOverride, nunca en la anotación SQL)."""
+    if pos in posiciones_ocupadas:
+        return ""
+    if pos in overrides_texto:
+        return overrides_texto[pos]
+    if pos in baseline_texto:
+        return baseline_texto[pos]
+    if hasattr(fa, "strftime"):
+        return fa.strftime("%Y-%m-%d")
+    if fa:
+        return str(fa).split(" ")[0].split("T")[0]
+    return ""
 
 
 def obtener_posiciones_activas():
@@ -3412,7 +3471,31 @@ class MovPosDetalleView(APIView):
             if f.get_internal_type() in ["CharField", "TextField"]
         ]
 
-        queryset = apply_dynamic_column_filters(queryset, request, MovPos, extra_valid_fields={"fecha_anuencia"})
+        def fecha_anuencia_column_resolver(base_field, suffix, val_list, is_exclude):
+            # Sólo intercepta la selección múltiple del dropdown (__in / valor
+            # único, que es como llega desde "Aplicar Filtro" en el front) —
+            # ver docstring de apply_dynamic_column_filters. Sin esto,
+            # `fecha_anuencia__in=[...]` se filtraba tal cual contra la
+            # anotación DateField y tiraba 500 en cuanto la selección incluía
+            # una categoría de texto (p. ej. "Nueva Creación") o el token de
+            # vacío (bug reportado: aplicar el filtro no actualizaba la tabla).
+            if base_field != "fecha_anuencia":
+                return None
+            posiciones_ocupadas = get_posiciones_ocupadas_set()
+            wanted = set(val_list)
+            match_pos = [
+                pos for pos, fa in queryset.values_list("no_pos_actual", "fecha_anuencia")
+                if resolve_fecha_anuencia_value(
+                    pos, fa, posiciones_ocupadas,
+                    fecha_anuencia_overrides_texto, fecha_anuencia_baseline_texto,
+                ) in wanted
+            ]
+            return Q(no_pos_actual__in=match_pos) if match_pos else Q(pk__in=[])
+
+        queryset = apply_dynamic_column_filters(
+            queryset, request, MovPos, extra_valid_fields={"fecha_anuencia"},
+            computed_field_resolver=fecha_anuencia_column_resolver,
+        )
 
         # "ocupacion" is a computed column (not a real model field), so the
         # generic Dynamic Column Filters loop above silently skips it.
@@ -3668,30 +3751,14 @@ class MovPosDetalleView(APIView):
         # fila para que el dropdown liste y busque exactamente lo que se ve
         # en la tabla.
         if distinct_field == "fecha_anuencia":
-            cache_key_ocupadas = "mov_pos_ocupadas_set"
-            posiciones_ocupadas = cache.get(cache_key_ocupadas)
-            if posiciones_ocupadas is None:
-                with connection.cursor() as cursor:
-                    cursor.execute(OCUPADAS_RAW_SQL)
-                    posiciones_ocupadas = set(
-                        [row[0] for row in cursor.fetchall() if row[0]]
-                    )
-                cache.set(cache_key_ocupadas, posiciones_ocupadas, 600)
+            posiciones_ocupadas = get_posiciones_ocupadas_set()
 
             counts = {}
             for pos, fa in queryset.values_list("no_pos_actual", "fecha_anuencia"):
-                if pos in posiciones_ocupadas:
-                    val = ""
-                elif pos in fecha_anuencia_overrides_texto:
-                    val = fecha_anuencia_overrides_texto[pos]
-                elif pos in fecha_anuencia_baseline_texto:
-                    val = fecha_anuencia_baseline_texto[pos]
-                elif hasattr(fa, "strftime"):
-                    val = fa.strftime("%Y-%m-%d")
-                elif fa:
-                    val = str(fa).split(" ")[0].split("T")[0]
-                else:
-                    val = ""
+                val = resolve_fecha_anuencia_value(
+                    pos, fa, posiciones_ocupadas,
+                    fecha_anuencia_overrides_texto, fecha_anuencia_baseline_texto,
+                )
                 counts[val] = counts.get(val, 0) + 1
 
             distinct_search = request.query_params.get("distinct_search", "").strip()
@@ -4728,7 +4795,25 @@ class MovPosExportExcelView(APIView):
              "puesto_ptal", "descr", "nombre_puesto"],
         )
 
-        queryset = apply_dynamic_column_filters(queryset, request, MovPos, extra_valid_fields={"fecha_anuencia"})
+        def fecha_anuencia_column_resolver(base_field, suffix, val_list, is_exclude):
+            # Mismo fix que en MovPosDetalleView.get — ver comentario ahí.
+            if base_field != "fecha_anuencia":
+                return None
+            posiciones_ocupadas = get_posiciones_ocupadas_set()
+            wanted = set(val_list)
+            match_pos = [
+                pos for pos, fa in queryset.values_list("no_pos_actual", "fecha_anuencia")
+                if resolve_fecha_anuencia_value(
+                    pos, fa, posiciones_ocupadas,
+                    fecha_anuencia_overrides_texto, fecha_anuencia_baseline_texto,
+                ) in wanted
+            ]
+            return Q(no_pos_actual__in=match_pos) if match_pos else Q(pk__in=[])
+
+        queryset = apply_dynamic_column_filters(
+            queryset, request, MovPos, extra_valid_fields={"fecha_anuencia"},
+            computed_field_resolver=fecha_anuencia_column_resolver,
+        )
 
         # ocupacion computed column
         ocupacion_param_key = None
