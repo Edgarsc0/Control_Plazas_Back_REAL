@@ -3656,6 +3656,54 @@ class MovPosDetalleView(APIView):
             ]
             return Response(results)
 
+        # "fecha_anuencia" es anotación DateField (no campo real de MovPos):
+        # `MovPos._meta.get_field("fecha_anuencia")` en la rama genérica de
+        # abajo lanza `FieldDoesNotExist` en cuanto hay `distinct_search`
+        # (bug reportado: buscar cualquier texto en este dropdown tiraba 500).
+        # Además, esa rama genérica solo conoce el valor SQL (fecha real o
+        # vacío) — las 4 categorías de texto fijo (p.ej. "Nueva Creación")
+        # viven en `CeldaOverride` y sólo se resuelven en Python (ver
+        # `corregir_fecha_anuencia_row`), así que nunca aparecían como
+        # opción/resultado de búsqueda aquí. Replica esa misma resolución por
+        # fila para que el dropdown liste y busque exactamente lo que se ve
+        # en la tabla.
+        if distinct_field == "fecha_anuencia":
+            cache_key_ocupadas = "mov_pos_ocupadas_set"
+            posiciones_ocupadas = cache.get(cache_key_ocupadas)
+            if posiciones_ocupadas is None:
+                with connection.cursor() as cursor:
+                    cursor.execute(OCUPADAS_RAW_SQL)
+                    posiciones_ocupadas = set(
+                        [row[0] for row in cursor.fetchall() if row[0]]
+                    )
+                cache.set(cache_key_ocupadas, posiciones_ocupadas, 600)
+
+            counts = {}
+            for pos, fa in queryset.values_list("no_pos_actual", "fecha_anuencia"):
+                if pos in posiciones_ocupadas:
+                    val = ""
+                elif pos in fecha_anuencia_overrides_texto:
+                    val = fecha_anuencia_overrides_texto[pos]
+                elif pos in fecha_anuencia_baseline_texto:
+                    val = fecha_anuencia_baseline_texto[pos]
+                elif hasattr(fa, "strftime"):
+                    val = fa.strftime("%Y-%m-%d")
+                elif fa:
+                    val = str(fa).split(" ")[0].split("T")[0]
+                else:
+                    val = ""
+                counts[val] = counts.get(val, 0) + 1
+
+            distinct_search = request.query_params.get("distinct_search", "").strip()
+            if distinct_search:
+                needle = distinct_search.lower()
+                counts = {k: v for k, v in counts.items() if needle in k.lower()}
+
+            results = [
+                {"value": k, "count": v} for k, v in sorted(counts.items())
+            ]
+            return Response(results)
+
         if distinct_field in valid_fields:
             is_text = distinct_field in text_fields
             target_distinct_field = (
