@@ -216,9 +216,10 @@ def construir_detalle_vacancia(mov_row):
 
 def enviar_correo_vacancia(sub):
     """Manda el correo de "la posición quedó vacante" para la suscripción
-    `sub` (SuscripcionNotificacionPosicion, tipo VACANTE). Devuelve True si
-    se envió; deja propagar la excepción si algo falla (el caller decide
-    reintentar)."""
+    `sub` (SuscripcionNotificacionPosicion, tipo VACANTE). Devuelve el
+    contexto usado para renderizar el correo (para que el caller lo
+    congele en `sub.detalle_enviado` — ver docstring del modelo); deja
+    propagar la excepción si algo falla (el caller decide reintentar)."""
     from .models import MovPos, MovPosLatest
 
     latest = MovPosLatest.objects.get(no_pos_actual=sub.posicion)
@@ -229,6 +230,7 @@ def enviar_correo_vacancia(sub):
     empleado = detalle.get("empleado") or {}
 
     context = {
+        "tipo": "VACANTE",
         "no_pos_actual": mov_row.no_pos_actual,
         "fecha_vacancia": detalle.get("fecha_vacancia"),
         "categoria_vacancia": categoria,
@@ -258,7 +260,7 @@ def enviar_correo_vacancia(sub):
         context=context,
         to_email=sub.usuario.email,
     )
-    return True
+    return context
 
 
 # ---------------------------------------------------------------------------
@@ -298,7 +300,8 @@ def _buscar_movimiento_ocupacion(emp):
 
 def enviar_correo_ocupacion(sub):
     """Manda el correo de "la posición se ocupó" para la suscripción `sub`
-    (tipo OCUPACION). Devuelve True si se envió; deja propagar la excepción
+    (tipo OCUPACION). Devuelve el contexto usado para renderizar el correo
+    (para congelarlo en `sub.detalle_enviado`); deja propagar la excepción
     si algo falla."""
     from .models import EmpleadosCompletosSig
 
@@ -306,6 +309,7 @@ def enviar_correo_ocupacion(sub):
     movimiento = _buscar_movimiento_ocupacion(emp)
 
     context = {
+        "tipo": "OCUPACION",
         "posicion": emp.posicion,
         "nombres": emp.nombres,
         "numempleado": emp.numempleado or emp.id_empleado,
@@ -328,7 +332,7 @@ def enviar_correo_ocupacion(sub):
         context=context,
         to_email=sub.usuario.email,
     )
-    return True
+    return context
 
 
 # ---------------------------------------------------------------------------
@@ -367,12 +371,13 @@ def procesar_suscripciones_posicion():
 
         try:
             if estado_actual == "O":
-                enviar_correo_ocupacion(sub)
+                detalle = enviar_correo_ocupacion(sub)
             else:
-                enviar_correo_vacancia(sub)
+                detalle = enviar_correo_vacancia(sub)
             sub.activa = False
             sub.notificado_en = timezone.now()
-            sub.save(update_fields=["activa", "notificado_en"])
+            sub.detalle_enviado = detalle
+            sub.save(update_fields=["activa", "notificado_en", "detalle_enviado"])
             enviados += 1
         except Exception:
             logger.exception(

@@ -1,4 +1,5 @@
 from django.conf import settings
+from django.core.serializers.json import DjangoJSONEncoder
 from django.db import models
 from django.db.models.functions import Trim
 
@@ -1779,6 +1780,13 @@ class SuscripcionNotificacionPosicion(models.Model):
     para comparar contra el anterior) — la condición de disparo es que el
     estado ACTUAL difiera de este snapshot. Un solo aviso: al dispararse,
     `activa` pasa a False.
+
+    `detalle_enviado` guarda el mismo contexto usado para renderizar el
+    correo (ver `enviar_correo_vacancia`/`enviar_correo_ocupacion`) — se
+    congela en ese momento porque MOV_POS/EMPLEADOS_COMPLETOS_SIG se
+    truncan y recargan completas cada 30 min; sin este snapshot, el
+    "campanita" de notificaciones (frontend) no podría mostrar qué decía
+    el correo una vez que ZAFIRO vuelve a importar.
     """
 
     TIPO_CHOICES = [("VACANTE", "Vacante"), ("OCUPACION", "Ocupación")]
@@ -1794,6 +1802,7 @@ class SuscripcionNotificacionPosicion(models.Model):
     estado_conocido_al_suscribir = models.CharField(max_length=1, choices=ESTADO_CHOICES)
     creado_en = models.DateTimeField(auto_now_add=True)
     notificado_en = models.DateTimeField(null=True, blank=True)
+    detalle_enviado = models.JSONField(null=True, blank=True, encoder=DjangoJSONEncoder)
 
     class Meta:
         db_table = "SUSCRIPCION_NOTIFICACION_POSICION"

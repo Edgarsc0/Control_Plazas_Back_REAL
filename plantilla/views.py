@@ -4169,9 +4169,13 @@ class SuscripcionesPosicionView(APIView):
     usuario autenticado puede suscribirse — no requiere permiso de módulo
     (sin `view_permission`, `HasModulePermission` sólo exige login).
 
-    GET  -> suscripciones ACTIVAS del usuario autenticado, para que el menú
-            sepa si ya existe una para esa posición+tipo y ofrezca "Cancelar
-            aviso" en vez de mostrar la opción de suscribirse otra vez.
+    GET  -> suscripciones del usuario autenticado que le importan a la
+            "campanita" de notificaciones (NotificacionesPosicionBell):
+            las PENDIENTES (`activa=True`) y las YA LLEGADAS
+            (`notificado_en` no nulo), con su `detalle_enviado` (snapshot
+            de lo que decía el correo). Se excluyen las simplemente
+            canceladas (`activa=False` y nunca notificadas) — esas ya no
+            le sirven a nadie.
     POST -> crea una suscripción {posicion, tipo}. Snapshotea el estado
             actual (ocupada/vacante) como `estado_conocido_al_suscribir` —
             la notificación se dispara cuando el estado real deje de
@@ -4182,10 +4186,19 @@ class SuscripcionesPosicionView(APIView):
             crear una segunda.
     """
 
+    CAMPOS_RESPUESTA = (
+        "id", "posicion", "tipo", "activa", "estado_conocido_al_suscribir",
+        "creado_en", "notificado_en", "detalle_enviado",
+    )
+
     def get(self, request):
-        subs = SuscripcionNotificacionPosicion.objects.filter(
-            usuario=request.user, activa=True
-        ).values("id", "posicion", "tipo", "creado_en")
+        subs = (
+            SuscripcionNotificacionPosicion.objects
+            .filter(usuario=request.user)
+            .filter(Q(activa=True) | Q(notificado_en__isnull=False))
+            .order_by("-creado_en")
+            .values(*self.CAMPOS_RESPUESTA)
+        )
         return Response(list(subs))
 
     def post(self, request):
@@ -4203,9 +4216,7 @@ class SuscripcionesPosicionView(APIView):
         if existente:
             return Response(
                 {
-                    "id": existente.id,
-                    "posicion": existente.posicion,
-                    "tipo": existente.tipo,
+                    **{k: getattr(existente, k) for k in self.CAMPOS_RESPUESTA},
                     "ya_existia": True,
                 },
                 status=status.HTTP_200_OK,
@@ -4221,16 +4232,22 @@ class SuscripcionesPosicionView(APIView):
             estado_conocido_al_suscribir=estado_actual,
         )
         return Response(
-            {"id": sub.id, "posicion": sub.posicion, "tipo": sub.tipo, "ya_existia": False},
+            {
+                **{k: getattr(sub, k) for k in self.CAMPOS_RESPUESTA},
+                "ya_existia": False,
+            },
             status=status.HTTP_201_CREATED,
         )
 
 
 class SuscripcionPosicionDetalleView(APIView):
-    """DELETE -> cancela (soft delete: `activa=False`) una suscripción
-    propia. Un usuario no puede cancelar la suscripción de otro (filtra por
-    `usuario=request.user`, un 404 en vez de 403 para no filtrar si el id
-    pertenece a alguien más)."""
+    """DELETE -> si la suscripción sigue pendiente (`activa=True`), la
+    cancela (soft delete: `activa=False`, nunca se notificará). Si ya se
+    notificó (o ya estaba cancelada), no hay nada que "cancelar" — se borra
+    el renglón por completo (equivale a "descartar" la tarjeta en la
+    campanita de notificaciones). Un usuario no puede tocar la suscripción
+    de otro (filtra por `usuario=request.user`, un 404 en vez de 403 para
+    no filtrar si el id pertenece a alguien más)."""
 
     def delete(self, request, pk):
         try:
@@ -4239,8 +4256,11 @@ class SuscripcionPosicionDetalleView(APIView):
             return Response(
                 {"error": "Suscripción no encontrada."}, status=status.HTTP_404_NOT_FOUND
             )
-        sub.activa = False
-        sub.save(update_fields=["activa"])
+        if sub.activa:
+            sub.activa = False
+            sub.save(update_fields=["activa"])
+        else:
+            sub.delete()
         return Response({"status": "ok"})
 
 
