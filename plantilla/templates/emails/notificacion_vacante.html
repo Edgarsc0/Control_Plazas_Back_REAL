@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #ece7e3; margin: 0; padding: 0; }
+        .wrapper { width: 100%; padding: 32px 16px; }
+        .container { max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 10px 30px rgba(98, 31, 50, 0.15); }
+        .header { background: linear-gradient(135deg, #7a2740 0%, #621f32 60%, #4a1826 100%); padding: 32px 20px 30px; text-align: center; }
+        .logo-badge { display: inline-block; background-color: #ffffff; border-radius: 12px; padding: 10px 18px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2); margin-bottom: 20px; }
+        .logo-badge img { display: block; height: 32px; }
+        .header-title { color: #ffffff; margin: 0; font-size: 19px; font-weight: 700; letter-spacing: 1px; }
+        .header-title .accent { color: #d9b789; }
+        .header-subtitle { color: rgba(255, 255, 255, 0.7); font-size: 11px; letter-spacing: 2px; text-transform: uppercase; margin: 6px 0 0; }
+        .status-pill { display: inline-flex; align-items: center; gap: 6px; background-color: rgba(255,255,255,0.12); border: 1px solid rgba(255,255,255,0.25); color: #ffffff; font-size: 11px; font-weight: 800; letter-spacing: 1.5px; text-transform: uppercase; padding: 6px 14px; border-radius: 999px; margin-top: 16px; }
+        .content { padding: 36px 36px 8px; color: #333333; }
+        .title { color: #621f32; font-size: 21px; font-weight: 800; margin: 0 0 6px; text-align: center; }
+        .lead { font-size: 14px; line-height: 1.6; color: #4a4a4a; margin: 0 0 22px; text-align: center; }
+        .lead .pos { color: #621f32; font-weight: 800; font-family: 'Courier New', Courier, monospace; background: #621f32/8; }
+        .pos-banner { background: linear-gradient(180deg, #fbf8f4 0%, #f6efe6 100%); border: 1.5px dashed #bc955c; border-radius: 14px; padding: 16px 20px; margin: 0 0 24px; text-align: center; }
+        .pos-banner .pos-label { font-size: 10px; letter-spacing: 2px; text-transform: uppercase; color: #a8783f; margin: 0 0 6px; font-weight: 700; }
+        .pos-banner .pos-code { font-size: 26px; font-weight: 800; letter-spacing: 3px; color: #621f32; margin: 0; font-family: 'Courier New', Courier, monospace; }
+        .section-label { font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; color: #a8783f; font-weight: 800; margin: 0 0 10px; }
+        .category-box { border-radius: 12px; padding: 14px 16px; margin-bottom: 18px; border: 1px solid; }
+        .category-box.cat-A { background-color: #fef2f2; border-color: #fecaca; }
+        .category-box.cat-B { background-color: #eff6ff; border-color: #bfdbfe; }
+        .category-box.cat-C { background-color: #f8fafc; border-color: #e2e8f0; }
+        .category-box .cat-title { font-size: 13px; font-weight: 800; margin: 0 0 4px; }
+        .category-box.cat-A .cat-title { color: #b91c1c; }
+        .category-box.cat-B .cat-title { color: #1d4ed8; }
+        .category-box.cat-C .cat-title { color: #475569; }
+        .category-box .cat-desc { font-size: 12.5px; line-height: 1.5; color: #55606e; margin: 0; }
+        .grid { width: 100%; border-collapse: collapse; margin-bottom: 18px; }
+        .grid td { padding: 10px 12px; font-size: 13px; vertical-align: top; border-bottom: 1px solid #f0ece7; }
+        .grid td.k { color: #8a8a8a; font-weight: 600; width: 42%; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .grid td.v { color: #2d2d2d; font-weight: 700; }
+        .grid td.v.mono { font-family: 'Courier New', Courier, monospace; }
+        .employee-card { display: table; width: 100%; background-color: #fbf7f2; border: 1px solid #f0e4d0; border-radius: 12px; padding: 14px 16px; margin-bottom: 18px; }
+        .employee-card .avatar { display: table-cell; width: 42px; vertical-align: middle; }
+        .employee-card .avatar span { display: inline-block; width: 38px; height: 38px; line-height: 38px; text-align: center; border-radius: 999px; background: linear-gradient(135deg, #621f32, #8d2c48); color: #fff; font-weight: 800; font-size: 13px; }
+        .employee-card .info { display: table-cell; vertical-align: middle; padding-left: 10px; }
+        .employee-card .info .name { font-size: 13.5px; font-weight: 800; color: #2d2d2d; margin: 0; }
+        .employee-card .info .sub { font-size: 11px; color: #8a8a8a; margin: 2px 0 0; }
+        .cta-row { text-align: center; margin: 8px 0 26px; }
+        .cta-button { display: inline-block; background: linear-gradient(135deg, #621f32, #8d2c48); color: #ffffff !important; text-decoration: none; font-size: 12.5px; font-weight: 800; letter-spacing: 0.5px; padding: 13px 28px; border-radius: 12px; box-shadow: 0 8px 20px rgba(98,31,50,0.25); }
+        .divider { border: none; border-top: 1px solid #ece7e3; margin: 4px 0 20px; }
+        .notice { background-color: #fbf7f2; border-left: 3px solid #bc955c; border-radius: 6px; padding: 14px 16px; text-align: left; font-size: 12.5px; line-height: 1.5; color: #6b6b6b; margin-bottom: 28px; }
+        .footer { background-color: #f4f0ec; padding: 22px 20px; text-align: center; color: #8a8a8a; font-size: 12px; }
+        .footer-brand-row { display: flex; align-items: center; justify-content: center; gap: 6px; margin-bottom: 6px; }
+        .footer-brand-row img { width: 18px; height: 18px; vertical-align: middle; }
+        .footer .footer-brand { color: #621f32; font-weight: 600; font-size: 13px; }
+        .footer p { margin: 4px 0; }
+    </style>
+</head>
+<body>
+    <div class="wrapper">
+        <div class="container">
+            <div class="header">
+                <div class="logo-badge"><img src="cid:anam_logo" alt="ANAM" /></div>
+                <h1 class="header-title">SISTEMA DE <span class="accent">CONTROL DE PLAZAS</span></h1>
+                <p class="header-subtitle">Agencia Nacional de Aduanas de M&eacute;xico</p>
+                <div class="status-pill">&#9679; Posici&oacute;n quedó vacante</div>
+            </div>
+
+            <div class="content">
+                <div class="title">Alerta de Vacancia</div>
+                <p class="lead">Te suscribiste para que te avis&aacute;ramos cuando esta posici&oacute;n quedara vacante. Acaba de ocurrir.</p>
+
+                <div class="pos-banner">
+                    <p class="pos-label">Posici&oacute;n</p>
+                    <p class="pos-code">{{ no_pos_actual }}</p>
+                </div>
+
+                <p class="section-label">Categor&iacute;a de vacancia</p>
+                <div class="category-box cat-{{ categoria_vacancia|default:'C' }}">
+                    <p class="cat-title">Categor&iacute;a {{ categoria_vacancia|default:"—" }} &middot; {{ categoria_label }}</p>
+                    <p class="cat-desc">{{ categoria_descripcion }}</p>
+                </div>
+
+                {% if empleado_nombre %}
+                <p class="section-label">{{ empleado_rol_label }}</p>
+                <div class="employee-card">
+                    <div class="avatar"><span>{{ empleado_iniciales|default:"—" }}</span></div>
+                    <div class="info">
+                        <p class="name">{{ empleado_nombre }}</p>
+                        <p class="sub">No. Empleado: {{ empleado_num|default:"—" }}</p>
+                    </div>
+                </div>
+                {% endif %}
+
+                <p class="section-label">Detalle del movimiento</p>
+                <table class="grid" role="presentation">
+                    <tr><td class="k">Fecha de vacancia</td><td class="v">{{ fecha_vacancia|default:"—" }}</td></tr>
+                    {% if accion_nombre %}<tr><td class="k">Acci&oacute;n administrativa</td><td class="v">{{ accion_nombre }}{% if accion %} <span style="color:#a8783f;font-weight:700;">({{ accion }})</span>{% endif %}</td></tr>{% endif %}
+                    {% if motivo_nombre %}<tr><td class="k">Motivo</td><td class="v">{{ motivo_nombre }}{% if motivo %} <span style="color:#a8783f;font-weight:700;">({{ motivo }})</span>{% endif %}</td></tr>{% endif %}
+                    {% if fecha_efectiva %}<tr><td class="k">Fecha efectiva</td><td class="v">{{ fecha_efectiva }}</td></tr>{% endif %}
+                    {% if fecha_captura %}<tr><td class="k">Fecha de captura</td><td class="v">{{ fecha_captura }}</td></tr>{% endif %}
+                    {% if por %}<tr><td class="k">Movimiento ejecutado por</td><td class="v mono">{{ por }}</td></tr>{% endif %}
+                    {% if posicion_destino %}<tr><td class="k">Se traslad&oacute; a posici&oacute;n</td><td class="v mono">{{ posicion_destino }}</td></tr>{% endif %}
+                </table>
+
+                {% if tuvo_insubsistencia %}
+                <div class="notice">
+                    &#9888;&#65039; Esta fecha de vacancia ignor&oacute; una insubsistencia detectada en el historial de la posici&oacute;n (nombramiento/contrato HH sin efecto real) y se recalcul&oacute; con el siguiente movimiento v&aacute;lido.
+                </div>
+                {% endif %}
+
+                <div class="cta-row">
+                    <a href="{{ url_ver_detalle }}" class="cta-button">Ver detalle completo en el sistema</a>
+                </div>
+
+                <hr class="divider">
+
+                <div class="notice">
+                    Esta suscripci&oacute;n era de un solo aviso y ya se desactiv&oacute;. Si quieres que te avisemos la pr&oacute;xima vez que esta posici&oacute;n cambie de estado, vuelve a activarla desde el men&uacute; contextual de la columna Posici&oacute;n.
+                </div>
+            </div>
+
+            <div class="footer">
+                <div class="footer-brand-row">
+                    <img src="cid:icon_control_plazas" alt="" />
+                    <span class="footer-brand">Sistema de Control de Plazas</span>
+                </div>
+                <p>&copy; 2026 Agencia Nacional de Aduanas de M&eacute;xico</p>
+                <p>Este es un correo autom&aacute;tico, por favor no respondas.</p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

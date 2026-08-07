@@ -1397,6 +1397,29 @@ def _invalidar_cache_ocupacion_vacancia(bitacora=None):
         _append_log(bitacora, "Cache de ocupación/fecha de vacancia invalidado (datos frescos disponibles de inmediato).")
 
 
+def _procesar_notificaciones_posicion(bitacora=None):
+    """
+    Revisa las suscripciones "avísame cuando esta posición quede
+    vacante/se ocupe" y manda los correos correspondientes a las que
+    cambiaron de estado (ver `notificaciones_posicion.py`). Envuelto en su
+    propio try/except: un fallo aquí (ej. SMTP caído) nunca debe tumbar el
+    resto de `importar_zafiro`, que ya tiene datos frescos importados.
+    """
+    from .notificaciones_posicion import procesar_suscripciones_posicion
+
+    try:
+        stats = procesar_suscripciones_posicion()
+        if stats["enviados"] or stats["errores"]:
+            _append_log(
+                bitacora,
+                f"Notificaciones de posición: {stats['enviados']} correo(s) enviado(s), "
+                f"{stats['errores']} error(es).",
+            )
+    except Exception as e:
+        _append_log(bitacora, f"Error procesando notificaciones de posición: {e}", is_error=True)
+        logger.error("Error en _procesar_notificaciones_posicion: %s", e, exc_info=True)
+
+
 def _notificar_servidor_invalidar_cache(bitacora):
     """
     Notifica al backend del servidor (eje_central_back, 89.116.51.124) para
@@ -1675,6 +1698,15 @@ def importar_zafiro(self):
         # Invalida YA los caches de ocupación/fecha de vacancia — no esperar
         # a que termine toda la tarea (ver _invalidar_cache_ocupacion_vacancia).
         _invalidar_cache_ocupacion_vacancia(bitacora)
+
+        # Notifica por correo a quien se suscribió a "avísame cuando esta
+        # posición quede vacante/se ocupe" (menú contextual columna Posición
+        # en PlantillaDetalleTab/MovimientosTab) — justo aquí porque ya se
+        # invalidó el cache de ocupación arriba, así que get_posiciones_
+        # ocupadas_set() ya ve el dato fresco de este import. Solo aplica
+        # cuando importar_zafiro corre EN este mismo servidor; si corrió en
+        # la PC Windows remota, se dispara en InvalidarCacheZafiroView.post.
+        _procesar_notificaciones_posicion(bitacora)
 
         # ── 9. Sincronizar cat_nivel_jerarquico_plaza desde MOV_POS ────────
         _sincronizar_plazas_nivel_jerarquico(bitacora)

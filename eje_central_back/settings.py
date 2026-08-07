@@ -234,6 +234,10 @@ EMAIL_USE_TLS = True
 EMAIL_HOST_USER = os.getenv("EMAIL_USER")
 EMAIL_HOST_PASSWORD = os.getenv("EMAIL_PASSWORD")
 
+# URL base del frontend (sin slash final) — usada para armar los deep-links
+# de los correos de notificación (ver plantilla/notificaciones_posicion.py).
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://89.116.51.124:3030")
+
 MEDIA_URL = "/media/"
 MEDIA_ROOT = os.path.join(BASE_DIR, "media")
 

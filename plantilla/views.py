@@ -57,6 +57,7 @@ from .models import (
     Plantilla1800Plazas,
     REPORTADA_CHOICES,
     RcCatCodPresupuestal,
+    SuscripcionNotificacionPosicion,
     TblColumnasPlantillaQuincenal,
 )
 from .celda_override import (
@@ -4141,7 +4142,7 @@ class MovPosVacanciaDetalleView(APIView):
     view_permission = "authentication.view_plantilla_mov_posiciones"
 
     def get(self, request, *args, **kwargs):
-        from .models import CpTblMovCompleto290526
+        from .notificaciones_posicion import construir_detalle_vacancia
 
         mov_id = request.query_params.get("id")
         if not mov_id:
@@ -4158,102 +4159,89 @@ class MovPosVacanciaDetalleView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        categoria = (mov_row.categoria_vacancia or "").strip().upper()
-        id_decisivo = mov_row.id_registro_desicivo
+        return Response(construir_detalle_vacancia(mov_row))
 
-        tuvo_insubsistencia = (mov_row.tuvo_insubsistencia or "").strip().upper()
-        insubsistencia = None
-        if tuvo_insubsistencia == "S" and mov_row.id_insubsistencia_detectada:
-            try:
-                reg_ins = CpTblMovCompleto290526.objects.get(
-                    id=mov_row.id_insubsistencia_detectada
-                )
-                insubsistencia = {
-                    "empleado": {
-                        "num_empleado": reg_ins.num_empleado,
-                        "nombre_completo": " ".join(
-                            p for p in [reg_ins.nombre, reg_ins.ap_pat, reg_ins.ap_mat] if p
-                        ).strip(),
-                    },
-                    "posicion": reg_ins.posicion,
-                    "motivo": reg_ins.motivo,
-                    "motivo_nombre": reg_ins.motivo_nombre,
-                    "accion": reg_ins.accion,
-                    "accion_nombre": reg_ins.accion_nombre,
-                    "fecha_efectiva": reg_ins.fecha_efectiva,
-                    "fecha_captura": reg_ins.fecha_captura,
-                }
-            except CpTblMovCompleto290526.DoesNotExist:
-                insubsistencia = {
-                    "error": "Registro de insubsistencia no encontrado en cp_tbl_mov_completo_29_05_26."
-                }
 
-        base = {
-            "categoria_vacancia": categoria,
-            "no_pos_actual": mov_row.no_pos_actual,
-            "fecha_vacancia": mov_row.fecha_vacancia,
-            "tuvo_insubsistencia": tuvo_insubsistencia,
-            "insubsistencia": insubsistencia,
-        }
+class SuscripcionesPosicionView(APIView):
+    """
+    Menú contextual "Notificarme cuando la posición quede vacante/se ocupe"
+    de la columna Posición (PlantillaDetalleTab/MovimientosTab). Cualquier
+    usuario autenticado puede suscribirse — no requiere permiso de módulo
+    (sin `view_permission`, `HasModulePermission` sólo exige login).
 
-        if not categoria or not id_decisivo:
+    GET  -> suscripciones ACTIVAS del usuario autenticado, para que el menú
+            sepa si ya existe una para esa posición+tipo y ofrezca "Cancelar
+            aviso" en vez de mostrar la opción de suscribirse otra vez.
+    POST -> crea una suscripción {posicion, tipo}. Snapshotea el estado
+            actual (ocupada/vacante) como `estado_conocido_al_suscribir` —
+            la notificación se dispara cuando el estado real deje de
+            coincidir con este snapshot (ver `notificaciones_posicion.py`).
+            Idempotente: MySQL no aplica el UniqueConstraint condicional del
+            modelo (ver W036 en la migración), así que la duplicidad se
+            evita aquí explícitamente devolviendo la existente en vez de
+            crear una segunda.
+    """
+
+    def get(self, request):
+        subs = SuscripcionNotificacionPosicion.objects.filter(
+            usuario=request.user, activa=True
+        ).values("id", "posicion", "tipo", "creado_en")
+        return Response(list(subs))
+
+    def post(self, request):
+        posicion = (request.data.get("posicion") or "").strip()
+        tipo = (request.data.get("tipo") or "").strip().upper()
+        if not posicion or tipo not in dict(SuscripcionNotificacionPosicion.TIPO_CHOICES):
             return Response(
-                {**base, "error": "No hay registro decisivo asociado a esta vacancia."}
+                {"error": "Se requiere 'posicion' y 'tipo' ('VACANTE' u 'OCUPACION')."},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
-        if categoria in ("A", "B"):
-            try:
-                registro = CpTblMovCompleto290526.objects.get(id=id_decisivo)
-            except CpTblMovCompleto290526.DoesNotExist:
-                return Response(
-                    {
-                        **base,
-                        "error": "Registro decisivo no encontrado en cp_tbl_mov_completo_29_05_26.",
-                    }
-                )
-
-            empleado_nombre = " ".join(
-                p for p in [registro.nombre, registro.ap_pat, registro.ap_mat] if p
-            ).strip()
-
-            detalle = {
-                **base,
-                "empleado": {
-                    "num_empleado": registro.num_empleado,
-                    "nombre_completo": empleado_nombre,
+        existente = SuscripcionNotificacionPosicion.objects.filter(
+            usuario=request.user, posicion=posicion, tipo=tipo, activa=True
+        ).first()
+        if existente:
+            return Response(
+                {
+                    "id": existente.id,
+                    "posicion": existente.posicion,
+                    "tipo": existente.tipo,
+                    "ya_existia": True,
                 },
-                "accion": registro.accion,
-                "accion_nombre": registro.accion_nombre,
-                "motivo": registro.motivo,
-                "motivo_nombre": registro.motivo_nombre,
-                "fecha_efectiva": registro.fecha_efectiva,
-                "fecha_captura": registro.fecha_captura,
-            }
+                status=status.HTTP_200_OK,
+            )
 
-            if categoria == "B":
-                detalle["posicion_origen"] = mov_row.no_pos_actual
-                detalle["posicion_destino"] = registro.posicion
+        posiciones_ocupadas = get_posiciones_ocupadas_set()
+        estado_actual = "O" if posicion in posiciones_ocupadas else "V"
 
-            return Response(detalle)
-
-        if categoria == "C":
-            try:
-                registro = MovPos.objects.get(id=id_decisivo)
-            except MovPos.DoesNotExist:
-                return Response(
-                    {**base, "error": "Registro decisivo no encontrado en MOV_POS."}
-                )
-
-            detalle = {
-                **base,
-                "fecha_efectiva": registro.f_efva,
-                "fecha_captura": registro.fecha_captura,
-            }
-            return Response(detalle)
-
-        return Response(
-            {**base, "error": f"Categoría de vacancia desconocida: {categoria}"}
+        sub = SuscripcionNotificacionPosicion.objects.create(
+            usuario=request.user,
+            posicion=posicion,
+            tipo=tipo,
+            estado_conocido_al_suscribir=estado_actual,
         )
+        return Response(
+            {"id": sub.id, "posicion": sub.posicion, "tipo": sub.tipo, "ya_existia": False},
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class SuscripcionPosicionDetalleView(APIView):
+    """DELETE -> cancela (soft delete: `activa=False`) una suscripción
+    propia. Un usuario no puede cancelar la suscripción de otro (filtra por
+    `usuario=request.user`, un 404 en vez de 403 para no filtrar si el id
+    pertenece a alguien más)."""
+
+    def delete(self, request, pk):
+        try:
+            sub = SuscripcionNotificacionPosicion.objects.get(pk=pk, usuario=request.user)
+        except SuscripcionNotificacionPosicion.DoesNotExist:
+            return Response(
+                {"error": "Suscripción no encontrada."}, status=status.HTTP_404_NOT_FOUND
+            )
+        sub.activa = False
+        sub.save(update_fields=["activa"])
+        return Response({"status": "ok"})
 
 
 # ── Comprobar Alineación Organizacional (MOV_POS vs EMPLEADOS_COMPLETOS_SIG) ──
@@ -5528,6 +5516,20 @@ class InvalidarCacheZafiroView(APIView):
             )
 
         borradas = invalidar_todo_el_cache_servidor()
+
+        # Notifica "avísame cuando esta posición quede vacante/se ocupe" —
+        # aquí porque este es el punto donde ESTE servidor (el que sirve a
+        # los usuarios) se entera de que hay datos frescos, cuando
+        # importar_zafiro corrió en la PC Windows remota (ver docstring de
+        # esta vista). Si importar_zafiro corre en este mismo servidor, se
+        # dispara en tasks.py (_procesar_notificaciones_posicion) en vez de
+        # aquí.
+        try:
+            from .notificaciones_posicion import procesar_suscripciones_posicion
+
+            procesar_suscripciones_posicion()
+        except Exception:
+            logger.exception("Error procesando notificaciones de posición tras invalidación remota de caché")
 
         fecha_fin = bitacora.fecha_ejecucion
         if bitacora.duracion_segundos:

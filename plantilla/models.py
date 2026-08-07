@@ -1764,3 +1764,49 @@ class EmpleadoFotoAlias(models.Model):
 
     class Meta:
         db_table = "EMPLEADO_FOTO_ALIAS"
+
+
+class SuscripcionNotificacionPosicion(models.Model):
+    """
+    "Notificarme cuando la posición quede vacante/se ocupe" (menú contextual
+    de la columna Posición en PlantillaDetalleTab/MovimientosTab). Se dispara
+    en `notificaciones_posicion.procesar_suscripciones_posicion`, enganchado
+    a la invalidación de caché tras cada `importar_zafiro` (ver tasks.py e
+    `InvalidarCacheZafiroView` en views.py).
+
+    `estado_conocido_al_suscribir` es un snapshot de "¿estaba ocupada?" al
+    momento de crear la suscripción (no hay histórico de corridas de Celery
+    para comparar contra el anterior) — la condición de disparo es que el
+    estado ACTUAL difiera de este snapshot. Un solo aviso: al dispararse,
+    `activa` pasa a False.
+    """
+
+    TIPO_CHOICES = [("VACANTE", "Vacante"), ("OCUPACION", "Ocupación")]
+    ESTADO_CHOICES = [("O", "Ocupada"), ("V", "Vacante")]
+
+    usuario = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+        related_name="suscripciones_posicion",
+    )
+    posicion = models.CharField(max_length=20, db_index=True)
+    tipo = models.CharField(max_length=10, choices=TIPO_CHOICES)
+    activa = models.BooleanField(default=True, db_index=True)
+    estado_conocido_al_suscribir = models.CharField(max_length=1, choices=ESTADO_CHOICES)
+    creado_en = models.DateTimeField(auto_now_add=True)
+    notificado_en = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "SUSCRIPCION_NOTIFICACION_POSICION"
+        indexes = [
+            models.Index(fields=["posicion", "activa"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["usuario", "posicion", "tipo"],
+                condition=models.Q(activa=True),
+                name="uniq_suscripcion_activa_usuario_posicion_tipo",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.usuario} - {self.posicion} ({self.tipo})"

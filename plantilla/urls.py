@@ -32,6 +32,8 @@ from .views import (
     MovPosFechaAnuenciaOverrideView,
     MovPosHistoriaView,
     MovPosVacanciaDetalleView,
+    SuscripcionesPosicionView,
+    SuscripcionPosicionDetalleView,
     CadenaMandoView,
     ZafiroBitacoraView,
     ZafiroDuracionPromedioPorHoraView,
@@ -418,6 +420,16 @@ urlpatterns = [
         "mov_pos_vacancia_detalle/",
         MovPosVacanciaDetalleView.as_view(),
         name="mov_pos_vacancia_detalle",
+    ),
+    path(
+        "suscripciones-posicion/",
+        SuscripcionesPosicionView.as_view(),
+        name="suscripciones_posicion",
+    ),
+    path(
+        "suscripciones-posicion/<int:pk>/",
+        SuscripcionPosicionDetalleView.as_view(),
+        name="suscripcion_posicion_detalle",
     ),
     path(
         "mov_pos_alineacion/",
