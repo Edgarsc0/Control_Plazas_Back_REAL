@@ -210,6 +210,49 @@ def construir_detalle_vacancia(mov_row):
     return {**base, "error": f"Categoría de vacancia desconocida: {categoria}"}
 
 
+def construir_detalle_ocupacion(mov_row):
+    """
+    Dado un renglón de MOV_POS, arma el detalle del registro decisivo
+    (cp_tbl_mov_completo_29_05_26) que originó la fecha de ocupación vigente
+    de una posición (ver sp_actualizar_fecha_ocupacion_mov_pos: es el
+    movimiento que abrió la racha ininterrumpida actual del ocupante en esa
+    posición, no necesariamente la primera vez que apareció en ella).
+    """
+    from .models import CpTblMovCompleto290526
+
+    base = {
+        "no_pos_actual": mov_row.no_pos_actual,
+        "fecha_ocupacion": mov_row.fecha_ocupacion,
+    }
+
+    id_decisivo = mov_row.id_registro_des_fecha_ocupacion
+    if not mov_row.fecha_ocupacion or not id_decisivo:
+        return {**base, "error": "No hay registro decisivo asociado a esta ocupación."}
+
+    try:
+        registro = CpTblMovCompleto290526.objects.get(id=id_decisivo)
+    except CpTblMovCompleto290526.DoesNotExist:
+        return {**base, "error": "Registro decisivo no encontrado en cp_tbl_mov_completo_29_05_26."}
+
+    empleado_nombre = " ".join(
+        p for p in [registro.nombre, registro.ap_pat, registro.ap_mat] if p
+    ).strip()
+
+    return {
+        **base,
+        "empleado": {
+            "num_empleado": registro.num_empleado,
+            "nombre_completo": empleado_nombre,
+        },
+        "accion": registro.accion,
+        "accion_nombre": registro.accion_nombre,
+        "motivo": registro.motivo,
+        "motivo_nombre": registro.motivo_nombre,
+        "fecha_efectiva": registro.fecha_efectiva,
+        "fecha_captura": registro.fecha_captura,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Correo de VACANCIA
 # ---------------------------------------------------------------------------

@@ -32,6 +32,7 @@ from .views import (
     MovPosFechaAnuenciaOverrideView,
     MovPosHistoriaView,
     MovPosVacanciaDetalleView,
+    MovPosOcupacionDetalleView,
     SuscripcionesPosicionView,
     SuscripcionPosicionDetalleView,
     CadenaMandoView,
@@ -420,6 +421,11 @@ urlpatterns = [
         "mov_pos_vacancia_detalle/",
         MovPosVacanciaDetalleView.as_view(),
         name="mov_pos_vacancia_detalle",
+    ),
+    path(
+        "mov_pos_ocupacion_detalle/",
+        MovPosOcupacionDetalleView.as_view(),
+        name="mov_pos_ocupacion_detalle",
     ),
     path(
         "suscripciones-posicion/",

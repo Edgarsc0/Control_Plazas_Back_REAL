@@ -3396,6 +3396,23 @@ class MovPosDetalleView(APIView):
 
         from .models import MovPos, Plantilla1800Plazas
 
+        # Celery trunca MOV_POS en cada import de ZAFIRO (swap Blue-Green) y
+        # las columnas FECHA_OCUPACION/ID_REGISTRO_DES_FECHA_OCUPACION nacen
+        # NULL (bulk_create no las conoce) — el SP que las llena solo corre
+        # dentro del pipeline de vacancias, no del de ocupación. Probe barato
+        # (LIMIT 1, sobre índice de Estado Psn): si nadie las tiene pobladas
+        # todavía en este ciclo, se recalculan aquí mismo antes de responder.
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT 1 FROM MOV_POS WHERE `Estado Psn`='A' "
+                "AND FECHA_OCUPACION IS NOT NULL AND ID_REGISTRO_DES_FECHA_OCUPACION IS NOT NULL "
+                "LIMIT 1"
+            )
+            fecha_ocupacion_poblada = cursor.fetchone() is not None
+        if not fecha_ocupacion_poblada:
+            with connection.cursor() as cursor:
+                cursor.execute("CALL sp_actualizar_fecha_ocupacion_mov_pos();")
+
         queryset = MovPos.objects.all()
         # `fecha_anuencia` = fecha_vacancia + 30 días por default, salvo que el
         # usuario haya editado manualmente esa fecha para la posición (ver
@@ -4160,6 +4177,42 @@ class MovPosVacanciaDetalleView(APIView):
             )
 
         return Response(construir_detalle_vacancia(mov_row))
+
+
+class MovPosOcupacionDetalleView(APIView):
+    """
+    Devuelve el detalle del registro decisivo (cp_tbl_mov_completo_29_05_26)
+    que originó la fecha de ocupación vigente de una posición: el movimiento
+    que abrió la racha ininterrumpida actual del ocupante en esa posición
+    (ver sp_actualizar_fecha_ocupacion_mov_pos), no necesariamente la
+    primera vez que el empleado apareció en ella.
+
+    Parámetro: ?id=<id de MOV_POS> (el id del renglón de MOV_POS sobre el
+    que se muestra la fecha de ocupación, NO el
+    id_registro_des_fecha_ocupacion).
+    """
+
+    view_permission = "authentication.view_plantilla_mov_posiciones"
+
+    def get(self, request, *args, **kwargs):
+        from .notificaciones_posicion import construir_detalle_ocupacion
+
+        mov_id = request.query_params.get("id")
+        if not mov_id:
+            return Response(
+                {"error": "Parámetro 'id' es requerido."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            mov_row = MovPos.objects.get(id=mov_id)
+        except (MovPos.DoesNotExist, ValueError):
+            return Response(
+                {"error": "Registro de MOV_POS no encontrado."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        return Response(construir_detalle_ocupacion(mov_row))
 
 
 class SuscripcionesPosicionView(APIView):
@@ -7290,8 +7343,21 @@ class MovimientosPersonalHistorialView(APIView):
     Usar POST con body {"num_empleado": [123, 456, 789]} para listas grandes
     (evita el límite de longitud de URL de un GET). Se mantiene ?num_empleado__in=
     por compatibilidad con clientes existentes.
+
+    Además de su uso original (módulo Movimientos), alimenta el tab "Historial
+    de movimientos" del expediente de empleado (EmployeesModal.jsx) — se
+    amplía el permiso a la misma tupla que DatosPersonalesEmpleadoView para
+    que cualquiera que pueda abrir el expediente vea este tab, sin importar
+    desde qué módulo de Plantilla lo abrió.
     """
-    view_permission = "authentication.view_plantilla_movimientos"
+    view_permission = (
+        "authentication.view_plantilla_detalle",
+        "authentication.view_plantilla_estatus_nomina",
+        "authentication.view_plantilla_mov_posiciones",
+        "authentication.view_plantilla_movimientos",
+        "authentication.view_plantilla_bajas",
+        "authentication.view_plantilla_geografia",
+    )
 
     def get(self, request):
         raw_param = request.query_params.get("num_empleado__in", "").strip()

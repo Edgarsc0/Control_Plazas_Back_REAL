@@ -863,6 +863,12 @@ class MovPosBase(models.Model):
     id_insubsistencia_detectada = models.BigIntegerField(
         db_column="idInsubsistenciaDetectada", blank=True, null=True
     )
+    fecha_ocupacion = models.DateField(
+        db_column="FECHA_OCUPACION", blank=True, null=True
+    )
+    id_registro_des_fecha_ocupacion = models.BigIntegerField(
+        db_column="ID_REGISTRO_DES_FECHA_OCUPACION", blank=True, null=True
+    )
 
     class Meta:
         abstract = True
