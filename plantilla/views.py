@@ -5383,8 +5383,10 @@ class ZafiroBitacoraView(APIView):
     view_permission = "authentication.view_monitoreo_zafiro"
 
     def get(self, request):
-        limit = int(request.query_params.get("limit", 50))
-        logs = ZafiroBitacora.objects.all()[:limit]
+        limit = request.query_params.get("limit")
+        logs = ZafiroBitacora.objects.all()
+        if limit is not None:
+            logs = logs[: int(limit)]
 
         data = []
         for log in logs:
