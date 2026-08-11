@@ -3396,22 +3396,17 @@ class MovPosDetalleView(APIView):
 
         from .models import MovPos, Plantilla1800Plazas
 
-        # Celery trunca MOV_POS en cada import de ZAFIRO (swap Blue-Green) y
-        # las columnas FECHA_OCUPACION/ID_REGISTRO_DES_FECHA_OCUPACION nacen
-        # NULL (bulk_create no las conoce) — el SP que las llena solo corre
-        # dentro del pipeline de vacancias, no del de ocupación. Probe barato
-        # (LIMIT 1, sobre índice de Estado Psn): si nadie las tiene pobladas
-        # todavía en este ciclo, se recalculan aquí mismo antes de responder.
-        with connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT 1 FROM MOV_POS WHERE `Estado Psn`='A' "
-                "AND FECHA_OCUPACION IS NOT NULL AND ID_REGISTRO_DES_FECHA_OCUPACION IS NOT NULL "
-                "LIMIT 1"
-            )
-            fecha_ocupacion_poblada = cursor.fetchone() is not None
-        if not fecha_ocupacion_poblada:
-            with connection.cursor() as cursor:
-                cursor.execute("CALL sp_actualizar_fecha_ocupacion_mov_pos();")
+        # FECHA_OCUPACION/ID_REGISTRO_DES_FECHA_OCUPACION se recalculan una
+        # sola vez por import, en InvalidarCacheZafiroView (justo cuando
+        # Celery avisa que importar_zafiro terminó) — no aquí. Antes este
+        # GET disparaba `CALL sp_actualizar_fecha_ocupacion_mov_pos()` la
+        # primera vez que alguien abría este tab tras cada import (probe +
+        # CALL lazy), sin ningún lock: si dos requests llegaban a la vez,
+        # ambas disparaban el SP en paralelo, y su UPDATE (con window
+        # functions sobre cp_tbl_mov_completo_29_05_26) tardaba varios
+        # minutos sosteniendo locks de fila en MOV_POS — chocando con
+        # `_reaplicar_prioridad_nivel_jerarquico` y los pasos de vacancia del
+        # pipeline de ZAFIRO (error 1205 Lock wait timeout, ver ZafiroBitacora).
 
         queryset = MovPos.objects.all()
         # `fecha_anuencia` = fecha_vacancia + 30 días por default, salvo que el
@@ -5588,6 +5583,26 @@ class InvalidarCacheZafiroView(APIView):
             return Response(
                 {"error": f"ZafiroBitacora {bitacora_id} tiene status '{bitacora.status}', se esperaba 'EXITO'."},
                 status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Recalcula FECHA_OCUPACION/ID_REGISTRO_DES_FECHA_OCUPACION en
+        # MOV_POS (nacen NULL tras el swap Blue-Green de importar_zafiro,
+        # bulk_create no las conoce). Antes se disparaba de forma lazy desde
+        # MovPosDetalleView.get la primera vez que alguien abría el tab
+        # "Movimientos de Posiciones" tras un import — sin lock, así que
+        # requests concurrentes podían disparar el SP en paralelo y su
+        # UPDATE (window functions sobre cp_tbl_mov_completo_29_05_26)
+        # sostenía locks de fila en MOV_POS varios minutos, chocando con
+        # `_reaplicar_prioridad_nivel_jerarquico` y los pasos de vacancia del
+        # propio pipeline de ZAFIRO (error 1205 Lock wait timeout). Aquí se
+        # dispara una sola vez, justo cuando Celery avisa que el import ya
+        # terminó, sin competir con ningún HTTP request de usuario.
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("CALL sp_actualizar_fecha_ocupacion_mov_pos();")
+        except Exception:
+            logger.exception(
+                "Error ejecutando sp_actualizar_fecha_ocupacion_mov_pos tras import ZAFIRO"
             )
 
         borradas = invalidar_todo_el_cache_servidor()
