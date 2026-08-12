@@ -68,6 +68,8 @@ from .views import (
     OrganigramaAnamViewSet,
     RcCatCodPresupuestalViewSet,
     CuadroVacanciaView,
+    ConteoPlazasHistoricoSerieView,
+    PlazasMovimientoMesView,
     DesgloseJerarquicoView,
     DesgloseJerarquicoOcupadosView,
     AduanasOcupacionVacanciaView,
@@ -476,6 +478,16 @@ urlpatterns = [
         "cuadro_vacancia/",
         CuadroVacanciaView.as_view(),
         name="cuadro_vacancia",
+    ),
+    path(
+        "conteo_plazas_historico_serie/",
+        ConteoPlazasHistoricoSerieView.as_view(),
+        name="conteo_plazas_historico_serie",
+    ),
+    path(
+        "plazas_movimiento_mes/",
+        PlazasMovimientoMesView.as_view(),
+        name="plazas_movimiento_mes",
     ),
     path(
         "desglose_jerarquico/",

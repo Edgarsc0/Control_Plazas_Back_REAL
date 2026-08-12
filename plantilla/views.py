@@ -7539,6 +7539,168 @@ class CuadroVacanciaView(APIView):
             )
 
 
+class ConteoPlazasHistoricoSerieView(APIView):
+    # Serie mensual (corte a fin de cada mes desde 2022-01) de plazas
+    # totales/activas/inactivas/ocupadas/vacantes, para la gráfica histórica
+    # de CuadrosVacanciaTab. El SP recorre mes a mes con joins pesados sobre
+    # MOV_POS/cp_tbl_mov_completo_29_05_26 (~25s), de ahí el cache largo: el
+    # histórico de meses cerrados no cambia, solo el corte del mes en curso.
+    view_permission = "authentication.view_plantilla_mov_posiciones"
+
+    def get(self, request, *args, **kwargs):
+        from django.db import connection
+
+        cache_key = "conteo_plazas_historico_serie"
+        cached_data = cache.get(cache_key)
+        if cached_data is not None:
+            return Response(cached_data, status=status.HTTP_200_OK)
+
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("CALL sp_conteo_plazas_historico_serie();")
+                columns = [col[0] for col in cursor.description]
+                results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+            cache.set(cache_key, results, 3600)
+            return Response(results, status=status.HTTP_200_OK)
+        except Exception:
+            logger.exception("Error inesperado en {}".format(request.path))
+            return Response(
+                {"error": "Error interno del servidor"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class PlazasMovimientoMesView(APIView):
+    # Detalle de qué posiciones concretas se crearon (activas) o desactivaron
+    # (inactivas) entre el corte de fin de mes anterior y el corte de fin de
+    # mes actual — para el click en las franjas verde/guinda de la gráfica
+    # "Plazas Totales vs Activas vs Inactivas" en CuadrosVacanciaTab. Misma
+    # técnica de snapshot por posición (ROW_NUMBER sobre MOV_POS con cutoff)
+    # que sp_conteo_plazas_historico_serie, pero sin el join a
+    # cp_tbl_mov_completo_29_05_26 (no hace falta: aquí solo importa el
+    # tránsito Activa/Inactiva, no Ocupada/Vacante) y acotado a las dos
+    # posiciones cuyo estado cambió, no al conteo agregado.
+    view_permission = "authentication.view_plantilla_mov_posiciones"
+
+    # Alias en snake_case (posicion, nombre_puesto_funcional, unidad_administrativa,
+    # tipo_de_aduana, fecha_efectiva_mov_pos, capturado_por, fecha_de_captura)
+    # para que las filas
+    # calcen directo con ALL_AVAILABLE_COLUMNS de EmployeesModal.jsx — el modal
+    # se abre en modo local (prop `rows`) con estas filas tal cual, sin mapper
+    # intermedio (ver mapVacanteRow.js para el patrón equivalente de otras vistas).
+    _SNAPSHOT_CTE = """
+        WITH s_curr AS (
+            SELECT m.`Nº Pos Actual` AS posicion, TRIM(m.`Estado Psn`) AS estado,
+                   m.`F Efva` AS fecha_efectiva, m.`Por` AS capturado_por,
+                   m.`Fecha Captura` AS fecha_de_captura
+            FROM MOV_POS m
+            JOIN (
+                SELECT id FROM (
+                    SELECT id, ROW_NUMBER() OVER (
+                        PARTITION BY `Nº Pos Actual`
+                        ORDER BY `F Efva` DESC, `Fecha Captura` DESC, `F/H Últ Actz` DESC, id DESC
+                    ) rn
+                    FROM MOV_POS WHERE `F Efva` <= %s
+                ) r WHERE rn = 1
+            ) l ON l.id = m.id
+        ),
+        s_prev AS (
+            SELECT m.`Nº Pos Actual` AS posicion, TRIM(m.`Estado Psn`) AS estado
+            FROM MOV_POS m
+            JOIN (
+                SELECT id FROM (
+                    SELECT id, ROW_NUMBER() OVER (
+                        PARTITION BY `Nº Pos Actual`
+                        ORDER BY `F Efva` DESC, `Fecha Captura` DESC, `F/H Últ Actz` DESC, id DESC
+                    ) rn
+                    FROM MOV_POS WHERE `F Efva` <= %s
+                ) r WHERE rn = 1
+            ) l ON l.id = m.id
+        )
+    """
+
+    _QUERY_CREACION = _SNAPSHOT_CTE + """
+        SELECT
+            s_curr.posicion AS posicion,
+            MAX(s_curr.fecha_efectiva) AS fecha_efectiva_mov_pos,
+            ANY_VALUE(s_curr.capturado_por) AS capturado_por,
+            ANY_VALUE(s_curr.fecha_de_captura) AS fecha_de_captura,
+            ANY_VALUE(e.`Nombre Puesto Funcional`) AS nombre_puesto_funcional,
+            ANY_VALUE(e.`Nivel`) AS nivel,
+            ANY_VALUE(COALESCE(u.nombre, e.`Cd UA`)) AS unidad_administrativa,
+            ANY_VALUE(e.`Aduana`) AS aduana,
+            ANY_VALUE(e.`Tipo de Aduana`) AS tipo_de_aduana
+        FROM s_curr
+        LEFT JOIN s_prev ON s_prev.posicion = s_curr.posicion
+        LEFT JOIN EMPLEADOS_COMPLETOS_SIG e ON e.`Posición` = s_curr.posicion
+        LEFT JOIN ua_unidadadministrativa u ON TRIM(e.`Cd UA`) = TRIM(u.codigo)
+        WHERE s_curr.estado = 'A' AND (s_prev.estado IS NULL OR s_prev.estado <> 'A')
+        GROUP BY s_curr.posicion
+        ORDER BY fecha_efectiva_mov_pos DESC, posicion;
+    """
+
+    _QUERY_DESACTIVACION = _SNAPSHOT_CTE + """
+        SELECT
+            s_prev.posicion AS posicion,
+            MAX(s_curr.fecha_efectiva) AS fecha_efectiva_mov_pos,
+            ANY_VALUE(s_curr.capturado_por) AS capturado_por,
+            ANY_VALUE(s_curr.fecha_de_captura) AS fecha_de_captura,
+            ANY_VALUE(e.`Nombre Puesto Funcional`) AS nombre_puesto_funcional,
+            ANY_VALUE(e.`Nivel`) AS nivel,
+            ANY_VALUE(COALESCE(u.nombre, e.`Cd UA`)) AS unidad_administrativa,
+            ANY_VALUE(e.`Aduana`) AS aduana,
+            ANY_VALUE(e.`Tipo de Aduana`) AS tipo_de_aduana
+        FROM s_prev
+        JOIN s_curr ON s_curr.posicion = s_prev.posicion
+        LEFT JOIN EMPLEADOS_COMPLETOS_SIG e ON e.`Posición` = s_prev.posicion
+        LEFT JOIN ua_unidadadministrativa u ON TRIM(e.`Cd UA`) = TRIM(u.codigo)
+        WHERE s_prev.estado = 'A' AND s_curr.estado = 'I'
+        GROUP BY s_prev.posicion
+        ORDER BY fecha_efectiva_mov_pos DESC, posicion;
+    """
+
+    def get(self, request, *args, **kwargs):
+        from django.db import connection
+
+        tipo = request.query_params.get("tipo")
+        fecha_actual = request.query_params.get("fecha_actual")
+        fecha_anterior = request.query_params.get("fecha_anterior")
+
+        if tipo not in ("creacion", "desactivacion"):
+            return Response(
+                {"error": "tipo debe ser 'creacion' o 'desactivacion'"}, status=status.HTTP_400_BAD_REQUEST
+            )
+        try:
+            datetime.date.fromisoformat(fecha_actual)
+            datetime.date.fromisoformat(fecha_anterior)
+        except (TypeError, ValueError):
+            return Response(
+                {"error": "fecha_actual y fecha_anterior deben tener formato YYYY-MM-DD"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        cache_key = f"plazas_movimiento_mes_{tipo}_{fecha_anterior}_{fecha_actual}"
+        cached_data = cache.get(cache_key)
+        if cached_data is not None:
+            return Response(cached_data, status=status.HTTP_200_OK)
+
+        query = self._QUERY_CREACION if tipo == "creacion" else self._QUERY_DESACTIVACION
+
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(query, [fecha_actual, fecha_anterior])
+                columns = [col[0] for col in cursor.description]
+                results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+            cache.set(cache_key, results, 3600)
+            return Response(results, status=status.HTTP_200_OK)
+        except Exception:
+            logger.exception("Error inesperado en {}".format(request.path))
+            return Response(
+                {"error": "Error interno del servidor"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
 class DesgloseJerarquicoView(APIView):
     view_permission = "authentication.view_plantilla_mov_posiciones"
 
