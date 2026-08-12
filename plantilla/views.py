@@ -7646,9 +7646,21 @@ class PlazasMovimientoMesView(APIView):
         "ID_REGISTRO_DES_FECHA_OCUPACION": "id_registro_des_fecha_ocupacion",
     }
 
+    # 2026-08-12: MOV_POS perdió 5 de sus 6 índices en algún punto de esta
+    # sesión (quedó solo PRIMARY + índice sobre `Estado Psn`; se sospecha un
+    # swap de tabla de un ETL externo — no se tocó el schema a pedido del
+    # usuario). Sin índice sobre `Nº Pos Actual` ni sobre `F Efva`, el
+    # optimizer de MySQL 8 además cae en un plan patológico: intenta fusionar
+    # (`derived_merge`) las CTEs s_curr/s_prev —de forma idéntica salvo el
+    # cutoff— y arma un hash join SIN condición (cross join de ~90 millones
+    # de filas) en vez de usar `s_curr.posicion = s_prev.posicion` como llave.
+    # `s_curr` ya trae el registro COMPLETO (`m.*`) para no necesitar un join
+    # de vuelta a MOV_POS. El toggle de `derived_merge` en el get() de abajo
+    # fuerza a MySQL a materializar cada CTE por separado — evita el cross
+    # join sin tocar el schema (queda ~1-3s en vez de timeout/minutos).
     _SNAPSHOT_CTE = """
         WITH s_curr AS (
-            SELECT m.id AS mov_pos_id, `Nº Pos Actual` AS posicion, TRIM(`Estado Psn`) AS estado
+            SELECT m.*
             FROM MOV_POS m
             JOIN (
                 SELECT id FROM (
@@ -7676,24 +7688,23 @@ class PlazasMovimientoMesView(APIView):
     """
 
     _QUERY_CREACION = _SNAPSHOT_CTE + """
-        SELECT m.*
+        SELECT s_curr.*
         FROM s_curr
-        LEFT JOIN s_prev ON s_prev.posicion = s_curr.posicion
-        JOIN MOV_POS m ON m.id = s_curr.mov_pos_id
-        WHERE s_curr.estado = 'A' AND (s_prev.estado IS NULL OR s_prev.estado <> 'A')
-        ORDER BY m.`F Efva` DESC, s_curr.posicion;
+        LEFT JOIN s_prev ON s_prev.posicion = s_curr.`Nº Pos Actual`
+        WHERE TRIM(s_curr.`Estado Psn`) = 'A' AND (s_prev.estado IS NULL OR s_prev.estado <> 'A')
+        ORDER BY s_curr.`F Efva` DESC, s_curr.`Nº Pos Actual`;
     """
 
     _QUERY_DESACTIVACION = _SNAPSHOT_CTE + """
-        SELECT m.*
+        SELECT s_curr.*
         FROM s_prev
-        JOIN s_curr ON s_curr.posicion = s_prev.posicion
-        JOIN MOV_POS m ON m.id = s_curr.mov_pos_id
-        WHERE s_prev.estado = 'A' AND s_curr.estado = 'I'
-        ORDER BY m.`F Efva` DESC, s_curr.posicion;
+        JOIN s_curr ON s_curr.`Nº Pos Actual` = s_prev.posicion
+        WHERE s_prev.estado = 'A' AND TRIM(s_curr.`Estado Psn`) = 'I'
+        ORDER BY s_curr.`F Efva` DESC, s_curr.`Nº Pos Actual`;
     """
 
     def get(self, request, *args, **kwargs):
+        import time
         from django.db import connection
 
         tipo = request.query_params.get("tipo")
@@ -7720,12 +7731,22 @@ class PlazasMovimientoMesView(APIView):
 
         query = self._QUERY_CREACION if tipo == "creacion" else self._QUERY_DESACTIVACION
 
+        t0 = time.monotonic()
         try:
             with connection.cursor() as cursor:
-                cursor.execute(query, [fecha_actual, fecha_anterior])
-                raw_columns = [col[0] for col in cursor.description]
+                # Ámbito acotado a esta query nada más — CONN_MAX_AGE=60
+                # reutiliza la conexión entre requests, así que se revierte el
+                # toggle en el finally para no afectar otras queries.
+                cursor.execute("SET SESSION optimizer_switch='derived_merge=off'")
+                try:
+                    cursor.execute(query, [fecha_actual, fecha_anterior])
+                    raw_columns = [col[0] for col in cursor.description]
+                    rows = cursor.fetchall()
+                finally:
+                    cursor.execute("SET SESSION optimizer_switch='derived_merge=on'")
+
                 results = []
-                for row in cursor.fetchall():
+                for row in rows:
                     raw = dict(zip(raw_columns, row))
                     mapped = {
                         self._RAW_COLUMN_MAP[col]: val
@@ -7737,6 +7758,11 @@ class PlazasMovimientoMesView(APIView):
                     mapped["grado_escala"] = f"{grado}-{escala}" if grado or escala else None
                     results.append(mapped)
 
+            elapsed_ms = round((time.monotonic() - t0) * 1000)
+            logger.info(
+                "plazas_movimiento_mes tipo=%s %s->%s: %dms, %d filas",
+                tipo, fecha_anterior, fecha_actual, elapsed_ms, len(results),
+            )
             cache.set(cache_key, results, 3600)
             return Response(results, status=status.HTTP_200_OK)
         except Exception:
