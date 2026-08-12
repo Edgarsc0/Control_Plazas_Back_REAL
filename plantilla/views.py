@@ -7582,17 +7582,73 @@ class PlazasMovimientoMesView(APIView):
     # posiciones cuyo estado cambió, no al conteo agregado.
     view_permission = "authentication.view_plantilla_mov_posiciones"
 
-    # Alias en snake_case (posicion, nombre_puesto_funcional, unidad_administrativa,
-    # tipo_de_aduana, fecha_efectiva_mov_pos, capturado_por, fecha_de_captura)
-    # para que las filas
-    # calcen directo con ALL_AVAILABLE_COLUMNS de EmployeesModal.jsx — el modal
-    # se abre en modo local (prop `rows`) con estas filas tal cual, sin mapper
-    # intermedio (ver mapVacanteRow.js para el patrón equivalente de otras vistas).
+    # A pedido del usuario (2026-08-12): la fila devuelta es el registro
+    # MOV_POS COMPLETO de la posición (todas sus columnas), sin tocar
+    # EMPLEADOS_COMPLETOS_SIG ni ua_unidadadministrativa para nada — esa
+    # tabla no es la fuente de verdad de estos movimientos y tenía huecos
+    # (p.ej. `Nivel` en null para posiciones desactivadas). El registro
+    # elegido por posición es el de `s_curr` (el snapshot vigente al corte
+    # fecha_actual): para creación es la fila que puso el estado en 'A', para
+    # desactivación es la fila que puso el estado en 'I' — en ambos casos el
+    # movimiento que efectivamente causó la transición.
+    # `_RAW_COLUMN_MAP` traduce cada columna cruda de MOV_POS a una key
+    # snake_case estable para el front (ver ALL_AVAILABLE_COLUMNS en
+    # EmployeesModal.jsx, categoría "Movimiento de Posición"); las keys
+    # `posicion`, `nombre_puesto_funcional`, `unidad_administrativa`,
+    # `fecha_efectiva_mov_pos`, `fecha_de_captura` y `capturado_por` se
+    # reutilizan tal cual porque ya existían en ALL_AVAILABLE_COLUMNS con el
+    # mismo significado. `grado_escala` es un campo calculado (Grado + Esc)
+    # que reemplaza a `nivel` — MOV_POS no tiene nivel, tiene grado/escala.
+    _RAW_COLUMN_MAP = {
+        "Nº Pos Actual": "posicion",
+        "F Efva": "fecha_efectiva_mov_pos",
+        "Estado Psn": "estado_posicion",
+        "Fecha Captura": "fecha_de_captura",
+        "Cd Motivo": "cd_motivo",
+        "Motivo": "motivo",
+        "Cd UN": "cd_un",
+        "Unidad de Negocio": "unidad_administrativa",
+        "Unidad Adva#": "unidad_adva",
+        "Cd Departamento": "cd_departamento",
+        "Cd Puesto": "cd_puesto",
+        "Estado Ptal": "estado_ptal",
+        "Fecha Est": "fecha_establecimiento",
+        "Máximo": "maximo",
+        "Depnd Drt": "dependencia_directa",
+        "Depnd Indrt": "dependencia_indirecta",
+        "Ubicación": "ubicacion",
+        "Nvl Direc": "nivel_direccion",
+        "Plan Sal": "plan_salarial",
+        "Grado": "grado",
+        "Esc": "escala",
+        "Puesto Ptal": "puesto_presupuestal",
+        "Partida Ptal": "partida_presupuestal",
+        "Gp Pago": "grupo_pago",
+        "Prog Beneficios": "programa_beneficios",
+        "F/H Últ Actz": "fecha_ultima_actualizacion",
+        "Por": "capturado_por",
+        "Hr Estd/Semn": "horas_estandar_semana",
+        "Descr": "descripcion",
+        "Gp Trabajo": "grupo_trabajo",
+        "Org Code": "codigo_organizacional",
+        "Grupo Cd Sal": "grupo_codigo_salarial",
+        "FormalDesc": "descripcion_formal",
+        "Pto Compt": "puesto_compartido",
+        "Posn Clv": "posicion_clave",
+        "Presupuesto": "presupuesto",
+        "Nombre Puesto": "nombre_puesto_funcional",
+        "FECHA VACANCIA": "fecha_vacancia_mov_pos",
+        "CATEGORIA_VACANCIA": "categoria_vacancia",
+        "idRegistroDesicivo": "id_registro_decisivo",
+        "TUVO_INSUBSISTENCIA": "tuvo_insubsistencia",
+        "idInsubsistenciaDetectada": "id_insubsistencia_detectada",
+        "FECHA_OCUPACION": "fecha_ocupacion",
+        "ID_REGISTRO_DES_FECHA_OCUPACION": "id_registro_des_fecha_ocupacion",
+    }
+
     _SNAPSHOT_CTE = """
         WITH s_curr AS (
-            SELECT m.`Nº Pos Actual` AS posicion, TRIM(m.`Estado Psn`) AS estado,
-                   m.`F Efva` AS fecha_efectiva, m.`Por` AS capturado_por,
-                   m.`Fecha Captura` AS fecha_de_captura
+            SELECT m.id AS mov_pos_id, `Nº Pos Actual` AS posicion, TRIM(`Estado Psn`) AS estado
             FROM MOV_POS m
             JOIN (
                 SELECT id FROM (
@@ -7605,7 +7661,7 @@ class PlazasMovimientoMesView(APIView):
             ) l ON l.id = m.id
         ),
         s_prev AS (
-            SELECT m.`Nº Pos Actual` AS posicion, TRIM(m.`Estado Psn`) AS estado
+            SELECT `Nº Pos Actual` AS posicion, TRIM(`Estado Psn`) AS estado
             FROM MOV_POS m
             JOIN (
                 SELECT id FROM (
@@ -7620,43 +7676,21 @@ class PlazasMovimientoMesView(APIView):
     """
 
     _QUERY_CREACION = _SNAPSHOT_CTE + """
-        SELECT
-            s_curr.posicion AS posicion,
-            MAX(s_curr.fecha_efectiva) AS fecha_efectiva_mov_pos,
-            ANY_VALUE(s_curr.capturado_por) AS capturado_por,
-            ANY_VALUE(s_curr.fecha_de_captura) AS fecha_de_captura,
-            ANY_VALUE(e.`Nombre Puesto Funcional`) AS nombre_puesto_funcional,
-            ANY_VALUE(e.`Nivel`) AS nivel,
-            ANY_VALUE(COALESCE(u.nombre, e.`Cd UA`)) AS unidad_administrativa,
-            ANY_VALUE(e.`Aduana`) AS aduana,
-            ANY_VALUE(e.`Tipo de Aduana`) AS tipo_de_aduana
+        SELECT m.*
         FROM s_curr
         LEFT JOIN s_prev ON s_prev.posicion = s_curr.posicion
-        LEFT JOIN EMPLEADOS_COMPLETOS_SIG e ON e.`Posición` = s_curr.posicion
-        LEFT JOIN ua_unidadadministrativa u ON TRIM(e.`Cd UA`) = TRIM(u.codigo)
+        JOIN MOV_POS m ON m.id = s_curr.mov_pos_id
         WHERE s_curr.estado = 'A' AND (s_prev.estado IS NULL OR s_prev.estado <> 'A')
-        GROUP BY s_curr.posicion
-        ORDER BY fecha_efectiva_mov_pos DESC, posicion;
+        ORDER BY m.`F Efva` DESC, s_curr.posicion;
     """
 
     _QUERY_DESACTIVACION = _SNAPSHOT_CTE + """
-        SELECT
-            s_prev.posicion AS posicion,
-            MAX(s_curr.fecha_efectiva) AS fecha_efectiva_mov_pos,
-            ANY_VALUE(s_curr.capturado_por) AS capturado_por,
-            ANY_VALUE(s_curr.fecha_de_captura) AS fecha_de_captura,
-            ANY_VALUE(e.`Nombre Puesto Funcional`) AS nombre_puesto_funcional,
-            ANY_VALUE(e.`Nivel`) AS nivel,
-            ANY_VALUE(COALESCE(u.nombre, e.`Cd UA`)) AS unidad_administrativa,
-            ANY_VALUE(e.`Aduana`) AS aduana,
-            ANY_VALUE(e.`Tipo de Aduana`) AS tipo_de_aduana
+        SELECT m.*
         FROM s_prev
         JOIN s_curr ON s_curr.posicion = s_prev.posicion
-        LEFT JOIN EMPLEADOS_COMPLETOS_SIG e ON e.`Posición` = s_prev.posicion
-        LEFT JOIN ua_unidadadministrativa u ON TRIM(e.`Cd UA`) = TRIM(u.codigo)
+        JOIN MOV_POS m ON m.id = s_curr.mov_pos_id
         WHERE s_prev.estado = 'A' AND s_curr.estado = 'I'
-        GROUP BY s_prev.posicion
-        ORDER BY fecha_efectiva_mov_pos DESC, posicion;
+        ORDER BY m.`F Efva` DESC, s_curr.posicion;
     """
 
     def get(self, request, *args, **kwargs):
@@ -7689,8 +7723,19 @@ class PlazasMovimientoMesView(APIView):
         try:
             with connection.cursor() as cursor:
                 cursor.execute(query, [fecha_actual, fecha_anterior])
-                columns = [col[0] for col in cursor.description]
-                results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+                raw_columns = [col[0] for col in cursor.description]
+                results = []
+                for row in cursor.fetchall():
+                    raw = dict(zip(raw_columns, row))
+                    mapped = {
+                        self._RAW_COLUMN_MAP[col]: val
+                        for col, val in raw.items()
+                        if col in self._RAW_COLUMN_MAP
+                    }
+                    grado = (raw.get("Grado") or "").strip()
+                    escala = (raw.get("Esc") or "").strip()
+                    mapped["grado_escala"] = f"{grado}-{escala}" if grado or escala else None
+                    results.append(mapped)
 
             cache.set(cache_key, results, 3600)
             return Response(results, status=status.HTTP_200_OK)
