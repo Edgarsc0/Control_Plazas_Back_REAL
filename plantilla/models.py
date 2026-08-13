@@ -1825,3 +1825,40 @@ class SuscripcionNotificacionPosicion(models.Model):
 
     def __str__(self):
         return f"{self.usuario} - {self.posicion} ({self.tipo})"
+
+
+class FiltroGuardado(models.Model):
+    """
+    Combinación de condiciones de `AdvancedFiltersModal` guardada por un
+    usuario para reaplicarla después sin reconstruirla a mano. `vista`
+    identifica el tab de origen (cada uno tiene su propio set de columnas,
+    p. ej. "plantilla_movimientos", "plantilla_bajas"), así que un filtro
+    guardado en un tab no es intercambiable con otro. `condiciones` guarda
+    tal cual la salida de `getValidAdvancedConditions` en el front (lista de
+    `{column, condition, compareType, compareColumn, value, logic}`).
+    """
+
+    usuario = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+        related_name="filtros_guardados",
+    )
+    vista = models.CharField(max_length=50, db_index=True)
+    nombre = models.CharField(max_length=100)
+    condiciones = models.JSONField(encoder=DjangoJSONEncoder)
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "FILTRO_GUARDADO"
+        indexes = [
+            models.Index(fields=["usuario", "vista"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["usuario", "vista", "nombre"],
+                name="uniq_filtro_guardado_usuario_vista_nombre",
+            ),
+        ]
+        ordering = ["nombre"]
+
+    def __str__(self):
+        return f"{self.usuario} - {self.vista} - {self.nombre}"

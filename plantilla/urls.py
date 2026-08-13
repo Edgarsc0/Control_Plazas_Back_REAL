@@ -35,6 +35,8 @@ from .views import (
     MovPosOcupacionDetalleView,
     SuscripcionesPosicionView,
     SuscripcionPosicionDetalleView,
+    FiltrosGuardadosView,
+    FiltroGuardadoDetalleView,
     CadenaMandoView,
     ZafiroBitacoraView,
     ZafiroDuracionPromedioPorHoraView,
@@ -438,6 +440,16 @@ urlpatterns = [
         "suscripciones-posicion/<int:pk>/",
         SuscripcionPosicionDetalleView.as_view(),
         name="suscripcion_posicion_detalle",
+    ),
+    path(
+        "filtros-guardados/",
+        FiltrosGuardadosView.as_view(),
+        name="filtros_guardados",
+    ),
+    path(
+        "filtros-guardados/<int:pk>/",
+        FiltroGuardadoDetalleView.as_view(),
+        name="filtro_guardado_detalle",
     ),
     path(
         "mov_pos_alineacion/",

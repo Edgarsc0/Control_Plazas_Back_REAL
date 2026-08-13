@@ -46,6 +46,7 @@ from .models import (
     DatosPersonales,
     DESCRIPCION_NJ_CHOICES,
     EmpleadosCompletosSig,
+    FiltroGuardado,
     MovPos,
     MovPosLatest,
     NIVEL_3_PREFIJO_TITULAR_ADUANA,
@@ -4310,6 +4311,83 @@ class SuscripcionPosicionDetalleView(APIView):
         else:
             sub.delete()
         return Response({"status": "ok"})
+
+
+class FiltrosGuardadosView(APIView):
+    """
+    Combinaciones de condiciones de `AdvancedFiltersModal` guardadas por el
+    usuario autenticado, para reaplicarlas sin reconstruirlas a mano.
+    `vista` identifica el tab de origen (cada uno tiene su propio set de
+    columnas) — un filtro guardado en un tab no aplica a otro.
+
+    GET  ?vista=<key> -> filtros del usuario en esa vista.
+    POST {vista, nombre, condiciones} -> crea uno nuevo. 409 si ya existe
+         un filtro con ese nombre para el usuario en esa vista.
+    """
+
+    CAMPOS_RESPUESTA = ("id", "vista", "nombre", "condiciones", "creado_en")
+
+    def get(self, request):
+        vista = request.query_params.get("vista")
+        if not vista:
+            return Response(
+                {"error": "Falta parámetro 'vista'."}, status=status.HTTP_400_BAD_REQUEST
+            )
+        filtros = (
+            FiltroGuardado.objects
+            .filter(usuario=request.user, vista=vista)
+            .values(*self.CAMPOS_RESPUESTA)
+        )
+        return Response(list(filtros))
+
+    def post(self, request):
+        vista = (request.data.get("vista") or "").strip()
+        nombre = (request.data.get("nombre") or "").strip()
+        condiciones = request.data.get("condiciones")
+
+        if not vista or not nombre:
+            return Response(
+                {"error": "Se requiere 'vista' y 'nombre'."}, status=status.HTTP_400_BAD_REQUEST
+            )
+        if len(nombre) > 100:
+            return Response(
+                {"error": "El nombre no puede exceder 100 caracteres."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not isinstance(condiciones, list) or not condiciones:
+            return Response(
+                {"error": "'condiciones' debe ser una lista no vacía."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if FiltroGuardado.objects.filter(usuario=request.user, vista=vista, nombre=nombre).exists():
+            return Response(
+                {"error": "Ya existe un filtro con ese nombre en esta vista."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        filtro = FiltroGuardado.objects.create(
+            usuario=request.user, vista=vista, nombre=nombre, condiciones=condiciones,
+        )
+        return Response(
+            {k: getattr(filtro, k) for k in self.CAMPOS_RESPUESTA},
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class FiltroGuardadoDetalleView(APIView):
+    """DELETE -> borra el filtro guardado. Un usuario no puede tocar el
+    filtro de otro (filtra por `usuario=request.user`, 404 en vez de 403
+    para no filtrar si el id pertenece a alguien más)."""
+
+    def delete(self, request, pk):
+        filtro = FiltroGuardado.objects.filter(pk=pk, usuario=request.user).first()
+        if not filtro:
+            return Response(
+                {"error": "Filtro no encontrado."}, status=status.HTTP_404_NOT_FOUND
+            )
+        filtro.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 # ── Comprobar Alineación Organizacional (MOV_POS vs EMPLEADOS_COMPLETOS_SIG) ──
