@@ -375,11 +375,26 @@ def apply_dynamic_column_filters(
 
         if suffix == "in" or (not suffix and len(val_list) > 1):
             if "" in val_list:
-                # "" en trimmed_<campo> no matchea filas con NULL real en
-                # MySQL (Trim(NULL) es NULL); hay que cubrir ambos casos.
-                q = Q(**{f"{target_field}__in": val_list}) | Q(
-                    **{f"{target_field}__isnull": True}
-                )
+                if is_text:
+                    # "" en trimmed_<campo> no matchea filas con NULL real en
+                    # MySQL (Trim(NULL) es NULL); hay que cubrir ambos casos.
+                    q = Q(**{f"{target_field}__in": val_list}) | Q(
+                        **{f"{target_field}__isnull": True}
+                    )
+                else:
+                    # target_field no es texto (ej. DateField como
+                    # fecha_ocupacion): "" no es un valor válido para __in —
+                    # Django intenta parsearlo como fecha y tira
+                    # ValidationError (500 en el request), que el front
+                    # traga en su .catch, así que "Aplicar Filtro" con sólo
+                    # "(Vacío)" marcado parecía no hacer nada (bug real,
+                    # mismo patrón que ya se cubrió para fecha_anuencia vía
+                    # fecha_anuencia_column_resolver). El token vacío en un
+                    # campo tipado sólo puede significar NULL.
+                    non_empty = [v for v in val_list if v != ""]
+                    q = Q(**{f"{target_field}__isnull": True})
+                    if non_empty:
+                        q |= Q(**{f"{target_field}__in": non_empty})
                 queryset = queryset.exclude(q) if is_exclude else queryset.filter(q)
             else:
                 queryset = apply(**{f"{target_field}__in": val_list})
