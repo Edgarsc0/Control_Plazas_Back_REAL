@@ -6,46 +6,32 @@ from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.authtoken.models import Token
-from django.contrib.auth.models import Group, User
-from django.contrib.auth import login
-from django.core.mail import EmailMultiAlternatives, send_mail
-from email.mime.image import MIMEImage
-import os
+from django.contrib.auth.models import Group
+from django.contrib.auth import authenticate, login, update_session_auth_hash
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db.models import Count
 from django.db.models.functions import ExtractHour, TruncDate
-from django.template.loader import render_to_string
 from django.utils import timezone
-from django.utils.html import strip_tags
-from django.conf import settings
-from .models import ModulePermission, PresenceLog, Whitelist, VerificationCode
+from .models import (
+    ModulePermission,
+    PresenceLog,
+    Whitelist,
+    sincronizar_usuario_django,
+)
 from .presence import get_active_sessions, set_presence
 from .serializers import GroupSerializer, PermissionSerializer, WhitelistSerializer
 
 
 class WhitelistViewSet(viewsets.ModelViewSet):
-    queryset = Whitelist.objects.all()
+    queryset = Whitelist.objects.select_related("rol", "ua", "user").all()
     serializer_class = WhitelistSerializer
     view_permission = "authentication.manage_usuarios"
     edit_permission = "authentication.manage_usuarios"
-
-    def perform_update(self, serializer):
-        previous_rol_id = serializer.instance.rol_id
-        instance = serializer.save()
-
-        # user.groups solo se sincroniza en login (VerifyCodeView); si el usuario
-        # ya tiene sesión creada, hay que reflejar aquí el cambio de rol para que
-        # sus permisos cambien de inmediato, sin esperar a que vuelva a loguearse.
-        if instance.user and instance.rol_id != previous_rol_id:
-            instance.user.groups.set([instance.rol])
-            # Sincroniza is_superuser/is_staff en ambos sentidos: si el rol deja de
-            # ser superadmin hay que revocarlos, no solo activarlos al asignarlo
-            # (bug previo: el flag quedaba pegado tras reasignar a otro rol, y
-            # Django ignora los permisos del grupo cuando is_superuser=True).
-            es_superadmin = instance.rol.name.lower() == "superadmin"
-            if instance.user.is_superuser != es_superadmin or instance.user.is_staff != es_superadmin:
-                instance.user.is_staff = es_superadmin
-                instance.user.is_superuser = es_superadmin
-                instance.user.save(update_fields=["is_staff", "is_superuser"])
+    # La creación del User de Django, la asignación de grupo/flags y el alta o
+    # restablecimiento de contraseña los resuelve WhitelistSerializer
+    # (_aplicar_password), para que valgan igual desde esta API que desde
+    # cualquier otro punto que guarde una entrada de whitelist.
 
 
 class RoleViewSet(viewsets.ModelViewSet):
@@ -296,147 +282,131 @@ class UserVisitsView(views.APIView):
         )
 
 
-class CheckEmailView(views.APIView):
+class LoginView(views.APIView):
+    """
+    Inicio de sesión con correo + contraseña.
+
+    Sustituye al flujo anterior de código de verificación por correo (OTP), que
+    dejó de ser viable cuando se bloqueó el envío a las cuentas
+    institucionales. La whitelist sigue siendo la que decide QUIÉN puede
+    entrar y con qué rol; lo único que cambia es cómo se prueba la identidad.
+    """
+
     permission_classes = [AllowAny]  # login: debe ser público
     authentication_classes = []  # evita exigir CSRF si el navegador trae una sessionid vieja
 
     def post(self, request):
-        email = request.data.get("email")
-        if not email:
+        email = (request.data.get("email") or "").strip()
+        password = request.data.get("password") or ""
+
+        if not email or not password:
             return Response(
-                {"error": "Email es requerido"}, status=status.HTTP_400_BAD_REQUEST
-            )
-        email = email.strip()
-
-        try:
-            entry = Whitelist.objects.get(email=email, activo=True)
-
-            # Generar código
-            code = VerificationCode.generate_code()
-            VerificationCode.objects.create(email=email, code=code)
-
-            # Preparar correo
-            subject = f"{code} es tu código de verificación del Sistema de Control de Plazas"
-            html_message = render_to_string("emails/otp_code.html", {"code": code})
-            plain_message = strip_tags(html_message)
-            from_email = settings.EMAIL_HOST_USER
-
-            try:
-                msg = EmailMultiAlternatives(
-                    subject, plain_message, from_email, [email]
-                )
-                msg.attach_alternative(html_message, "text/html")
-
-                assets_dir = os.path.join(
-                    os.path.dirname(__file__), "templates", "emails", "assets"
-                )
-                inline_images = {
-                    "anam_logo": "anam_logo.png",
-                    "icon_control_plazas": "icon_control_plazas.png",
-                }
-                for content_id, filename in inline_images.items():
-                    with open(os.path.join(assets_dir, filename), "rb") as f:
-                        image = MIMEImage(f.read())
-                    image.add_header("Content-ID", f"<{content_id}>")
-                    image.add_header("Content-Disposition", "inline", filename=filename)
-                    msg.attach(image)
-
-                msg.send(fail_silently=False)
-            except Exception as e:
-                return Response(
-                    {"error": f"Error al enviar correo: {str(e)}"},
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                )
-
-            return Response(
-                {"message": "Código de verificación enviado", "email": email},
-                status=status.HTTP_200_OK,
-            )
-
-        except Whitelist.DoesNotExist:
-            return Response(
-                {"error": "Correo no autorizado"}, status=status.HTTP_403_FORBIDDEN
-            )
-
-
-class VerifyCodeView(views.APIView):
-    permission_classes = [AllowAny]  # login: debe ser público
-    authentication_classes = []  # evita exigir CSRF si el navegador trae una sessionid vieja
-
-    def post(self, request):
-        email = request.data.get("email")
-        code = request.data.get("code")
-
-        if not email or not code:
-            return Response(
-                {"error": "Email y código son requeridos"},
+                {"error": "Correo y contraseña son requeridos"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        email = email.strip()
-        code = code.strip()
+
+        entry = (
+            Whitelist.objects.filter(email__iexact=email, activo=True)
+            .select_related("rol", "ua", "user")
+            .first()
+        )
+
+        # Un mismo mensaje y un mismo status para "no está en la whitelist",
+        # "está dado de baja" y "contraseña incorrecta": distinguirlos
+        # convertiría este endpoint público en un oráculo para averiguar qué
+        # correos tienen acceso al sistema.
+        credenciales_invalidas = Response(
+            {"error": "Correo o contraseña incorrectos"},
+            status=status.HTTP_401_UNAUTHORIZED,
+        )
+
+        if entry is None or entry.user is None:
+            return credenciales_invalidas
+
+        # authenticate() aplica el hash configurado y además rechaza usuarios
+        # con is_active=False (ModelBackend), sin que haga falta revisarlo aquí.
+        user = authenticate(request, username=entry.user.username, password=password)
+        if user is None:
+            return credenciales_invalidas
+
+        # Rol y flags se re-sincronizan en cada login: si un admin cambió el rol
+        # mientras el usuario estaba fuera, entra ya con los permisos nuevos.
+        sincronizar_usuario_django(entry)
+        login(request, user)
+
+        token, _ = Token.objects.get_or_create(user=user)
+
+        return Response(
+            {
+                "message": "Acceso concedido",
+                "token": token.key,
+                "debe_cambiar_password": entry.debe_cambiar_password,
+                "user": {
+                    "email": user.email,
+                    "rol": entry.rol.name,
+                    "ua": entry.ua.nombre if entry.ua else None,
+                },
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class ChangePasswordView(views.APIView):
+    """
+    Cambio de contraseña del propio usuario autenticado.
+
+    Es la contraparte del alta administrada: como la contraseña inicial la
+    define un administrador (no hay correo para mandar ligas de reseteo), el
+    titular la cambia aquí y con eso se apaga su `debe_cambiar_password`.
+    """
+
+    def post(self, request):
+        password_actual = request.data.get("password_actual") or ""
+        password_nueva = request.data.get("password_nueva") or ""
+
+        if not password_actual or not password_nueva:
+            return Response(
+                {"error": "La contraseña actual y la nueva son requeridas"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user = request.user
+
+        if not user.check_password(password_actual):
+            return Response(
+                {"error": "La contraseña actual es incorrecta"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if password_nueva == password_actual:
+            return Response(
+                {"error": "La contraseña nueva debe ser distinta de la actual"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         try:
-            vc = VerificationCode.objects.filter(
-                email=email, code=code, is_used=False
-            ).last()
-
-            if vc and vc.is_valid():
-                vc.is_used = True
-                vc.save()
-
-                # Obtener info de la whitelist
-                whitelist_entry = Whitelist.objects.get(email=email)
-
-                # Crear o obtener usuario
-                user, created = User.objects.get_or_create(username=email, email=email)
-
-                # Automatización de privilegios para Administradores. Sincroniza en
-                # ambos sentidos (activa Y revoca) para que un cambio de rol previo
-                # a "superadmin" no deje is_superuser pegado tras reasignar el rol.
-                rol_name = whitelist_entry.rol.name.lower()
-                es_superadmin = rol_name == "superadmin"
-                if user.is_superuser != es_superadmin or user.is_staff != es_superadmin:
-                    user.is_staff = es_superadmin
-                    user.is_superuser = es_superadmin
-                    user.save()
-
-                # Vincular la entrada de la whitelist con el usuario de Django
-                whitelist_entry.user = user
-                whitelist_entry.save()
-
-                # Asignar rol (Grupo)
-                user.groups.clear()
-                user.groups.add(whitelist_entry.rol)
-
-                # Login (sesión de Django)
-                login(request, user)
-
-                # Generar o obtener Token para la API
-                token, _ = Token.objects.get_or_create(user=user)
-
-                return Response(
-                    {
-                        "message": "Acceso concedido",
-                        "token": token.key,
-                        "user": {
-                            "email": user.email,
-                            "rol": whitelist_entry.rol.name,
-                            "ua": (
-                                whitelist_entry.ua.nombre
-                                if whitelist_entry.ua
-                                else None
-                            ),
-                        },
-                    },
-                    status=status.HTTP_200_OK,
-                )
-            else:
-                return Response(
-                    {"error": "Código inválido o expirado"},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-        except Exception as e:
+            validate_password(password_nueva, user)
+        except DjangoValidationError as exc:
             return Response(
-                {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                {"error": " ".join(exc.messages)}, status=status.HTTP_400_BAD_REQUEST
             )
+
+        user.set_password(password_nueva)
+        user.save(update_fields=["password"])
+
+        entry = getattr(user, "perfil", None)
+        if entry and entry.debe_cambiar_password:
+            entry.debe_cambiar_password = False
+            entry.save(update_fields=["debe_cambiar_password"])
+
+        # set_password no invalida el token de DRF (a diferencia de la sesión),
+        # así que se rota a mano: si la contraseña se cambió porque la anterior
+        # se filtró, el token emitido con ella tiene que dejar de servir.
+        Token.objects.filter(user=user).delete()
+        token = Token.objects.create(user=user)
+        update_session_auth_hash(request, user)
+
+        return Response(
+            {"message": "Contraseña actualizada", "token": token.key},
+            status=status.HTTP_200_OK,
+        )

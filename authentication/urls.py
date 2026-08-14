@@ -1,14 +1,14 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
-    CheckEmailView,
+    ChangePasswordView,
+    LoginView,
     MePermissionsView,
     PermissionListView,
     PresenceHeartbeatView,
     PresenceListView,
     RoleViewSet,
     UserVisitsView,
-    VerifyCodeView,
     WhitelistViewSet,
 )
 
@@ -18,8 +18,8 @@ router.register(r'roles', RoleViewSet)
 
 urlpatterns = [
     path('', include(router.urls)),
-    path('check-email/', CheckEmailView.as_view(), name='check-email'),
-    path('verify-code/', VerifyCodeView.as_view(), name='verify-code'),
+    path('login/', LoginView.as_view(), name='login'),
+    path('change-password/', ChangePasswordView.as_view(), name='change-password'),
     path('permissions/', PermissionListView.as_view(), name='permission-list'),
     path('me/permissions/', MePermissionsView.as_view(), name='me-permissions'),
     path('presence/heartbeat/', PresenceHeartbeatView.as_view(), name='presence-heartbeat'),

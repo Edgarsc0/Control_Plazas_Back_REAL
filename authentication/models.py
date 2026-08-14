@@ -1,9 +1,5 @@
 from django.db import models
 from django.contrib.auth.models import Group, User
-import random
-import string
-from django.utils import timezone
-from datetime import timedelta
 from ua.models import UnidadAdministrativa
 
 
@@ -17,9 +13,52 @@ class Whitelist(models.Model):
         UnidadAdministrativa, on_delete=models.SET_NULL, null=True, blank=True
     )
     activo = models.BooleanField(default=True)
+    # El alta y el restablecimiento de contraseña los hace un administrador
+    # (no hay correo institucional disponible para mandar ligas de reseteo),
+    # así que la contraseña inicial la conoce alguien más que el titular de la
+    # cuenta: se le fuerza a cambiarla la primera vez que entra.
+    debe_cambiar_password = models.BooleanField(default=True)
 
     def __str__(self):
         return f"{self.email} - {self.rol.name}"
+
+
+def sincronizar_usuario_django(entry):
+    """Crea o vincula el ``User`` de Django de una entrada de whitelist y deja
+    su grupo y flags de superusuario alineados con el rol asignado.
+
+    La whitelist es la fuente de verdad del acceso; ``auth_user`` solo carga la
+    credencial. Se llama tanto al administrar usuarios como al iniciar sesión,
+    para que un cambio de rol se refleje sin esperar al siguiente login.
+
+    Sincroniza ``is_staff``/``is_superuser`` en AMBOS sentidos a propósito: si
+    un usuario deja de ser superadmin hay que revocarlos, no solo activarlos al
+    asignar el rol (Django ignora los permisos del grupo si ``is_superuser``
+    quedó pegado en True).
+    """
+    user = entry.user
+    if user is None:
+        user, creado = User.objects.get_or_create(
+            username=entry.email, defaults={"email": entry.email}
+        )
+        if creado:
+            # Sin esto el password queda en "" — que Django considera USABLE
+            # (has_usable_password solo descarta los que empiezan con "!"), así
+            # que la UI reportaría "ya tiene contraseña" para un alta que
+            # todavía no puede entrar.
+            user.set_unusable_password()
+            user.save(update_fields=["password"])
+        entry.user = user
+        entry.save(update_fields=["user"])
+
+    es_superadmin = entry.rol.name.lower() == "superadmin"
+    if user.is_superuser != es_superadmin or user.is_staff != es_superadmin:
+        user.is_staff = es_superadmin
+        user.is_superuser = es_superadmin
+        user.save(update_fields=["is_staff", "is_superuser"])
+
+    user.groups.set([entry.rol])
+    return user
 
 
 class ModulePermission(models.Model):
@@ -93,23 +132,3 @@ class PresenceLog(models.Model):
 
     class Meta:
         indexes = [models.Index(fields=["email", "created_at"])]
-
-
-class VerificationCode(models.Model):
-    email = models.EmailField()
-    code = models.CharField(max_length=6)
-    created_at = models.DateTimeField(auto_now_add=True)
-    expires_at = models.DateTimeField()
-    is_used = models.BooleanField(default=False)
-
-    def save(self, *args, **kwargs):
-        if not self.expires_at:
-            self.expires_at = timezone.now() + timedelta(minutes=10)
-        super().save(*args, **kwargs)
-
-    @staticmethod
-    def generate_code():
-        return "".join(random.choices(string.digits, k=6))
-
-    def is_valid(self):
-        return not self.is_used and timezone.now() < self.expires_at
