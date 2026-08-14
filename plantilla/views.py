@@ -582,6 +582,17 @@ def apply_advanced_filters(
             target_field = resolve_target_field(column)
             is_text = column in text_fields
 
+        if condition in ("empty", "not_empty"):
+            # "Vacío"/"No vacío" ignoran compareType/value/compareColumn (el
+            # front ya los oculta). `target_field` para columnas de texto ya
+            # viene envuelto en Trim (ver resolve_target_field), así que NULL
+            # y " " caen ambos en el mismo chequeo == "".
+            if is_text:
+                q = Q(**{f"{target_field}__isnull": True}) | Q(**{target_field: ""})
+            else:
+                q = Q(**{f"{target_field}__isnull": True})
+            return q if condition == "empty" else ~q
+
         if compare_type == "campo":
             compare_column = cond.get("compareColumn")
             if compare_column not in valid_fields:
