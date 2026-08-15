@@ -3222,34 +3222,27 @@ class EmpleadosEstatusPorNivelUaView(APIView):
                 posicion__in=active_position_codes
             )
 
-            # 3. Agrupación por Nivel y Estado de Nómina
-            nivel_data = active_employees.values("nivel", "estado_nomina").annotate(
-                count=Count("id")
-            )
-
-            por_nivel = {}
-            for item in nivel_data:
-                nv = item["nivel"] or "SIN NIVEL"
-                est = item["estado_nomina"] or "SIN ESTATUS"
-                if nv not in por_nivel:
-                    por_nivel[nv] = {}
-                por_nivel[nv][est] = item["count"]
-
-            # 4. Agrupación por Unidad Administrativa, Nivel y Estado de Nómina
+            # 3. Agrupación por Unidad Administrativa, Nivel y Estado de Nómina
+            # — una sola query sobre active_employees; por_nivel se deriva
+            # sumando sobre las UA en vez de repetir el mismo scan con un
+            # segundo GROUP BY (nivel, estado_nomina) equivalente.
             ua_data = active_employees.values(
                 "unidad_administrativa", "nivel", "estado_nomina"
             ).annotate(count=Count("id"))
 
+            por_nivel = {}
             por_ua = {}
             for item in ua_data:
                 ua_name = item["unidad_administrativa"] or "SIN UA"
                 nv = item["nivel"] or "SIN NIVEL"
                 est = item["estado_nomina"] or "SIN ESTATUS"
-                if ua_name not in por_ua:
-                    por_ua[ua_name] = {}
-                if nv not in por_ua[ua_name]:
-                    por_ua[ua_name][nv] = {}
-                por_ua[ua_name][nv][est] = item["count"]
+                count = item["count"]
+
+                por_nivel.setdefault(nv, {})
+                por_nivel[nv][est] = por_nivel[nv].get(est, 0) + count
+
+                por_ua.setdefault(ua_name, {}).setdefault(nv, {})
+                por_ua[ua_name][nv][est] = count
 
             res_data = {"por_nivel": por_nivel, "por_ua": por_ua}
             cache.set(cache_key, res_data, 1200)

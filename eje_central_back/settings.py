@@ -102,7 +102,11 @@ DATABASES = {
         "OPTIONS": {
             "init_command": "SET sql_mode='STRICT_TRANS_TABLES'",
             "connect_timeout": 10,
-            "read_timeout": 600,
+            # 600s dejaba una conexión (y su cupo del pool) atada hasta 10 min a
+            # una query colgada — con 40+ requests en paralelo por carga de
+            # dashboard eso agotaba max_connections en cascada. 60s corta la
+            # query mal portada rápido en vez de dejarla acaparar el pool.
+            "read_timeout": 60,
             "write_timeout": 600,
         },
     },
@@ -118,7 +122,11 @@ DATABASES = {
         "OPTIONS": {
             "init_command": "SET sql_mode='STRICT_TRANS_TABLES'",
             "connect_timeout": 10,
-            "read_timeout": 600,
+            # 600s dejaba una conexión (y su cupo del pool) atada hasta 10 min a
+            # una query colgada — con 40+ requests en paralelo por carga de
+            # dashboard eso agotaba max_connections en cascada. 60s corta la
+            # query mal portada rápido en vez de dejarla acaparar el pool.
+            "read_timeout": 60,
             "write_timeout": 600,
         },
     },
