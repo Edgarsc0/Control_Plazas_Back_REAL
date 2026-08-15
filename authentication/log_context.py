@@ -2,6 +2,7 @@
 
 import contextvars
 import logging
+import time
 
 _current_request = contextvars.ContextVar("current_request", default=None)
 
@@ -25,9 +26,11 @@ class RequestUserLogMiddleware:
 
     def __call__(self, request):
         token = _current_request.set(request)
+        start = time.monotonic()
         try:
             response = self.get_response(request)
-            _access_logger.info("-> %s", getattr(response, "status_code", "-"))
+            duration_ms = round((time.monotonic() - start) * 1000)
+            _access_logger.info("-> %s %dms", getattr(response, "status_code", "-"), duration_ms)
             return response
         finally:
             _current_request.reset(token)
