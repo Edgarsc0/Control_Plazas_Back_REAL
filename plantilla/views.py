@@ -1356,6 +1356,12 @@ class ExportExcelView(APIView):
     def post(self, request):
         data = request.data
         filename = request.query_params.get("filename", "Export.xlsx")
+        # Congelar columna A además del encabezado es el default histórico de
+        # este endpoint (varios consumidores ya cuentan con ello); se deja
+        # opt-out vía query param para quien no quiera ninguna columna sticky
+        # (ver tab "Historial de movimientos" de EmployeesModal.jsx) sin tocar
+        # el comportamiento por defecto del resto de llamadores.
+        sticky_column = request.query_params.get("sticky_column", "1").strip().lower() not in ("0", "false", "no")
 
         if not data or not isinstance(data, list):
             return Response(
@@ -1449,8 +1455,10 @@ class ExportExcelView(APIView):
                         if is_zebra:
                             cell.fill = zebra_fill
 
-                # Congelar paneles
-                worksheet.freeze_panes = f"B{header_row_num + 1}"
+                # Congelar paneles: fila de encabezado siempre, columna A solo
+                # si sticky_column no viene desactivado (ver arriba).
+                freeze_col = "B" if sticky_column else "A"
+                worksheet.freeze_panes = f"{freeze_col}{header_row_num + 1}"
 
             output.seek(0)
             file_data = output.read()
