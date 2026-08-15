@@ -132,3 +132,21 @@ class PresenceLog(models.Model):
 
     class Meta:
         indexes = [models.Index(fields=["email", "created_at"])]
+
+
+class RumMetric(models.Model):
+    """Web Vitals reales de usuarios (RUM). Un row por métrica reportada por
+    `useReportWebVitals` (next/web-vitals) desde WebVitalsReporter en el
+    front: TTFB/FCP/LCP/INP/CLS por carga de página, para correlacionar con
+    duration_ms del back (RequestUserLogMiddleware) sin instrumentación
+    adicional."""
+
+    email = models.EmailField(db_index=True, null=True, blank=True)
+    path = models.CharField(max_length=255, db_index=True)
+    metric_name = models.CharField(max_length=16, db_index=True)
+    value = models.FloatField()
+    rating = models.CharField(max_length=20, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["metric_name", "created_at"])]

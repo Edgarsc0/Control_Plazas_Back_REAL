@@ -16,6 +16,7 @@ from django.utils import timezone
 from .models import (
     ModulePermission,
     PresenceLog,
+    RumMetric,
     Whitelist,
     sincronizar_usuario_django,
 )
@@ -121,6 +122,44 @@ class PresenceHeartbeatView(views.APIView):
         # Persiste el histórico (presence.py solo vive en Redis con TTL de
         # 45s) para alimentar el histograma de actividad de Roles > Usuarios.
         PresenceLog.objects.create(email=user.email, path=path, title=title, subtab=subtab or "")
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+_RUM_METRIC_NAMES = {"TTFB", "FCP", "LCP", "INP", "CLS", "FID"}
+
+
+class RumMetricView(views.APIView):
+    """
+    Recibe Web Vitals reales de usuarios (RUM) desde WebVitalsReporter
+    (useReportWebVitals en el front) — Fase 3 del plan de medición de
+    performance. Solo INSERT, sin lógica de negocio. AllowAny a propósito:
+    también cubre /login (no autenticado) y cualquier vitals que se dispare
+    antes de que el AuthProvider termine de resolver la sesión.
+    """
+
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        metric_name = (request.data.get("name") or "").strip().upper()
+        value = request.data.get("value")
+        if metric_name not in _RUM_METRIC_NAMES or value is None:
+            return Response(
+                {"error": "name (uno de %s) y value son requeridos" % sorted(_RUM_METRIC_NAMES)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return Response({"error": "value debe ser numérico"}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = request.user
+        RumMetric.objects.create(
+            email=user.email if getattr(user, "is_authenticated", False) else None,
+            path=(request.data.get("path") or "")[:255],
+            metric_name=metric_name,
+            value=value,
+            rating=(request.data.get("rating") or "")[:20],
+        )
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
