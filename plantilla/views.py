@@ -6353,6 +6353,50 @@ class TorreCaballitoSearchView(APIView):
         return Response({"results": results})
 
 
+class EmpleadosGeografiaSearchView(APIView):
+    """
+    Busca empleados activos por nombre o número, devolviendo su ubicación
+    geográfica (lat/long) para poder centrar el mapa en el resultado.
+    """
+
+    view_permission = "authentication.view_plantilla_geografia"
+
+    def get(self, request):
+        q = request.query_params.get("q", "").strip()
+        if not q or len(q) < 3:
+            return Response({"results": []})
+
+        from django.db import connection
+
+        query = """
+            SELECT
+                e.`Posición`,
+                e.`Numempleado`,
+                e.`Nombres`,
+                e.`Unidad Administrativa`,
+                e.`Descripción ubicación`,
+                e.`latitud`,
+                e.`longitud`,
+                e.`Aduana`,
+                e.`tipo`
+            FROM EMPLEADOS_COMPLETOS_SIG e
+            INNER JOIN MOV_POS_LATEST activas
+                ON e.`Posición` = activas.`Nº Pos Actual` AND activas.`Estado Psn` = 'A'
+            WHERE e.`latitud` IS NOT NULL AND e.`latitud` != ''
+              AND e.`longitud` IS NOT NULL AND e.`longitud` != ''
+              AND (e.`Nombres` LIKE %s OR e.`Numempleado` LIKE %s)
+            LIMIT 20;
+        """
+
+        like_q = f"%{q}%"
+        with connection.cursor() as cursor:
+            cursor.execute(query, [like_q, like_q])
+            columns = [col[0] for col in cursor.description]
+            results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+        return Response({"results": results})
+
+
 from rest_framework.pagination import PageNumberPagination
 
 

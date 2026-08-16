@@ -3,6 +3,7 @@ from django.urls import path
 from .views import (
     EmpleadosBusquedaView,
     TorreCaballitoSearchView,
+    EmpleadosGeografiaSearchView,
     EmpleadosPorNivelYEstatusView,
     ExportExcelView,
     OcupacionPorOficiosResumenView,
@@ -395,6 +396,11 @@ urlpatterns = [
         "empleados_distribucion_geografica/",
         EmpleadosDistribucionGeograficaView.as_view(),
         name="empleados_distribucion_geografica",
+    ),
+    path(
+        "empleados_geografia_search/",
+        EmpleadosGeografiaSearchView.as_view(),
+        name="empleados_geografia_search",
     ),
     path(
         "mov_pos_detalle/export_excel/",

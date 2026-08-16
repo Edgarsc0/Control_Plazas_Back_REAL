@@ -1217,6 +1217,30 @@ class CatCorreccionPosicion(models.Model):
         return f"{self.posicion} · {self.columna} = {self.valor!r}"
 
 
+class GeocodeCache(models.Model):
+    """
+    Tabla-hash dirección normalizada -> coordenadas, para no volver a llamar
+    a Nominatim (ni a reconstruir el mapeo escaneando toda EMPLEADOS_COMPLETOS_SIG)
+    en cada corrida de `importar_zafiro` (cada 30 min). Ver
+    `plantilla.tasks._geocodificar_empleados_sin_coordenadas`: cada corrida
+    primero busca aquí por `direccion` (clave, ya limpiada/normalizada) y solo
+    pega a la API externa las direcciones que de verdad son nuevas — que
+    entonces se insertan aquí para la siguiente corrida.
+    """
+
+    direccion = models.CharField(max_length=255, unique=True, db_index=True)
+    latitud = models.CharField(max_length=12)
+    longitud = models.CharField(max_length=13)
+    actualizado_en = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        managed = True
+        db_table = "GEOCODE_CACHE"
+
+    def __str__(self):
+        return f"{self.direccion} -> ({self.latitud}, {self.longitud})"
+
+
 class EmpleadosCompletosSig(EmpleadosCompletosSigBase):
     class Meta:
         managed = True
