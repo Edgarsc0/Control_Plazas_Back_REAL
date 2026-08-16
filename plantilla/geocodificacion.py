@@ -154,16 +154,26 @@ def geocodificar_empleados_sin_coordenadas(bitacora=None):
         for emp_id, desc in pendientes:
             clean = _clean_address(desc)
 
-            if clean in known_coords:
+            override = _coords_conocidas(desc)
+            if override:
+                # Prioridad sobre el caché: si `clean` quedó guardado en
+                # GeocodeCache como caché negativo (""/"") de una corrida
+                # anterior en la que esta dirección aún no tenía override,
+                # ese registro nunca se actualiza solo (bulk_create de abajo
+                # usa ignore_conflicts=True) — así que el override manual
+                # siempre gana, sin importar qué haya en el hash.
+                lat_str, lng_str = override
+                known_coords[clean] = (lat_str, lng_str)
+                nuevas_direcciones[clean] = (lat_str, lng_str)
+                lat, lng = lat_str, lng_str
+                GeocodeCache.objects.update_or_create(
+                    direccion=clean, defaults={"latitud": lat_str, "longitud": lng_str}
+                )
+            elif clean in known_coords:
                 # Caché negativo: ("", "") = Nominatim ya no pudo resolver
                 # esta dirección antes, no reintentar cada corrida.
                 lat, lng = known_coords[clean]
                 lat, lng = (lat or None), (lng or None)
-            elif _coords_conocidas(desc):
-                lat_str, lng_str = _coords_conocidas(desc)
-                known_coords[clean] = (lat_str, lng_str)
-                nuevas_direcciones[clean] = (lat_str, lng_str)
-                lat, lng = lat_str, lng_str
             else:
                 lat, lng = _geocode_external(clean)
                 llamadas_api += 1
