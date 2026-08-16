@@ -5710,6 +5710,20 @@ class InvalidarCacheZafiroView(APIView):
                 "Error ejecutando sp_actualizar_fecha_ocupacion_mov_pos tras import ZAFIRO"
             )
 
+        # Geolocaliza empleados activos sin latitud/longitud (ej. personal
+        # administrativo) — igual que el SP de arriba, corre aquí y no en
+        # tasks.py porque este endpoint SIEMPRE se ejecuta en este servidor,
+        # sin importar en qué máquina corrió importar_zafiro (ver docstring
+        # de plantilla.geocodificacion). Antes de invalidar el caché para
+        # que "empleados_distribucion_geografica" se recalcule ya con las
+        # coordenadas nuevas.
+        try:
+            from .geocodificacion import geocodificar_empleados_sin_coordenadas
+
+            geocodificar_empleados_sin_coordenadas(bitacora)
+        except Exception:
+            logger.exception("Error geolocalizando empleados tras import ZAFIRO")
+
         borradas = invalidar_todo_el_cache_servidor()
 
         # Notifica "avísame cuando esta posición quede vacante/se ocupe" —
