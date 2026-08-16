@@ -67,6 +67,23 @@ def _clean_address(addr):
     return addr
 
 
+# Direcciones cuyo texto crudo Nominatim no puede resolver (abreviaturas
+# tipo "Ad Guaymas Recinto Portu E1 P1"), pero que corresponden a una aduana
+# que YA tiene coordenadas (vienen directo del CSV de ZAFIRO para el
+# personal aduanero, ver EMPLEADOS_COMPLETOS_SIG.Aduana) — se reusan esas
+# coords en vez de pegarle a Nominatim con un texto que sabemos que falla.
+_COORDS_CONOCIDAS = {
+    "Guaymas": ("27.91396", "-110.90208"),  # Aduana de Guaymas con sede en Sonora
+}
+
+
+def _coords_conocidas(addr_cruda):
+    for clave, coords in _COORDS_CONOCIDAS.items():
+        if clave in addr_cruda:
+            return coords
+    return None
+
+
 def _geocode_external(address):
     try:
         resp = requests.get(
@@ -142,6 +159,11 @@ def geocodificar_empleados_sin_coordenadas(bitacora=None):
                 # esta dirección antes, no reintentar cada corrida.
                 lat, lng = known_coords[clean]
                 lat, lng = (lat or None), (lng or None)
+            elif _coords_conocidas(desc):
+                lat_str, lng_str = _coords_conocidas(desc)
+                known_coords[clean] = (lat_str, lng_str)
+                nuevas_direcciones[clean] = (lat_str, lng_str)
+                lat, lng = lat_str, lng_str
             else:
                 lat, lng = _geocode_external(clean)
                 llamadas_api += 1
