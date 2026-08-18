@@ -1903,7 +1903,7 @@ class EmpleadoFotoView(APIView):
     discusión de diseño: prioriza que ESTE endpoint sea rápido, ya que si se
     pide es porque el usuario ya está esperando verla).
 
-    Resuelve en este orden (ver FOTOS_EMPLEADOS_ANALISIS.md):
+    Resuelve en este orden (ver `excel_fotos.resolver_foto_empleado`):
       1. Archivo ``<numempleado>.<ext>`` directo en disco — convención
          estándar, cubre toda foto nueva sin ningún paso extra ni tabla de
          por medio (nunca queda desactualizado). Se prueban varias
@@ -1913,10 +1913,14 @@ class EmpleadoFotoView(APIView):
          muestra de 2000, 0 coincidían exacto — el 83% solo coincidía
          quitando los ceros a la izquierda), igual que ya contemplaba
          `excel_fotos_vba_guide.md` para el export a Excel.
-      2. Alias en `EmpleadoFotoAlias` (excepciones históricas nombradas por
-         RFC u otra variante) — se llena una vez con el management command
-         `cargar_fotos_empleados`.
-      3. 404 si ninguna de las dos resuelve.
+      2. RFC en vivo: SICRE nombra la foto por RFC mientras el empleado no
+         tiene numempleado asignado, y la renombra sola en cuanto sí lo
+         tiene — se recalcula contra el RFC actual en BD en cada llamada
+         (sin caché) para no quedar desfasado cuando SICRE haga ese rename.
+      3. Alias en `EmpleadoFotoAlias` (excepciones históricas irregulares
+         que ni 1 ni 2 cubren) — se llena con el management command
+         `cargar_fotos_empleados`, red de seguridad, no la vía principal.
+      4. 404 si ninguna resuelve.
     """
 
     # Un solo endpoint compartido por todos los tabs que muestran fotografía

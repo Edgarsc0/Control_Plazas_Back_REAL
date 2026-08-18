@@ -66,10 +66,24 @@ def _variantes_numempleado(numempleado):
 
 def resolver_foto_empleado(numempleado):
     """Devuelve la ``Path`` a la fotografía de ``numempleado`` en disco, o
-    ``None`` si no existe. Resuelve en el mismo orden que
-    ``FOTOS_EMPLEADOS_ANALISIS.md`` documenta: archivo directo por variante
-    de número, luego alias histórico en ``EmpleadoFotoAlias``."""
-    from .models import EmpleadoFotoAlias
+    ``None`` si no existe. Resuelve en este orden:
+
+      1. Archivo ``<numempleado>.<ext>`` directo (variantes de zero-padding).
+      2. RFC EN VIVO: SICRE nombra la foto por RFC (sin homoclave, 10
+         caracteres) mientras el empleado todavía no tiene numempleado
+         asignado, y la RENOMBRA sola a ``<numempleado>.<ext>`` en cuanto sí
+         lo tiene — es decir, cuál de las dos convenciones aplica cambia solo
+         con el tiempo, sin que nadie actualice nada de este lado. Por eso
+         esto se calcula al vuelo contra el RFC actual en BD en cada llamada
+         en vez de precomputarse: un alias guardado en tabla se volvería
+         obsoleto en cuanto SICRE haga ese rename (seguiría apuntando al
+         archivo viejo, que además desaparece del disco al siguiente rsync
+         --delete). Sin caché de por medio, no hay nada que quede desfasado.
+      3. Alias histórico en ``EmpleadoFotoAlias`` — red de seguridad para
+         casos irregulares que ni 1 ni 2 cubren (ver
+         ``cargar_fotos_empleados``), no la vía principal.
+    """
+    from .models import EmpleadoFotoAlias, EmpleadosCompletosSig
 
     numempleado = str(numempleado or "").strip()
     if not numempleado:
@@ -80,6 +94,25 @@ def resolver_foto_empleado(numempleado):
             candidato = FOTOS_EMPLEADOS_DIR / f"{variante}.{ext}"
             if candidato.is_file():
                 return candidato
+
+    rfc = (
+        EmpleadosCompletosSig.objects.filter(numempleado=numempleado)
+        .exclude(rfc__isnull=True)
+        .exclude(rfc="")
+        .exclude(rfc=" ")
+        .values_list("rfc", flat=True)
+        .first()
+    )
+    if rfc:
+        # El archivo se nombra con el RFC SIN homoclave (10 caracteres: 4
+        # letras + 6 dígitos); el de BD sí trae la homoclave completa (13) —
+        # mismo criterio de recorte que ya usa `cargar_fotos_empleados`.
+        rfc_sin_homoclave = rfc.strip().upper()[:10]
+        if rfc_sin_homoclave:
+            for ext in FOTOS_EMPLEADOS_EXTENSIONES:
+                candidato = FOTOS_EMPLEADOS_DIR / f"{rfc_sin_homoclave}.{ext}"
+                if candidato.is_file():
+                    return candidato
 
     alias = EmpleadoFotoAlias.objects.filter(numempleado=numempleado).first()
     if alias:
