@@ -1100,18 +1100,28 @@ def _get_mapa_codigos():
     return _get_mapa_correccion("codigo")
 
 
-def _completar_aduana_row(r):
+def _completar_aduana_row(r, mapa_tipo_aduana=None, mapa_dg_aduana=None):
     """
     Completa `tipo_de_aduana`/`dg_o_aduana_compactada` con el valor del
     catálogo de corrección SOLO si vienen vacíos de EMPLEADOS_COMPLETOS_SIG
     (~33% de las posiciones — confirmado que ZAFIRO no los trae completos,
     pero el Excel de referencia sí) — nunca se sobreescribe un valor real.
+
+    Los mapas se pueden precargar una sola vez fuera del loop de filas que
+    llama a esta función (ver `_enriquecer_empleados_completos_rows`): sin
+    esto, cada fila vuelve a golpear el caché de Redis por su cuenta, lo que
+    en listas de cientos de filas se nota (medido: ~5s extra en una búsqueda
+    de ~430 filas antes de este cambio).
     """
     pos = r.get("posicion", "")
+    if mapa_tipo_aduana is None:
+        mapa_tipo_aduana = _get_mapa_correccion("tipo_de_aduana")
+    if mapa_dg_aduana is None:
+        mapa_dg_aduana = _get_mapa_correccion("dg_o_aduana_compactada")
     if not str(r.get("tipo_de_aduana") or "").strip():
-        r["tipo_de_aduana"] = _get_mapa_correccion("tipo_de_aduana").get(pos, "")
+        r["tipo_de_aduana"] = mapa_tipo_aduana.get(pos, "")
     if not str(r.get("dg_o_aduana_compactada") or "").strip():
-        r["dg_o_aduana_compactada"] = _get_mapa_correccion("dg_o_aduana_compactada").get(pos, "")
+        r["dg_o_aduana_compactada"] = mapa_dg_aduana.get(pos, "")
 
 
 def _get_mapa_quincenal():
@@ -1630,6 +1640,64 @@ class EmpleadosCompletosEstatusNominaResumenView(APIView):
             )
 
 
+def _enriquecer_empleados_completos_rows(resultados):
+    """Inyecta código federal + columnas quincenal + fecha_anuencia + fecha_vacancia
+    + mov_pos_id + aduana en cada fila de ``EmpleadosCompletosSig.objects.values()``.
+
+    Compartido por las 3 rutas de `EmpleadosCompletosActivosDetalleView` (todo,
+    oficio/nivel, search) — antes estaba duplicado en las primeras dos.
+    """
+    mapa_codigos = _get_mapa_codigos()
+    mapa_quincenal = _get_mapa_quincenal()
+    _posiciones = [r.get("posicion", "") for r in resultados]
+    mapa_fa = _get_fecha_anuencia_bulk_map(_posiciones)
+    mapa_fa_override = _get_fecha_anuencia_override_map(_posiciones)
+    mapa_fv = _get_fecha_vacancia_bulk_map(_posiciones)
+    mapa_mov_id = _get_mov_pos_id_bulk_map(_posiciones)
+    posiciones_ocupadas = _get_posiciones_ocupadas_set()
+    # Precargados una sola vez (no por fila) — ver docstring de
+    # `_completar_aduana_row` sobre el costo de no hacerlo.
+    mapa_tipo_aduana = _get_mapa_correccion("tipo_de_aduana")
+    mapa_dg_aduana = _get_mapa_correccion("dg_o_aduana_compactada")
+    _COLS_QUINCENAL = sorted(COLUMNAS_QUINCENAL_VALIDAS - {"fecha_anuencia_detalle"})
+    for r in resultados:
+        pos = r.get("posicion", "")
+        r["codigo"] = mapa_codigos.get(pos, "")
+        custom = mapa_quincenal.get(pos, {})
+        for col in _COLS_QUINCENAL:
+            r[col] = custom.get(col, "")
+        # Datos de un candidato "solicitado" solo tienen sentido mientras la
+        # plaza siga vacante — si ya se ocupó, se blanquean sin importar lo
+        # que haya quedado guardado.
+        if pos in posiciones_ocupadas:
+            for col in COLUMNAS_SOLICITUD_VACANTE:
+                r[col] = ""
+        r["fecha_anuencia_detalle"] = mapa_fa.get(pos, "")
+        # Resalta en azul la celda si tiene un override manual activo — mismo
+        # criterio que Mov. Posiciones.
+        r["fecha_anuencia_detalle_override"] = mapa_fa_override.get(pos, False)
+        # "Fecha que se genera la vacante": SIEMPRE la calculada (fecha_vacancia
+        # de MOV_POS), nunca la del Excel — ver docstring de
+        # _get_fecha_vacancia_bulk_map.
+        r["fecha_genera_vacante"] = mapa_fv.get(pos, "")
+        # id de MOV_POS para abrir el modal de Detalle de Vacancia
+        # (VacanciaDetalleModal, mismo que Mov. Posiciones).
+        r["mov_pos_id"] = mapa_mov_id.get(pos)
+        _completar_aduana_row(r, mapa_tipo_aduana, mapa_dg_aduana)
+    return resultados
+
+
+# Campos sobre los que busca `search` en EmpleadosCompletosActivosDetalleView —
+# mismo criterio que MovimientosPersonalListView (apply_text_search con una
+# lista acotada, no el blob completo de ~80 columnas): cubre lo que el front
+# promete ("nombre, RFC, CURP, unidad administrativa, etc.", ver TableroRH.jsx).
+CAMPOS_BUSQUEDA_EMPLEADOS_DETALLE = [
+    "nombres", "rfc", "curp", "posicion", "numempleado", "id_empleado",
+    "unidad_administrativa", "nombre_puesto_funcional", "departamento",
+    "dependencia_directa", "ua", "ua2",
+]
+
+
 class EmpleadosCompletosActivosDetalleView(APIView):
     # Dataset base compartido por 3 tabs (Detalle/Estatus/Mov. Posiciones cruzan
     # contra `detalle`) — cualquiera de los 3 permisos basta, no solo Detalle.
@@ -1642,6 +1710,29 @@ class EmpleadosCompletosActivosDetalleView(APIView):
     def get(self, request, *args, **kwargs):
         oficio = request.query_params.get("oficio")
         nivel = request.query_params.get("nivel")
+        search = (request.query_params.get("search") or "").strip()
+
+        if search:
+            # Búsqueda libre sobre el universo de posiciones activas (mismo
+            # scope que la ruta "todo" de abajo), sin caché: a diferencia de
+            # oficio/nivel (catálogo acotado) o "todo" (una sola clave), el
+            # espacio de términos de búsqueda es ilimitado — mismo criterio
+            # que MovimientosPersonalListView, que tampoco cachea `search`.
+            # La usa TableroRH para no tener que traer el dataset completo
+            # (~11 mil filas) al cliente en cada carga solo para filtrarlo ahí.
+            try:
+                active_position_codes = obtener_posiciones_activas()
+                queryset = EmpleadosCompletosSig.objects.filter(
+                    posicion__in=active_position_codes
+                )
+                queryset = apply_text_search(queryset, search, CAMPOS_BUSQUEDA_EMPLEADOS_DETALLE)
+                resultados = _enriquecer_empleados_completos_rows(list(queryset.values()))
+                return Response(resultados, status=status.HTTP_200_OK)
+            except Exception:
+                logger.exception("Error inesperado en {}".format(request.path))
+                return Response(
+                    {"error": "Error interno del servidor"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
 
         if oficio or nivel:
             cache_key = f"empleados_completos_activos_detalle_{oficio}_{nivel}"
@@ -1668,42 +1759,7 @@ class EmpleadosCompletosActivosDetalleView(APIView):
                 queryset = EmpleadosCompletosSig.objects.filter(
                     posicion__in=posiciones_list
                 )
-                resultados = list(queryset.values())
-
-                # Inyectar código federal + columnas quincenal + fecha_anuencia + fecha_vacancia
-                mapa_codigos = _get_mapa_codigos()
-                mapa_quincenal = _get_mapa_quincenal()
-                _posiciones = [r.get("posicion", "") for r in resultados]
-                mapa_fa = _get_fecha_anuencia_bulk_map(_posiciones)
-                mapa_fa_override = _get_fecha_anuencia_override_map(_posiciones)
-                mapa_fv = _get_fecha_vacancia_bulk_map(_posiciones)
-                mapa_mov_id = _get_mov_pos_id_bulk_map(_posiciones)
-                posiciones_ocupadas = _get_posiciones_ocupadas_set()
-                _COLS_QUINCENAL = sorted(COLUMNAS_QUINCENAL_VALIDAS - {"fecha_anuencia_detalle"})
-                for r in resultados:
-                    pos = r.get("posicion", "")
-                    r["codigo"] = mapa_codigos.get(pos, "")
-                    custom = mapa_quincenal.get(pos, {})
-                    for col in _COLS_QUINCENAL:
-                        r[col] = custom.get(col, "")
-                    # Datos de un candidato "solicitado" solo tienen sentido
-                    # mientras la plaza siga vacante — si ya se ocupó, se
-                    # blanquean sin importar lo que haya quedado guardado.
-                    if pos in posiciones_ocupadas:
-                        for col in COLUMNAS_SOLICITUD_VACANTE:
-                            r[col] = ""
-                    r["fecha_anuencia_detalle"] = mapa_fa.get(pos, "")
-                    # Resalta en azul la celda si tiene un override manual
-                    # activo — mismo criterio que Mov. Posiciones.
-                    r["fecha_anuencia_detalle_override"] = mapa_fa_override.get(pos, False)
-                    # "Fecha que se genera la vacante": SIEMPRE la calculada
-                    # (fecha_vacancia de MOV_POS), nunca la del Excel — ver
-                    # docstring de _get_fecha_vacancia_bulk_map.
-                    r["fecha_genera_vacante"] = mapa_fv.get(pos, "")
-                    # id de MOV_POS para abrir el modal de Detalle de Vacancia
-                    # (VacanciaDetalleModal, mismo que Mov. Posiciones).
-                    r["mov_pos_id"] = mapa_mov_id.get(pos)
-                    _completar_aduana_row(r)
+                resultados = _enriquecer_empleados_completos_rows(list(queryset.values()))
 
                 cache.set(cache_key, resultados, 300)
                 return Response(resultados, status=status.HTTP_200_OK)
@@ -1728,42 +1784,7 @@ class EmpleadosCompletosActivosDetalleView(APIView):
             )
 
             # 3. Serializar directamente
-            resultados = list(queryset.values())
-
-            # Inyectar código federal + columnas quincenal + fecha_anuencia + fecha_vacancia
-            mapa_codigos = _get_mapa_codigos()
-            mapa_quincenal = _get_mapa_quincenal()
-            _posiciones = [r.get("posicion", "") for r in resultados]
-            mapa_fa = _get_fecha_anuencia_bulk_map(_posiciones)
-            mapa_fa_override = _get_fecha_anuencia_override_map(_posiciones)
-            mapa_fv = _get_fecha_vacancia_bulk_map(_posiciones)
-            mapa_mov_id = _get_mov_pos_id_bulk_map(_posiciones)
-            posiciones_ocupadas = _get_posiciones_ocupadas_set()
-            _COLS_QUINCENAL = sorted(COLUMNAS_QUINCENAL_VALIDAS - {"fecha_anuencia_detalle"})
-            for r in resultados:
-                pos = r.get("posicion", "")
-                r["codigo"] = mapa_codigos.get(pos, "")
-                custom = mapa_quincenal.get(pos, {})
-                for col in _COLS_QUINCENAL:
-                    r[col] = custom.get(col, "")
-                # Datos de un candidato "solicitado" solo tienen sentido
-                # mientras la plaza siga vacante — si ya se ocupó, se
-                # blanquean sin importar lo que haya quedado guardado.
-                if pos in posiciones_ocupadas:
-                    for col in COLUMNAS_SOLICITUD_VACANTE:
-                        r[col] = ""
-                r["fecha_anuencia_detalle"] = mapa_fa.get(pos, "")
-                # Resalta en azul la celda si tiene un override manual
-                # activo — mismo criterio que Mov. Posiciones.
-                r["fecha_anuencia_detalle_override"] = mapa_fa_override.get(pos, False)
-                # "Fecha que se genera la vacante": SIEMPRE la calculada
-                # (fecha_vacancia de MOV_POS), nunca la del Excel — ver
-                # docstring de _get_fecha_vacancia_bulk_map.
-                r["fecha_genera_vacante"] = mapa_fv.get(pos, "")
-                # id de MOV_POS para abrir el modal de Detalle de Vacancia
-                # (VacanciaDetalleModal, mismo que Mov. Posiciones).
-                r["mov_pos_id"] = mapa_mov_id.get(pos)
-                _completar_aduana_row(r)
+            resultados = _enriquecer_empleados_completos_rows(list(queryset.values()))
 
             cache.set(cache_key, resultados, 1200)
             return Response(resultados, status=status.HTTP_200_OK)

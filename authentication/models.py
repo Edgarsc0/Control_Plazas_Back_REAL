@@ -2,6 +2,16 @@ from django.db import models
 from django.contrib.auth.models import Group, User
 from ua.models import UnidadAdministrativa
 
+# Tableros ejecutivos de una sola página (sin redirecciones) para perfiles que
+# necesitan una vista muy concisa en vez del sistema completo — ej. la
+# Dirección de Recursos Humanos. Se asigna por usuario (ver Whitelist.tablero,
+# igual que el rol) y decide qué ve esa persona al iniciar sesión (ver
+# LoginView/MePermissionsView, que exponen el valor, y /dashboard/page.jsx en
+# el front, que lo lee y renderiza el tablero en vez del dashboard normal).
+TABLERO_CHOICES = [
+    ("rh", "Tablero RH"),
+]
+
 
 class Whitelist(models.Model):
     email = models.EmailField(unique=True)
@@ -18,6 +28,8 @@ class Whitelist(models.Model):
     # así que la contraseña inicial la conoce alguien más que el titular de la
     # cuenta: se le fuerza a cambiarla la primera vez que entra.
     debe_cambiar_password = models.BooleanField(default=True)
+    # Vacío/None = sin tablero asignado, entra al dashboard normal.
+    tablero = models.CharField(max_length=50, blank=True, null=True, choices=TABLERO_CHOICES)
 
     def __str__(self):
         return f"{self.email} - {self.rol.name}"

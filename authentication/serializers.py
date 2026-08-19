@@ -66,7 +66,7 @@ class WhitelistSerializer(serializers.ModelSerializer):
         model = Whitelist
         fields = [
             'id', 'email', 'rol', 'rol_nombre', 'ua', 'ua_nombre', 'activo',
-            'password', 'tiene_password', 'debe_cambiar_password',
+            'password', 'tiene_password', 'debe_cambiar_password', 'tablero',
         ]
         read_only_fields = ['debe_cambiar_password']
 

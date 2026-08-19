@@ -85,6 +85,7 @@ class MePermissionsView(views.APIView):
                 "ua": whitelist_entry.ua.nombre if whitelist_entry and whitelist_entry.ua else None,
                 "is_superuser": user.is_superuser,
                 "permissions": permissions,
+                "tablero": whitelist_entry.tablero if whitelist_entry else None,
             }
         )
 
@@ -345,6 +346,7 @@ class LoginView(views.APIView):
                     "email": user.email,
                     "rol": entry.rol.name,
                     "ua": entry.ua.nombre if entry.ua else None,
+                    "tablero": entry.tablero,
                 },
             },
             status=status.HTTP_200_OK,
