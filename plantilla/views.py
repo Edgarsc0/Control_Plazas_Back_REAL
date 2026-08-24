@@ -420,8 +420,12 @@ def apply_advanced_filters(
 ):
     """Aplica las condiciones del modal "Filtros Avanzados" (``?advanced_filters=``).
 
-    JSON array de: ``{ column, condition, compareType, compareColumn, value, logic }``.
-    ``logic`` en el item i combina (AND/OR) con el Q acumulado de los items 0..i-1.
+    JSON array de nodos: condición ``{ column, condition, compareType, compareColumn, value, logic }``
+    o grupo ``{ type: "group", logic, children: [condición, ...] }`` (paréntesis
+    explícito — un solo nivel de anidamiento, un grupo no contiene otros
+    grupos). ``logic`` en el item i combina (AND/OR) con el Q acumulado de los
+    items 0..i-1 de esa misma lista (top-level o `children` de un grupo); un
+    nodo sin ``type`` (filtros guardados viejos) se trata como condición.
     ``computed_resolver(column, condition, value) -> Q | None`` permite que el
     caller resuelva columnas calculadas que no son campos reales del modelo
     (p. ej. "ocupacion"/"total_movimientos" en MovPos). Lógica única compartida
@@ -663,17 +667,34 @@ def apply_advanced_filters(
 
         return None
 
-    combined_q = None
-    for cond in advanced_conditions:
-        q = build_condition_q(cond)
-        if q is None:
-            continue
-        if combined_q is None:
-            combined_q = q
-        elif (cond.get("logic") or "AND").upper() == "OR":
-            combined_q = combined_q | q
-        else:
-            combined_q = combined_q & q
+    def fold_q(nodes):
+        """Mismo fold AND/OR secuencial (i combina con el Q acumulado de 0..i-1),
+        reutilizado para el top-level y para los `children` de un grupo."""
+        combined = None
+        for node in nodes:
+            q = build_node_q(node)
+            if q is None:
+                continue
+            if combined is None:
+                combined = q
+            elif (node.get("logic") or "AND").upper() == "OR":
+                combined = combined | q
+            else:
+                combined = combined & q
+        return combined
+
+    def build_node_q(node):
+        """Condición u grupo (paréntesis explícito, ver `AdvancedFiltersModal`).
+        Un grupo resuelve su propio fold sobre `children` ANTES de combinarse
+        con el resto de la lista donde vive — un solo nivel de anidamiento
+        (un grupo no contiene otros grupos)."""
+        if not isinstance(node, dict):
+            return None
+        if node.get("type") == "group":
+            return fold_q(node.get("children", [])[:20])
+        return build_condition_q(node)
+
+    combined_q = fold_q(advanced_conditions)
 
     if combined_q is not None:
         queryset = queryset.filter(combined_q)
