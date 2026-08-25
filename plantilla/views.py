@@ -1719,6 +1719,26 @@ CAMPOS_BUSQUEDA_EMPLEADOS_DETALLE = [
 ]
 
 
+class DefaultApiPagination(PageNumberPagination):
+    """Paginador genérico para endpoints de dataset completo (EMPLEADOS_COMPLETOS_SIG,
+    BAJAS_SIG, ...) consumidos hoy sin paginar por eje_central_front y, opcionalmente
+    (?pagination=true), por clientes externos como rendicionCuentasBack."""
+    page_size = 500
+    page_size_query_param = "page_size"
+    max_page_size = 10000
+
+
+def _paginated_or_full_response(request, data):
+    """Devuelve `data` paginado (envelope count/next/previous/results) si viene
+    ?pagination=true en el query string; si no, exactamente igual que hoy (lista
+    plana) — eje_central_front nunca manda este flag, así que su contrato no cambia."""
+    if request.query_params.get("pagination", "false").strip().lower() == "true":
+        paginator = DefaultApiPagination()
+        page = paginator.paginate_queryset(data, request)
+        return paginator.get_paginated_response(page)
+    return Response(data, status=status.HTTP_200_OK)
+
+
 class EmpleadosCompletosActivosDetalleView(APIView):
     # Dataset base compartido por 3 tabs (Detalle/Estatus/Mov. Posiciones cruzan
     # contra `detalle`) — cualquiera de los 3 permisos basta, no solo Detalle.
@@ -1748,7 +1768,7 @@ class EmpleadosCompletosActivosDetalleView(APIView):
                 )
                 queryset = apply_text_search(queryset, search, CAMPOS_BUSQUEDA_EMPLEADOS_DETALLE)
                 resultados = _enriquecer_empleados_completos_rows(list(queryset.values()))
-                return Response(resultados, status=status.HTTP_200_OK)
+                return _paginated_or_full_response(request, resultados)
             except Exception:
                 logger.exception("Error inesperado en {}".format(request.path))
                 return Response(
@@ -1759,7 +1779,7 @@ class EmpleadosCompletosActivosDetalleView(APIView):
             cache_key = f"empleados_completos_activos_detalle_{oficio}_{nivel}"
             cached_data = cache.get(cache_key)
             if cached_data is not None:
-                return Response(cached_data, status=status.HTTP_200_OK)
+                return _paginated_or_full_response(request, cached_data)
 
             try:
                 # Obtener posiciones de Plantilla1800Plazas que cumplan los filtros
@@ -1783,7 +1803,7 @@ class EmpleadosCompletosActivosDetalleView(APIView):
                 resultados = _enriquecer_empleados_completos_rows(list(queryset.values()))
 
                 cache.set(cache_key, resultados, 300)
-                return Response(resultados, status=status.HTTP_200_OK)
+                return _paginated_or_full_response(request, resultados)
             except Exception:
                 logger.exception("Error inesperado en {}".format(request.path))
                 return Response(
@@ -1793,7 +1813,7 @@ class EmpleadosCompletosActivosDetalleView(APIView):
         cache_key = "empleados_completos_activos_detalle"
         cached_data = cache.get(cache_key)
         if cached_data is not None:
-            return Response(cached_data, status=status.HTTP_200_OK)
+            return _paginated_or_full_response(request, cached_data)
 
         try:
             # 1. Obtener posiciones actualmente activas
@@ -1808,7 +1828,7 @@ class EmpleadosCompletosActivosDetalleView(APIView):
             resultados = _enriquecer_empleados_completos_rows(list(queryset.values()))
 
             cache.set(cache_key, resultados, 1200)
-            return Response(resultados, status=status.HTTP_200_OK)
+            return _paginated_or_full_response(request, resultados)
         except Exception:
             logger.exception("Error inesperado en {}".format(request.path))
             return Response(
@@ -3959,6 +3979,12 @@ class MovPosDetalleView(APIView):
             request.query_params.get("no_pagination", "false").strip().lower() == "true"
             or is_latest
         )
+        # `pagination=true`: usado sólo por clientes externos (rendicionCuentasBack vía
+        # eje_central_client.py) para forzar el paginador real de abajo aun cuando
+        # is_latest quedó en su default true. eje_central_front nunca manda este flag,
+        # así que su respuesta (envelope completo, sin slicing real) no cambia.
+        if request.query_params.get("pagination", "false").strip().lower() == "true":
+            no_pagination = False
         if no_pagination:
             resultados = list(queryset.values())
             counts = dict(
@@ -5983,7 +6009,7 @@ class BajasSigListView(APIView):
             cache_key = f"bajas_sig_list_{oficio}_{nivel}"
             cached_data = cache.get(cache_key)
             if cached_data is not None:
-                return Response(cached_data, status=status.HTTP_200_OK)
+                return _paginated_or_full_response(request, cached_data)
 
             try:
                 # Obtener posiciones de Plantilla1800Plazas que cumplan los filtros
@@ -6004,7 +6030,7 @@ class BajasSigListView(APIView):
                     BajasSig.objects.filter(posicion__in=posiciones_list).values()
                 )
                 cache.set(cache_key, bajas, 300)
-                return Response(bajas, status=status.HTTP_200_OK)
+                return _paginated_or_full_response(request, bajas)
             except Exception:
                 logger.exception("Error inesperado en {}".format(request.path))
                 return Response(
@@ -6014,11 +6040,11 @@ class BajasSigListView(APIView):
         cache_key = "bajas_sig_list"
         cached_data = cache.get(cache_key)
         if cached_data is not None:
-            return Response(cached_data, status=status.HTTP_200_OK)
+            return _paginated_or_full_response(request, cached_data)
 
         bajas = list(BajasSig.objects.all().values())
         cache.set(cache_key, bajas, 1200)
-        return Response(bajas, status=status.HTTP_200_OK)
+        return _paginated_or_full_response(request, bajas)
 
 
 class BajasMotivosPieView(APIView):
