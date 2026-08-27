@@ -1886,3 +1886,30 @@ class FiltroGuardado(models.Model):
 
     def __str__(self):
         return f"{self.usuario} - {self.vista} - {self.nombre}"
+
+
+class SuscripcionApiControlPlazas(models.Model):
+    """
+    Consumidores externos de la API de Control de Plazas (ej.
+    rendicionCuentasBack) que mantienen su propia caché sobre estos mismos
+    datos y necesitan enterarse cuando cambian. Ver
+    `cache_invalidation.invalidar_todo_el_cache_servidor`: al invalidar la
+    caché local, se hace POST a `url` de cada suscriptor activo con
+    `Authorization: Token <token>` para que también invalide la suya.
+
+    `token` es un secreto compartido (no un Token de DRF de este proyecto):
+    el consumidor lo valida a su manera contra el mismo valor.
+    """
+
+    nombre = models.CharField(max_length=100, unique=True)
+    url = models.URLField(max_length=500)
+    token = models.CharField(max_length=255)
+    activo = models.BooleanField(default=True)
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "SUSCRIPCION_API_CONTROL_PLAZAS"
+        ordering = ["nombre"]
+
+    def __str__(self):
+        return self.nombre

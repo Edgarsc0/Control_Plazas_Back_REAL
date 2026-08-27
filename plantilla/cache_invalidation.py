@@ -10,11 +10,15 @@ datos nuevos hasta que expira el TTL de cada cache key (hasta 20 min).
 
 Este módulo borra TODA la caché de Django del servidor bajo pedido, para
 que el siguiente request de cualquier usuario recalcule con datos frescos.
+También notifica a consumidores externos de la API (ver
+`SuscripcionApiControlPlazas`) para que invaliden su propia caché.
 """
 
 import logging
+import time
 
 import redis as redis_lib
+import requests
 from django.conf import settings
 from django.core.cache import cache
 
@@ -46,4 +50,52 @@ def invalidar_todo_el_cache_servidor():
         if cursor == 0:
             break
     logger.info("invalidar_todo_el_cache_servidor: %d keys borradas (patrón %s)", borradas, pattern)
+
+    _notificar_suscriptores()
+
     return borradas
+
+
+def _notificar_suscriptores():
+    """
+    Avisa a cada consumidor externo de la API de Control de Plazas (ej.
+    rendicionCuentasBack) que tiene su propia caché sobre estos mismos datos
+    y debe invalidarla — la tabla `SuscripcionApiControlPlazas` guarda la URL
+    exacta de cada uno (su endpoint webhook) y el token a enviar.
+
+    Corre inline (sin task de Celery): el volumen de suscriptores es bajo y
+    el caller (`InvalidarCacheManualView`/`InvalidarCacheZafiroView`) puede
+    esperar el POST igual que ya espera el borrado de Redis de arriba.
+    """
+    from .models import SuscripcionApiControlPlazas
+
+    for suscripcion in SuscripcionApiControlPlazas.objects.filter(activo=True):
+        _notificar_suscriptor(suscripcion)
+
+
+def _notificar_suscriptor(suscripcion):
+    ultimo_error = None
+    for intento in range(2):
+        try:
+            resp = requests.post(
+                suscripcion.url,
+                headers={"Authorization": f"Token {suscripcion.token}"},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            logger.info(
+                "Suscriptor '%s' notificado: invalidó su caché de Control de Plazas.",
+                suscripcion.nombre,
+            )
+            return
+        except Exception as e:
+            ultimo_error = e
+            if intento == 0:
+                time.sleep(3)
+
+    logger.exception(
+        "Error al notificar al suscriptor '%s' (%s) para invalidar su caché",
+        suscripcion.nombre,
+        suscripcion.url,
+        exc_info=ultimo_error,
+    )
