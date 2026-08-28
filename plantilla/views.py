@@ -6492,13 +6492,43 @@ class MovimientosPersonalPagination(PageNumberPagination):
     max_page_size = 10000
 
 
+def _finalize_mov_completo_rows(rows):
+    """
+    Replica dos conversiones que CpTblMovCompleto290526Serializer hacía gratis
+    vía DRF y que `.values()` deja crudas:
+
+    - `fecha_ult_actz` es el único DateTimeField del modelo (USE_TZ=True) —
+      el resto son DateField (sin hora ni tz, no necesitan esto). DRF lo
+      convierte a hora local antes de formatear; sin pasar por un campo de
+      DRF, el JSONEncoder lo deja en UTC ("Z") — correría las fechas ~6h
+      contra lo que ya mostraba el front.
+    - `sal_base` (DecimalField) — DRF por default serializa Decimal como
+      STRING con 2 decimales fijos (`COERCE_DECIMAL_TO_STRING`, default
+      True) y `None` como `''` (cadena vacía, no `null`); el JSONEncoder de
+      `.values()` lo deja como número JSON crudo. Distinto tipo para el
+      front si no se replica.
+    """
+    from decimal import Decimal
+
+    from django.utils import timezone
+
+    for r in rows:
+        if r.get("fecha_ult_actz") is not None:
+            r["fecha_ult_actz"] = timezone.localtime(r["fecha_ult_actz"])
+        sal_base = r.get("sal_base")
+        r["sal_base"] = (
+            format(sal_base.quantize(Decimal("0.01")), "f") if sal_base is not None else ""
+        )
+    return rows
+
+
 class MovimientosPersonalListView(APIView):
     view_permission = "authentication.view_plantilla_movimientos"
     pagination_class = MovimientosPersonalPagination
 
     def get(self, request):
         from .models import CpTblMovCompleto290526
-        from .serializers import CpTblMovCompleto290526Serializer
+        from .serializers import CP_TBL_MOV_COMPLETO_FIELDS
 
         queryset = CpTblMovCompleto290526.objects.all()
 
@@ -6649,22 +6679,26 @@ class MovimientosPersonalListView(APIView):
             # Default ordering
             queryset = queryset.order_by("-fecha_efectiva", "-sec")
 
+        # A partir de aquí la respuesta ya no necesita instancias de modelo —
+        # .values() evita fetch de objetos completos + to_representation por
+        # fila de CpTblMovCompleto290526Serializer (ModelSerializer plano,
+        # sin SerializerMethodField, pero igual paga overhead de DRF por cada
+        # una de hasta 155k filas). ~2.7x más rápido medido con datos reales.
+        queryset = queryset.values(*CP_TBL_MOV_COMPLETO_FIELDS)
+
         # Excel download or full list without pagination
         no_pagination = (
             request.query_params.get("no_pagination", "false").strip().lower() == "true"
         )
         if no_pagination:
-            serializer = CpTblMovCompleto290526Serializer(queryset, many=True)
-            return Response(serializer.data)
+            return Response(_finalize_mov_completo_rows(list(queryset)))
 
         paginator = self.pagination_class()
         page = paginator.paginate_queryset(queryset, request, view=self)
         if page is not None:
-            serializer = CpTblMovCompleto290526Serializer(page, many=True)
-            return paginator.get_paginated_response(serializer.data)
+            return paginator.get_paginated_response(_finalize_mov_completo_rows(list(page)))
 
-        serializer = CpTblMovCompleto290526Serializer(queryset, many=True)
-        return Response(serializer.data)
+        return Response(_finalize_mov_completo_rows(list(queryset)))
 
 
 class OrganigramaDeptoView(APIView):
