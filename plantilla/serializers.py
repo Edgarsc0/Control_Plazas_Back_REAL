@@ -22,6 +22,14 @@ class CpTblMovCompleto290526Serializer(serializers.ModelSerializer):
         ]
 
 
+# Nombres de campo exactos que emite CpTblMovCompleto290526Serializer — fuente
+# única de verdad para MovimientosPersonalListView, que sirve estas filas vía
+# queryset.values(*CP_TBL_MOV_COMPLETO_FIELDS) en vez de instanciar el
+# serializer (155k+ filas en la tabla; ~2.7x más lento con ModelSerializer,
+# medido con datos reales — ver arquitectura-serializers-listas.md).
+CP_TBL_MOV_COMPLETO_FIELDS = list(CpTblMovCompleto290526Serializer().fields)
+
+
 class CatAccionesSerializer(serializers.ModelSerializer):
     class Meta:
         model = CatAcciones

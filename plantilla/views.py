@@ -429,8 +429,12 @@ def apply_advanced_filters(
 ):
     """Aplica las condiciones del modal "Filtros Avanzados" (``?advanced_filters=``).
 
-    JSON array de: ``{ column, condition, compareType, compareColumn, value, logic }``.
-    ``logic`` en el item i combina (AND/OR) con el Q acumulado de los items 0..i-1.
+    JSON array de nodos: condición ``{ column, condition, compareType, compareColumn, value, logic }``
+    o grupo ``{ type: "group", logic, children: [condición, ...] }`` (paréntesis
+    explícito — un solo nivel de anidamiento, un grupo no contiene otros
+    grupos). ``logic`` en el item i combina (AND/OR) con el Q acumulado de los
+    items 0..i-1 de esa misma lista (top-level o `children` de un grupo); un
+    nodo sin ``type`` (filtros guardados viejos) se trata como condición.
     ``computed_resolver(column, condition, value) -> Q | None`` permite que el
     caller resuelva columnas calculadas que no son campos reales del modelo
     (p. ej. "ocupacion"/"total_movimientos" en MovPos). Lógica única compartida
@@ -672,17 +676,34 @@ def apply_advanced_filters(
 
         return None
 
-    combined_q = None
-    for cond in advanced_conditions:
-        q = build_condition_q(cond)
-        if q is None:
-            continue
-        if combined_q is None:
-            combined_q = q
-        elif (cond.get("logic") or "AND").upper() == "OR":
-            combined_q = combined_q | q
-        else:
-            combined_q = combined_q & q
+    def fold_q(nodes):
+        """Mismo fold AND/OR secuencial (i combina con el Q acumulado de 0..i-1),
+        reutilizado para el top-level y para los `children` de un grupo."""
+        combined = None
+        for node in nodes:
+            q = build_node_q(node)
+            if q is None:
+                continue
+            if combined is None:
+                combined = q
+            elif (node.get("logic") or "AND").upper() == "OR":
+                combined = combined | q
+            else:
+                combined = combined & q
+        return combined
+
+    def build_node_q(node):
+        """Condición u grupo (paréntesis explícito, ver `AdvancedFiltersModal`).
+        Un grupo resuelve su propio fold sobre `children` ANTES de combinarse
+        con el resto de la lista donde vive — un solo nivel de anidamiento
+        (un grupo no contiene otros grupos)."""
+        if not isinstance(node, dict):
+            return None
+        if node.get("type") == "group":
+            return fold_q(node.get("children", [])[:20])
+        return build_condition_q(node)
+
+    combined_q = fold_q(advanced_conditions)
 
     if combined_q is not None:
         queryset = queryset.filter(combined_q)
@@ -1707,6 +1728,26 @@ CAMPOS_BUSQUEDA_EMPLEADOS_DETALLE = [
 ]
 
 
+class DefaultApiPagination(PageNumberPagination):
+    """Paginador genérico para endpoints de dataset completo (EMPLEADOS_COMPLETOS_SIG,
+    BAJAS_SIG, ...) consumidos hoy sin paginar por eje_central_front y, opcionalmente
+    (?pagination=true), por clientes externos como rendicionCuentasBack."""
+    page_size = 500
+    page_size_query_param = "page_size"
+    max_page_size = 10000
+
+
+def _paginated_or_full_response(request, data):
+    """Devuelve `data` paginado (envelope count/next/previous/results) si viene
+    ?pagination=true en el query string; si no, exactamente igual que hoy (lista
+    plana) — eje_central_front nunca manda este flag, así que su contrato no cambia."""
+    if request.query_params.get("pagination", "false").strip().lower() == "true":
+        paginator = DefaultApiPagination()
+        page = paginator.paginate_queryset(data, request)
+        return paginator.get_paginated_response(page)
+    return Response(data, status=status.HTTP_200_OK)
+
+
 class EmpleadosCompletosActivosDetalleView(APIView):
     # Dataset base compartido por 3 tabs (Detalle/Estatus/Mov. Posiciones cruzan
     # contra `detalle`) — cualquiera de los 3 permisos basta, no solo Detalle.
@@ -1736,7 +1777,7 @@ class EmpleadosCompletosActivosDetalleView(APIView):
                 )
                 queryset = apply_text_search(queryset, search, CAMPOS_BUSQUEDA_EMPLEADOS_DETALLE)
                 resultados = _enriquecer_empleados_completos_rows(list(queryset.values()))
-                return Response(resultados, status=status.HTTP_200_OK)
+                return _paginated_or_full_response(request, resultados)
             except Exception:
                 logger.exception("Error inesperado en {}".format(request.path))
                 return Response(
@@ -1747,7 +1788,7 @@ class EmpleadosCompletosActivosDetalleView(APIView):
             cache_key = f"empleados_completos_activos_detalle_{oficio}_{nivel}"
             cached_data = cache.get(cache_key)
             if cached_data is not None:
-                return Response(cached_data, status=status.HTTP_200_OK)
+                return _paginated_or_full_response(request, cached_data)
 
             try:
                 # Obtener posiciones de Plantilla1800Plazas que cumplan los filtros
@@ -1771,7 +1812,7 @@ class EmpleadosCompletosActivosDetalleView(APIView):
                 resultados = _enriquecer_empleados_completos_rows(list(queryset.values()))
 
                 cache.set(cache_key, resultados, 300)
-                return Response(resultados, status=status.HTTP_200_OK)
+                return _paginated_or_full_response(request, resultados)
             except Exception:
                 logger.exception("Error inesperado en {}".format(request.path))
                 return Response(
@@ -1781,7 +1822,7 @@ class EmpleadosCompletosActivosDetalleView(APIView):
         cache_key = "empleados_completos_activos_detalle"
         cached_data = cache.get(cache_key)
         if cached_data is not None:
-            return Response(cached_data, status=status.HTTP_200_OK)
+            return _paginated_or_full_response(request, cached_data)
 
         try:
             # 1. Obtener posiciones actualmente activas
@@ -1796,7 +1837,7 @@ class EmpleadosCompletosActivosDetalleView(APIView):
             resultados = _enriquecer_empleados_completos_rows(list(queryset.values()))
 
             cache.set(cache_key, resultados, 1200)
-            return Response(resultados, status=status.HTTP_200_OK)
+            return _paginated_or_full_response(request, resultados)
         except Exception:
             logger.exception("Error inesperado en {}".format(request.path))
             return Response(
@@ -3947,6 +3988,12 @@ class MovPosDetalleView(APIView):
             request.query_params.get("no_pagination", "false").strip().lower() == "true"
             or is_latest
         )
+        # `pagination=true`: usado sólo por clientes externos (rendicionCuentasBack vía
+        # eje_central_client.py) para forzar el paginador real de abajo aun cuando
+        # is_latest quedó en su default true. eje_central_front nunca manda este flag,
+        # así que su respuesta (envelope completo, sin slicing real) no cambia.
+        if request.query_params.get("pagination", "false").strip().lower() == "true":
+            no_pagination = False
         if no_pagination:
             resultados = list(queryset.values())
             counts = dict(
@@ -5971,7 +6018,7 @@ class BajasSigListView(APIView):
             cache_key = f"bajas_sig_list_{oficio}_{nivel}"
             cached_data = cache.get(cache_key)
             if cached_data is not None:
-                return Response(cached_data, status=status.HTTP_200_OK)
+                return _paginated_or_full_response(request, cached_data)
 
             try:
                 # Obtener posiciones de Plantilla1800Plazas que cumplan los filtros
@@ -5992,7 +6039,7 @@ class BajasSigListView(APIView):
                     BajasSig.objects.filter(posicion__in=posiciones_list).values()
                 )
                 cache.set(cache_key, bajas, 300)
-                return Response(bajas, status=status.HTTP_200_OK)
+                return _paginated_or_full_response(request, bajas)
             except Exception:
                 logger.exception("Error inesperado en {}".format(request.path))
                 return Response(
@@ -6002,11 +6049,11 @@ class BajasSigListView(APIView):
         cache_key = "bajas_sig_list"
         cached_data = cache.get(cache_key)
         if cached_data is not None:
-            return Response(cached_data, status=status.HTTP_200_OK)
+            return _paginated_or_full_response(request, cached_data)
 
         bajas = list(BajasSig.objects.all().values())
         cache.set(cache_key, bajas, 1200)
-        return Response(bajas, status=status.HTTP_200_OK)
+        return _paginated_or_full_response(request, bajas)
 
 
 class BajasMotivosPieView(APIView):
@@ -6454,13 +6501,43 @@ class MovimientosPersonalPagination(PageNumberPagination):
     max_page_size = 10000
 
 
+def _finalize_mov_completo_rows(rows):
+    """
+    Replica dos conversiones que CpTblMovCompleto290526Serializer hacía gratis
+    vía DRF y que `.values()` deja crudas:
+
+    - `fecha_ult_actz` es el único DateTimeField del modelo (USE_TZ=True) —
+      el resto son DateField (sin hora ni tz, no necesitan esto). DRF lo
+      convierte a hora local antes de formatear; sin pasar por un campo de
+      DRF, el JSONEncoder lo deja en UTC ("Z") — correría las fechas ~6h
+      contra lo que ya mostraba el front.
+    - `sal_base` (DecimalField) — DRF por default serializa Decimal como
+      STRING con 2 decimales fijos (`COERCE_DECIMAL_TO_STRING`, default
+      True) y `None` como `''` (cadena vacía, no `null`); el JSONEncoder de
+      `.values()` lo deja como número JSON crudo. Distinto tipo para el
+      front si no se replica.
+    """
+    from decimal import Decimal
+
+    from django.utils import timezone
+
+    for r in rows:
+        if r.get("fecha_ult_actz") is not None:
+            r["fecha_ult_actz"] = timezone.localtime(r["fecha_ult_actz"])
+        sal_base = r.get("sal_base")
+        r["sal_base"] = (
+            format(sal_base.quantize(Decimal("0.01")), "f") if sal_base is not None else ""
+        )
+    return rows
+
+
 class MovimientosPersonalListView(APIView):
     view_permission = "authentication.view_plantilla_movimientos"
     pagination_class = MovimientosPersonalPagination
 
     def get(self, request):
         from .models import CpTblMovCompleto290526
-        from .serializers import CpTblMovCompleto290526Serializer
+        from .serializers import CP_TBL_MOV_COMPLETO_FIELDS
 
         queryset = CpTblMovCompleto290526.objects.all()
 
@@ -6611,22 +6688,26 @@ class MovimientosPersonalListView(APIView):
             # Default ordering
             queryset = queryset.order_by("-fecha_efectiva", "-sec")
 
+        # A partir de aquí la respuesta ya no necesita instancias de modelo —
+        # .values() evita fetch de objetos completos + to_representation por
+        # fila de CpTblMovCompleto290526Serializer (ModelSerializer plano,
+        # sin SerializerMethodField, pero igual paga overhead de DRF por cada
+        # una de hasta 155k filas). ~2.7x más rápido medido con datos reales.
+        queryset = queryset.values(*CP_TBL_MOV_COMPLETO_FIELDS)
+
         # Excel download or full list without pagination
         no_pagination = (
             request.query_params.get("no_pagination", "false").strip().lower() == "true"
         )
         if no_pagination:
-            serializer = CpTblMovCompleto290526Serializer(queryset, many=True)
-            return Response(serializer.data)
+            return Response(_finalize_mov_completo_rows(list(queryset)))
 
         paginator = self.pagination_class()
         page = paginator.paginate_queryset(queryset, request, view=self)
         if page is not None:
-            serializer = CpTblMovCompleto290526Serializer(page, many=True)
-            return paginator.get_paginated_response(serializer.data)
+            return paginator.get_paginated_response(_finalize_mov_completo_rows(list(page)))
 
-        serializer = CpTblMovCompleto290526Serializer(queryset, many=True)
-        return Response(serializer.data)
+        return Response(_finalize_mov_completo_rows(list(queryset)))
 
 
 class OrganigramaDeptoView(APIView):
