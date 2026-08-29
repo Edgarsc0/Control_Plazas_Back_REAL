@@ -1,5 +1,6 @@
 import datetime
 import json
+import re
 import logging
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -34,6 +35,9 @@ from rest_framework.views import APIView
 
 from .models import (
     AlineacionOrganizacionalHistorico,
+    AnuenciaAnexo,
+    AnuenciaAnexo3Version,
+    AnuenciaJustificacionCatalogo,
     CatAcciones,
     CatAccionesMotivos,
     CatCorreccionPosicion,
@@ -84,6 +88,11 @@ from .celda_override import (
 )
 from .nivel_jerarquico_sync import aplicar_prioridad_nivel_jerarquico
 from .serializers import (
+    AnuenciaAnexo3VersionDetailSerializer,
+    AnuenciaAnexo3VersionListSerializer,
+    AnuenciaAnexoDetailSerializer,
+    AnuenciaAnexoListSerializer,
+    AnuenciaJustificacionCatalogoSerializer,
     CatAccionesMotivosSerializer,
     CatAccionesSerializer,
     CatNivelJerarquicoPlazaSerializer,
@@ -7433,6 +7442,136 @@ class OrganigramaAnamViewSet(AuditedViewSetMixin, viewsets.ModelViewSet):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+class AnuenciaAnexoViewSet(viewsets.ModelViewSet):
+    """
+    Historial del ANEXO 2 (sub-tab "Anuencia" de Mov. Posiciones, ver
+    AnuenciaTab.jsx). No usa `AuditedViewSetMixin` (ese sólo lleva un
+    "modificado_por" genérico): aquí se necesitan 3 eventos de auditoría
+    distintos — creó / modificó / generó — ver docstring de `AnuenciaAnexo`.
+
+    Sin `destroy`: es un historial, no un CRUD donde borrar tenga sentido
+    (ver `http_method_names`, sin "delete"/"put" — sólo `partial_update`,
+    nunca reemplazo completo).
+
+    `GET` (list/retrieve) usa el mismo permiso que el resto de Anuencia
+    (`AnuenciaLookupView`/`AnuenciaSugerenciasView`); `POST`/`PATCH`/`generar`
+    caen al mismo permiso por no declarar `edit_permission` (ver
+    `HasModulePermission`) — no hay un permiso "editar anuencia" separado hoy.
+    """
+
+    queryset = AnuenciaAnexo.objects.select_related("creado_por", "actualizado_por", "generado_por").all()
+    view_permission = "authentication.view_plantilla_mov_posiciones"
+    http_method_names = ["get", "post", "patch", "head", "options"]
+
+    def get_queryset(self):
+        qs = self.queryset
+        if self.action == "list":
+            # El listado ordena por -actualizado_en (Meta.ordering) y
+            # AnuenciaAnexoListSerializer sólo necesita agregados sobre
+            # `hojas` (ver total_hojas/total_filas/unidades_administrativas),
+            # no su contenido. Sin `defer`, MySQL tiene que hacer el filesort
+            # del ORDER BY cargando esa columna JSON completa por fila —con
+            # anexos de 800+ plazas eso pesa cientos de KB por renglón y
+            # agota sort_buffer_size (error 1038, "Out of sort memory").
+            # Diferirla evita el filesort pesado; Django la trae aparte,
+            # fila por fila y por PK (sin sort), sólo para las que se sirvan.
+            qs = qs.defer("hojas")
+        return qs
+
+    def get_serializer_class(self):
+        return AnuenciaAnexoListSerializer if self.action == "list" else AnuenciaAnexoDetailSerializer
+
+    def perform_create(self, serializer):
+        # Crear ya NO implica generar: el botón "Guardar" de AnuenciaTab.jsx
+        # crea/actualiza el registro sin descargar nada, así que un anexo
+        # puede existir con `veces_generado=0` (nunca se ha bajado su .xlsx).
+        # El flujo de "Descargar Anexo 2" sigue estampando generado_por/
+        # generado_en aparte, con una llamada explícita a `generar/` justo
+        # después de crear (ver handleExportar en el front).
+        serializer.save(creado_por=self.request.user, actualizado_por=self.request.user)
+
+    def perform_update(self, serializer):
+        serializer.save(actualizado_por=self.request.user)
+
+    @action(detail=True, methods=["post"])
+    def generar(self, request, pk=None):
+        """Descarga de un anexo YA guardado (re-generar desde el historial o
+        volver a bajar el .xlsx de uno abierto) — estampa quién y cuándo,
+        e incrementa el contador, sin tocar el contenido del anexo."""
+        from django.utils import timezone
+
+        anexo = self.get_object()
+        anexo.generado_por = request.user
+        anexo.generado_en = timezone.now()
+        anexo.veces_generado = F("veces_generado") + 1
+        anexo.save(update_fields=["generado_por", "generado_en", "veces_generado"])
+        anexo.refresh_from_db()
+        return Response(AnuenciaAnexoDetailSerializer(anexo).data)
+
+
+class AnuenciaAnexo3VersionViewSet(viewsets.ModelViewSet):
+    """
+    Historial de versiones guardadas del Anexo 3 (FUMP) de un Anexo 2 — el
+    Anexo 3 se puede corregir a mano arrastrando plazas entre hojas del
+    resultado (ver Anexo3Editor.jsx), y como esa corrección es editable, un
+    mismo Anexo 2 puede tener varias versiones guardadas. Mismo patrón que
+    AnuenciaAnexoViewSet (sin `destroy`/`put`, sólo 2 eventos de auditoría).
+
+    `list` es SIEMPRE por Anexo 2 (`?anexo=<id>`) — no tiene sentido listar
+    versiones de Anexo 3 de todos los anexos juntos.
+    """
+
+    queryset = AnuenciaAnexo3Version.objects.select_related("creado_por", "actualizado_por").all()
+    view_permission = "authentication.view_plantilla_mov_posiciones"
+    http_method_names = ["get", "post", "patch", "head", "options"]
+
+    def get_queryset(self):
+        qs = self.queryset
+        if self.action == "list":
+            anexo_id = self.request.query_params.get("anexo")
+            if not anexo_id:
+                return qs.none()
+            qs = qs.filter(anexo_id=anexo_id)
+            # Mismo motivo que en AnuenciaAnexoViewSet: no cargar el JSON
+            # grande (`grupos`) en el SELECT que hace el ORDER BY del listado.
+            qs = qs.defer("grupos")
+        return qs
+
+    def list(self, request, *args, **kwargs):
+        if not request.query_params.get("anexo"):
+            return Response(
+                {"error": "Falta el parámetro 'anexo' para listar versiones de Anexo 3."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return super().list(request, *args, **kwargs)
+
+    def get_serializer_class(self):
+        return AnuenciaAnexo3VersionListSerializer if self.action == "list" else AnuenciaAnexo3VersionDetailSerializer
+
+    def perform_create(self, serializer):
+        serializer.save(creado_por=self.request.user, actualizado_por=self.request.user)
+
+    def perform_update(self, serializer):
+        serializer.save(actualizado_por=self.request.user)
+
+
+class AnuenciaJustificacionCatalogoViewSet(viewsets.ModelViewSet):
+    """
+    Catálogo de justificaciones reutilizables del Anexo 2 (ver
+    AnuenciaJustificacionCatalogo) — alta y baja desde el modal de catálogo
+    en AnuenciaTab.jsx. Sin `put`/`patch`: no hay UI de edición, sólo agregar
+    una entrada nueva o eliminar una existente.
+    """
+
+    queryset = AnuenciaJustificacionCatalogo.objects.select_related("creado_por").all()
+    serializer_class = AnuenciaJustificacionCatalogoSerializer
+    view_permission = "authentication.view_plantilla_mov_posiciones"
+    http_method_names = ["get", "post", "delete", "head", "options"]
+
+    def perform_create(self, serializer):
+        serializer.save(creado_por=self.request.user)
+
+
 class CatNivelJerarquicoPlazaViewSet(AuditedViewSetMixin, viewsets.ModelViewSet):
     """
     CRUD + acciones en bloque del catálogo cat_nivel_jerarquico_plaza.
@@ -7720,6 +7859,198 @@ class CuadroVacanciaView(APIView):
         try:
             resultados = CuadroVacancia.objects.all().order_by("-fecha").values()
             return Response(list(resultados), status=status.HTTP_200_OK)
+        except Exception:
+            logger.exception("Error inesperado en {}".format(request.path))
+            return Response(
+                {"error": "Error interno del servidor"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+# Ramo presupuestal de la ANAM — fijo para todo el sistema (una sola
+# dependencia, no un catálogo). No hay ningún campo "ramo" en la BD (ni en
+# EMPLEADOS_COMPLETOS_SIG, ni en el catálogo de corrección, ni en MOV_POS):
+# se confirmó contra los ~11 mil códigos reales de cat_correccion_posicion
+# que el primer segmento SIEMPRE es "06", así que hardcodearlo es más
+# confiable que parsearlo del código (un código mal capturado sin ese
+# prefijo rompería el parseo en silencio; el ramo nunca cambia).
+RAMO_ANAM = "06"
+
+
+def _parse_unidad_responsable(codigo):
+    """``"06-H00-001794"`` → ``"H00"``; ``"EV-2026-06-H00-034236"`` → ``"H00"``.
+
+    A diferencia de Ramo (ver ``RAMO_ANAM``), la Unidad Responsable sí varía
+    por código, así que se sigue leyendo del segundo segmento. Las plazas
+    eventuales anteponen ``EV-<año>-``. Devuelve ``""`` si el formato no es
+    reconocible — el usuario siempre puede escribir esa celda a mano.
+    """
+    partes = [p for p in str(codigo or "").strip().split("-") if p]
+    if partes and partes[0].upper() == "EV":
+        partes = partes[2:]  # descarta "EV" y el año
+    return partes[1] if len(partes) >= 2 else ""
+
+
+# El Anexo 2 sólo admite estas 3 opciones en "Tipo de contratación"; los
+# subtipos internos (PASEM, "Eventual N.C.") se colapsan al tipo que les
+# corresponde en el formato oficial.
+_TIPO_CONTRATACION_ANEXO2 = {
+    "11301": "Permanente",
+    "11401": "Permanente",
+    "12201": "Eventual",
+}
+
+
+class AnuenciaSugerenciasView(APIView):
+    """Autocompletado del Código Federal de Puesto mientras el usuario escribe
+    (sub-tab "Anuencia", ver AnuenciaTab.jsx) — propone los códigos que
+    coinciden para que no tenga que copiar el código exacto de otro lado.
+
+    Sólo propone posiciones VACANTES: el Anexo 2 es para solicitar ocupación,
+    así que sugerir una ya ocupada sería un error casi seguro. Si el usuario
+    de todas formas escribe (o pega) el código exacto de una ocupada, eso
+    sigue resolviéndose normal en ``AnuenciaLookupView``, que sí avisa
+    "Plaza OCUPADA" — aquí sólo se filtra la LISTA de sugerencias.
+
+    Filtra sobre ``_get_mapa_codigos()`` (cacheado 30 min, ~11 mil códigos),
+    no contra la BD, así que es seguro llamarlo en cada tecla con debounce.
+    """
+
+    view_permission = "authentication.view_plantilla_mov_posiciones"
+    LIMITE_DEFAULT = 10
+    LIMITE_MAXIMO = 20
+
+    def get(self, request, *args, **kwargs):
+        termino = (request.query_params.get("q") or "").strip().upper()
+        if len(termino) < 2:
+            return Response([], status=status.HTTP_200_OK)
+
+        try:
+            limite = min(int(request.query_params.get("limit", self.LIMITE_DEFAULT)), self.LIMITE_MAXIMO)
+        except (TypeError, ValueError):
+            limite = self.LIMITE_DEFAULT
+
+        try:
+            mapa = _get_mapa_codigos()
+            posiciones_ocupadas = _get_posiciones_ocupadas_set()
+
+            # "Empieza con" antes que "contiene en medio": lo más probable es
+            # que el usuario esté escribiendo el código desde el principio,
+            # pero no se descarta el resto (las eventuales anteponen
+            # "EV-<año>-", así que buscar "H00" no debe fallar por no estar
+            # al inicio).
+            empieza_con, contiene = [], []
+            for pos, cod in mapa.items():
+                if pos in posiciones_ocupadas:
+                    continue
+                cod_str = str(cod or "")
+                if not cod_str:
+                    continue
+                cod_upper = cod_str.upper()
+                if cod_upper.startswith(termino):
+                    empieza_con.append((pos, cod_str))
+                elif termino in cod_upper:
+                    contiene.append((pos, cod_str))
+
+            coincidencias = (sorted(empieza_con, key=lambda t: t[1]) + sorted(contiene, key=lambda t: t[1]))[:limite]
+
+            posiciones = [pos for pos, _ in coincidencias]
+            mapa_denominacion = dict(
+                EmpleadosCompletosSig.objects.filter(posicion__in=posiciones).values_list(
+                    "posicion", "nombre_puesto_funcional"
+                )
+            )
+
+            resultados = [
+                {"codigo": cod, "posicion": pos, "denominacion_puesto": mapa_denominacion.get(pos) or ""}
+                for pos, cod in coincidencias
+            ]
+            return Response(resultados, status=status.HTTP_200_OK)
+        except Exception:
+            logger.exception("Error inesperado en {}".format(request.path))
+            return Response(
+                {"error": "Error interno del servidor"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class AnuenciaLookupView(APIView):
+    """Autollenado de una fila del Anexo 2 (Solicitud de Ocupación de Plazas) a
+    partir del Código Federal de Puesto — sub-tab "Anuencia" dentro de
+    Mov. Posiciones (ver AnuenciaTab.jsx).
+
+    El código es la llave que el usuario captura; de ahí se resuelve la
+    posición (``cat_correccion_posicion``, misma fuente que la columna "Código"
+    de Plantilla Detalle) y con ella el resto de las columnas que el sistema ya
+    conoce. Todo lo devuelto es editable en el front: esto es una comodidad de
+    captura, no una restricción.
+    """
+
+    view_permission = "authentication.view_plantilla_mov_posiciones"
+
+    def get(self, request, *args, **kwargs):
+        codigo = (request.query_params.get("codigo") or "").strip()
+        if not codigo:
+            return Response(
+                {"error": "El parámetro 'codigo' es requerido."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            # `_get_mapa_codigos` es {posicion: codigo} y está cacheado 30 min;
+            # aquí se necesita al revés. Se invierte sobre el mapa ya cacheado
+            # en vez de consultar la tabla, para no pegarle a la BD por cada
+            # tecla del capturista.
+            mapa = _get_mapa_codigos()
+            objetivo = codigo.upper()
+            posicion = next(
+                (pos for pos, cod in mapa.items() if str(cod or "").strip().upper() == objetivo),
+                None,
+            )
+            if not posicion:
+                return Response(
+                    {"error": f"No se encontró ninguna posición con el código '{codigo}'."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            fila = EmpleadosCompletosSig.objects.filter(posicion=posicion).values().first()
+            if not fila:
+                return Response(
+                    {"error": f"La posición {posicion} no existe en la plantilla."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            unidad_responsable = _parse_unidad_responsable(codigo)
+            partida = str(fila.get("partida") or "").strip()
+            ocupada = posicion in _get_posiciones_ocupadas_set()
+
+            return Response(
+                {
+                    "codigo": codigo,
+                    "posicion": posicion,
+                    "ramo": RAMO_ANAM,
+                    "unidad_responsable": unidad_responsable,
+                    "denominacion_puesto": fila.get("nombre_puesto_funcional") or "",
+                    "nivel_salarial": fila.get("nivel") or "",
+                    # El formato oficial reporta 0 salvo que el ejecutor del
+                    # gasto indique otro rango; se deja editable.
+                    "rango_salarial": "0",
+                    "numero_plazas": 1,
+                    # Sólo aplica a Honorarios — vacío para plaza presupuestal.
+                    "numero_horas": "",
+                    "tipo_contratacion": _TIPO_CONTRATACION_ANEXO2.get(partida, ""),
+                    "fecha_inicio_vacancia": _get_fecha_vacancia_bulk_map([posicion]).get(posicion, ""),
+                    # id de MOV_POS (misma resolución "latest" que la fecha de
+                    # arriba) para que el front pueda abrir el mismo modal de
+                    # Detalle de Vacancia que usan Mov. Posiciones y Plantilla
+                    # Detalle (VacanciaDetalleModal, keyed por este id).
+                    "mov_pos_id": _get_mov_pos_id_bulk_map([posicion]).get(posicion),
+                    # Contexto para el capturista (no son columnas del Anexo 2):
+                    # si la plaza está ocupada, solicitar su ocupación es un error.
+                    "unidad_administrativa": fila.get("unidad_administrativa") or "",
+                    "ocupada": ocupada,
+                    "ocupante": (fila.get("nombres") or "") if ocupada else "",
+                },
+                status=status.HTTP_200_OK,
+            )
         except Exception:
             logger.exception("Error inesperado en {}".format(request.path))
             return Response(
@@ -8295,6 +8626,399 @@ class AduanasOcupacionVacanciaView(APIView):
 
             cache.set(cache_key, resultado, 1200)
             return Response(resultado, status=status.HTTP_200_OK)
+        except Exception:
+            logger.exception("Error inesperado en {}".format(request.path))
+            return Response(
+                {"error": "Error interno del servidor"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+# --- Anexo 3 (FUMP) a partir del Anexo 2 -------------------------------------
+
+# Códigos presupuestales que NUNCA se valúan (confirmado con el área): las
+# plazas de laudo no tienen tabulador, y las PASEM/SEM son personal
+# SEDENA/SEMAR con un tabulador militar que este sistema no administra.
+# No es un error del cruce — se excluyen a propósito y se reportan como aviso.
+_CODIGOS_NO_VALUABLES = {
+    "LAUDO": "Plaza de laudo — no se valúa presupuestalmente.",
+}
+_PREFIJOS_NO_VALUABLES = (
+    ("SEM", "Plaza PASEM (SEDENA/SEMAR) — tabulador militar, fuera de este sistema."),
+)
+
+
+def _motivo_no_valuable(codigo_presupuestal):
+    """Devuelve el motivo por el que un código está excluido de valuación, o
+    ``None`` si sí debería valuarse."""
+    cod = str(codigo_presupuestal or "").strip().upper()
+    if cod in _CODIGOS_NO_VALUABLES:
+        return _CODIGOS_NO_VALUABLES[cod]
+    for prefijo, motivo in _PREFIJOS_NO_VALUABLES:
+        if cod.startswith(prefijo):
+            return motivo
+    return None
+
+
+_PALABRAS_IGNORADAS_SIGLAS = {
+    "de", "del", "la", "las", "el", "los", "y", "e", "en", "con", "sede", "a", "al",
+    "oficina",
+}
+
+
+def _siglas_unidad(nombre):
+    """Siglas de una Unidad Administrativa a partir de sus iniciales.
+
+    "Dirección General de Modernización Equipamiento e Infraestructura
+    Aduanera" → "DGMEIA". Sólo se usa como respaldo cuando la posición no
+    trae "DG o Aduana compactada" (que es el nombre corto oficial y siempre
+    gana). Es una propuesta: el usuario puede corregirla en la pantalla de
+    previa antes de generar.
+    """
+    palabras = [p for p in re.split(r"[\s,\.]+", str(nombre or "")) if p]
+    iniciales = [
+        p[0].upper() for p in palabras if p.lower() not in _PALABRAS_IGNORADAS_SIGLAS
+    ]
+    return "".join(iniciales)[:20]
+
+
+class AnuenciaAnexo3View(APIView):
+    """Agrupa y valúa las plazas de un Anexo 2 para generar el Anexo 3 (FUMP).
+
+    El Anexo 3 se calcula POR HOJA DEL ANEXO 2 Y POR PERÍODO: cada hoja del
+    libro de salida cubre plazas de UNA sola hoja del Anexo 2 con UNA sola
+    fecha de alta, porque la valuación sólo puede correr contra un período a
+    la vez. Se toma como cierto que cada hoja del Anexo 2 ya es una sola
+    Unidad Administrativa (así la organiza el capturista, p.ej. una hoja
+    "UAF"); si esa hoja mezcla varias fechas de alta, se reparte aquí en
+    varios grupos —uno por fecha—, y cada grupo será una hoja del Anexo 3,
+    nombrada "<nombre de la hoja del Anexo 2> <fecha de alta>" (p.ej.
+    "UAF 01-07-2026", "UAF 16-07-2026").
+
+    A diferencia de una versión anterior, la Unidad Administrativa YA NO se
+    usa para decidir el agrupamiento (antes se resolvía desde el Código
+    Federal de Puesto precisamente para no confiar en el campo de texto
+    libre de la hoja); ahora la identidad de la hoja del Anexo 2 manda. La UA
+    resuelta por código se sigue usando únicamente para los datos que sí
+    dependen de la posición (encabezado del documento, unidad_responsable,
+    etc.), no para decidir qué plazas comparten hoja.
+
+    POST body::
+
+        {
+          "hojas": [ {"filas": [{"codigo": ..., "fecha_alta_solicitada": "YYYY-MM-DD",
+                                 "numero_plazas": 1}, ...]}, ... ],
+          "overrides": {"<clave_grupo>": {"fecha_fin": "YYYY-MM-DD", "nombre_hoja": "..."}}
+        }
+
+    Devuelve los grupos ya valuados más el detalle de todo lo que quedó fuera
+    (``avisos``), para que el front pueda decir exactamente qué no se pudo
+    incluir y por qué en vez de generar un Anexo 3 incompleto en silencio.
+    """
+
+    view_permission = "authentication.view_plantilla_mov_posiciones"
+
+    def post(self, request, *args, **kwargs):
+        from presupuesto.views import _build_catalogo_index, _resolver_catalogo
+        from presupuesto.valuacion import calcular_meses_periodo, calcular_valuacion
+
+        hojas = request.data.get("hojas") or []
+        overrides = request.data.get("overrides") or {}
+        # {"<codigo>": "<clave_de_grupo_destino>"} — reacomodo manual hecho en
+        # Anexo3Editor.jsx (arrastrar una plaza a otra hoja del resultado).
+        # Sólo se respeta si el grupo destino es del MISMO período que la
+        # plaza (ver más abajo); si no, se ignora en silencio. Si la clave de
+        # destino no corresponde a ninguna hoja del Anexo 2 (se arrastró la
+        # plaza a la zona "+ Agregar una hoja"), se crea una hoja nueva sin
+        # heredar nombre ni Unidad Administrativa de nadie (ver
+        # `identidades_nuevas` más abajo).
+        reasignaciones = request.data.get("reasignaciones") or {}
+
+        try:
+            # 1) Aplanar las filas capturadas y quedarse sólo con las que
+            #    traen código (una fila en blanco del cuadro no es una plaza).
+            #    El Anexo 3 SÓLO valúa plazas Eventuales: las de carácter
+            #    Permanente se cubren con el presupuesto regularizable ya
+            #    autorizado y nunca pasan por esta calculadora, aunque sí
+            #    puedan capturarse en el Anexo 2 (que cubre ambos tipos).
+            filas = []
+            avisos = []
+            for indice_hoja, hoja in enumerate(hojas):
+                nombre_hoja_anexo2 = str(hoja.get("nombre") or "").strip() or f"Hoja {indice_hoja + 1}"
+                for fila in (hoja.get("filas") or []):
+                    codigo = str(fila.get("codigo") or "").strip()
+                    if not codigo:
+                        continue
+                    tipo_contratacion = str(fila.get("tipo_contratacion") or "").strip()
+                    if tipo_contratacion and tipo_contratacion.lower() != "eventual":
+                        avisos.append({
+                            "codigo": codigo, "hoja": nombre_hoja_anexo2,
+                            "motivo": f"Plaza de tipo {tipo_contratacion!r} — el Anexo 3 sólo valúa plazas Eventuales.",
+                        })
+                        continue
+                    filas.append((indice_hoja, nombre_hoja_anexo2, fila, codigo))
+
+            if not filas:
+                return Response(
+                    {"error": "El Anexo 2 no tiene ninguna plaza capturada."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            # 2) Código Federal de Puesto -> posición (mismo mapa que usa el
+            #    autollenado del Anexo 2).
+            mapa = _get_mapa_codigos()
+            codigo_a_posicion = {
+                str(cod or "").strip().upper(): pos for pos, cod in mapa.items()
+            }
+
+            resueltas = []
+            for indice_hoja, nombre_hoja, fila, codigo in filas:
+                posicion = codigo_a_posicion.get(codigo.upper())
+                if not posicion:
+                    avisos.append({
+                        "codigo": codigo, "hoja": nombre_hoja,
+                        "motivo": "No se encontró ninguna posición con ese Código Federal de Puesto.",
+                    })
+                    continue
+                fecha_alta = str(fila.get("fecha_alta_solicitada") or "").strip()
+                if not fecha_alta:
+                    avisos.append({
+                        "codigo": codigo, "hoja": nombre_hoja,
+                        "motivo": "Sin 'Fecha de alta solicitada' — es la que define el período a valuar.",
+                    })
+                    continue
+                try:
+                    cantidad = int(fila.get("numero_plazas") or 1)
+                except (TypeError, ValueError):
+                    cantidad = 1
+                resueltas.append({
+                    "codigo": codigo, "posicion": posicion, "hoja": nombre_hoja, "hoja_indice": indice_hoja,
+                    "fecha_alta": fecha_alta, "cantidad": max(1, cantidad),
+                })
+
+            # 3) Datos de plantilla detalle para todas las posiciones de golpe.
+            posiciones = [r["posicion"] for r in resueltas]
+            detalle = {
+                d["posicion"]: d
+                for d in EmpleadosCompletosSig.objects.filter(posicion__in=posiciones).values(
+                    "posicion", "codigo_presupuestal", "nivel", "escala", "partida",
+                    "unidad_administrativa", "dg_o_aduana_compactada", "nombre_puesto_funcional",
+                )
+            }
+            # "DG o Aduana compactada" viene vacía en ~2/3 de las filas crudas
+            # de ZAFIRO; el catálogo de corrección la completa (mismo mecanismo
+            # que Plantilla Detalle, ver `_completar_aduana_row`).
+            mapa_dg = _get_mapa_correccion("dg_o_aduana_compactada")
+
+            # 4) Agrupar por (hoja del Anexo 2, fecha de alta) y resolver el
+            #    tabulador de cada plaza — la UA resuelta por código ya NO
+            #    decide el agrupamiento (ver docstring de la clase).
+            #
+            #    Identidad "natural" de cada clave ANTES de aplicar
+            #    `reasignaciones` — se calcula aparte porque una plaza
+            #    reasignada puede procesarse antes que la plaza que
+            #    naturalmente "es dueña" de esa hoja; sin este mapa, el grupo
+            #    nuevo heredaría por accidente el nombre de quien llegó
+            #    primero en vez del de su hoja de origen real.
+            identidad_por_clave = {}
+            for r in resueltas:
+                clave_natural = f"{r['hoja_indice']}||{r['fecha_alta']}"
+                identidad_por_clave.setdefault(
+                    clave_natural, {"hoja_indice": r["hoja_indice"], "nombre_hoja_anexo2": r["hoja"]}
+                )
+
+            # Hoja indice reservado para las hojas creadas al arrastrar una
+            # plaza fuera de cualquier hoja existente (ver Anexo3Editor.jsx,
+            # zona "+ Agregar una hoja"): no existen en `identidad_por_clave`
+            # porque no las "posee" ninguna plaza de forma natural, así que se
+            # ordenan siempre al final y se les da nombre/UA en blanco para
+            # que el usuario los ponga a mano.
+            NUEVA_HOJA_BASE_INDICE = 10 ** 9
+            identidades_nuevas = {}
+
+            index = _build_catalogo_index()
+            grupos = {}
+            for r in resueltas:
+                d = detalle.get(r["posicion"])
+                if not d:
+                    avisos.append({
+                        "codigo": r["codigo"], "hoja": r["hoja"],
+                        "motivo": "La posición no existe en la plantilla.",
+                    })
+                    continue
+
+                cod_presupuestal = str(d.get("codigo_presupuestal") or "").strip()
+                motivo = _motivo_no_valuable(cod_presupuestal)
+                if motivo:
+                    avisos.append({
+                        "codigo": r["codigo"], "hoja": r["hoja"],
+                        "posicion": r["posicion"], "codigo_presupuestal": cod_presupuestal,
+                        "motivo": motivo,
+                    })
+                    continue
+
+                plaza = _resolver_catalogo(index, cod_presupuestal, d.get("escala"), d.get("nivel"))
+                if not plaza:
+                    avisos.append({
+                        "codigo": r["codigo"], "hoja": r["hoja"],
+                        "posicion": r["posicion"], "codigo_presupuestal": cod_presupuestal,
+                        "motivo": (
+                            f"El código presupuestal {cod_presupuestal} (nivel {d.get('nivel') or '—'}, "
+                            f"escala {d.get('escala') or '—'}) no está en el catálogo de tabuladores."
+                        ),
+                    })
+                    continue
+
+                ua = str(d.get("unidad_administrativa") or "").strip()
+                clave_natural = f"{r['hoja_indice']}||{r['fecha_alta']}"
+                clave_destino = str(reasignaciones.get(r["codigo"]) or "").strip()
+                # Un reacomodo manual sólo se respeta si el grupo destino es
+                # del MISMO período que la plaza — nunca se mezclan períodos,
+                # ni aunque el front mande un estado desactualizado (p.ej. el
+                # usuario cambió la fecha de alta después de haber arrastrado
+                # la plaza a otra hoja).
+                clave = clave_destino if clave_destino and clave_destino.endswith(f"||{r['fecha_alta']}") else clave_natural
+
+                es_hoja_nueva = False
+                if clave == clave_natural:
+                    identidad = identidad_por_clave.get(
+                        clave, {"hoja_indice": r["hoja_indice"], "nombre_hoja_anexo2": r["hoja"]}
+                    )
+                elif clave in identidad_por_clave:
+                    identidad = identidad_por_clave[clave]
+                else:
+                    # Clave que no pertenece a ninguna hoja del Anexo 2: se
+                    # arrastró una plaza a la zona "+ Agregar una hoja". No
+                    # hereda nombre ni UA de nadie — el usuario los define.
+                    es_hoja_nueva = True
+                    identidad = identidades_nuevas.setdefault(
+                        clave,
+                        {"hoja_indice": NUEVA_HOJA_BASE_INDICE + len(identidades_nuevas), "nombre_hoja_anexo2": "Hoja nueva"},
+                    )
+
+                grupo = grupos.get(clave)
+                if grupo is None:
+                    corta = "" if es_hoja_nueva else (
+                        str(d.get("dg_o_aduana_compactada") or "").strip()
+                        or mapa_dg.get(r["posicion"], "").strip()
+                        or _siglas_unidad(ua)
+                    )
+                    grupo = grupos[clave] = {
+                        "clave": clave,
+                        "hoja_indice": identidad["hoja_indice"],
+                        "nombre_hoja_anexo2": identidad["nombre_hoja_anexo2"],
+                        "unidad_administrativa": "" if es_hoja_nueva else ua,
+                        "unidad_corta": corta,
+                        "fecha_inicio": r["fecha_alta"],
+                        "plazas": [],
+                        "_cantidades": {},
+                        "_cuadro": {},
+                    }
+                unidad_responsable = _parse_unidad_responsable(r["codigo"])
+                partida = str(d.get("partida") or "").strip()
+
+                # Detalle fila por fila del Anexo 2 — es lo que arma la lista
+                # arrastrable de Anexo3Editor.jsx (`detalle_plazas` en la
+                # respuesta), NO el cuadro impreso agregado (`plazas`, más
+                # abajo). `unidad_administrativa` es sólo informativa en esa
+                # lista (ver columna junto a "Código presupuestal").
+                grupo["plazas"].append({
+                    "codigo": r["codigo"], "posicion": r["posicion"],
+                    "codigo_presupuestal": cod_presupuestal,
+                    "catalogo_id": plaza.id, "catalogo_codigo": plaza.codigo,
+                    "nivel": plaza.nivel, "zona": plaza.zona,
+                    "denominacion": plaza.denominacion,
+                    "partida": partida,
+                    "unidad_responsable": unidad_responsable,
+                    "unidad_administrativa": ua,
+                    "sueldo": float(plaza.sueldo),
+                    "cantidad": r["cantidad"],
+                })
+
+                # Renglón del cuadro impreso: el Anexo 3 no lista una línea por
+                # posición, sino una por tipo de plaza (mismo código
+                # presupuestal + nivel + zona) con el total de plazas sumado.
+                clave_fila = (unidad_responsable, cod_presupuestal, plaza.id)
+                cuadro = grupo["_cuadro"].get(clave_fila)
+                if cuadro is None:
+                    cuadro = grupo["_cuadro"][clave_fila] = {
+                        "unidad_responsable": unidad_responsable,
+                        # Sólo informativa en la previa (ver Anexo3PreviewModal,
+                        # columna junto a "Código presupuestal"): ya NO decide
+                        # el agrupamiento (ver docstring de la clase), así que
+                        # una misma hoja puede legítimamente traer renglones
+                        # con UA distinta si el capturista mezcló varias en la
+                        # misma hoja del Anexo 2.
+                        "unidad_administrativa": ua,
+                        "codigo_presupuestal": cod_presupuestal,
+                        "nivel": plaza.nivel,
+                        "zona": plaza.zona,
+                        "denominacion": plaza.denominacion,
+                        "partida": partida,
+                        "cantidad": 0,
+                        "sueldo": float(plaza.sueldo),
+                        "compensacion": float(plaza.compensacion_garantizada),
+                    }
+                cuadro["cantidad"] += r["cantidad"]
+                grupo["_cantidades"][plaza.id] = grupo["_cantidades"].get(plaza.id, 0) + r["cantidad"]
+
+            # 5) Valuar cada grupo. Por default el período corre hasta el 31 de
+            #    diciembre del año de la fecha de alta (igual que el Anexo 3
+            #    oficial de referencia); el front puede mandar otro `fecha_fin`.
+            salida = []
+            for clave, g in sorted(grupos.items(), key=lambda kv: (kv[1]["hoja_indice"], kv[1]["fecha_inicio"])):
+                ov = overrides.get(clave) or {}
+                fecha_inicio = datetime.datetime.strptime(g["fecha_inicio"], "%Y-%m-%d").date()
+                fecha_fin_str = str(ov.get("fecha_fin") or "").strip() or f"{fecha_inicio.year}-12-31"
+                try:
+                    fecha_fin = datetime.datetime.strptime(fecha_fin_str, "%Y-%m-%d").date()
+                except ValueError:
+                    fecha_fin = datetime.date(fecha_inicio.year, 12, 31)
+                    fecha_fin_str = fecha_fin.isoformat()
+
+                meses = calcular_meses_periodo(fecha_inicio, fecha_fin)
+                plazas_input = [
+                    {"catalogo_id": cid, "plazas": qty} for cid, qty in g["_cantidades"].items()
+                ]
+                valuacion = calcular_valuacion(meses, plazas_input) if meses > 0 else None
+
+                nombre_hoja = str(ov.get("nombre_hoja") or "").strip() or (
+                    f"{g['nombre_hoja_anexo2']} {fecha_inicio.strftime('%d-%m-%Y')}"
+                )
+
+                # Los importes "por período" del cuadro dependen de `meses`, que
+                # sólo se conoce aquí (ya con el override aplicado).
+                filas_cuadro = []
+                for fila_cuadro in g["_cuadro"].values():
+                    filas_cuadro.append({
+                        **fila_cuadro,
+                        "sueldo_periodo": fila_cuadro["sueldo"] * fila_cuadro["cantidad"] * meses,
+                        "compensacion_periodo": fila_cuadro["compensacion"] * fila_cuadro["cantidad"] * meses,
+                    })
+                filas_cuadro.sort(key=lambda f: (f["nivel"] or "", f["codigo_presupuestal"] or ""))
+
+                salida.append({
+                    "clave": clave,
+                    "nombre_hoja": nombre_hoja,
+                    "unidad_administrativa": g["unidad_administrativa"],
+                    "unidad_corta": g["unidad_corta"],
+                    "fecha_inicio": g["fecha_inicio"],
+                    "fecha_fin": fecha_fin_str,
+                    "meses": meses,
+                    "total_plazas": sum(g["_cantidades"].values()),
+                    "plazas": filas_cuadro,
+                    "detalle_plazas": g["plazas"],
+                    "valuacion": valuacion,
+                    "periodo_invalido": meses <= 0,
+                })
+
+            # Ya viene en orden (hoja del Anexo 2, fecha de alta): se construyó
+            # iterando `grupos` ordenado así arriba — no hace falta reordenar
+            # por UA resuelta, que ya no es lo que define el agrupamiento.
+
+            return Response(
+                {"grupos": salida, "avisos": avisos, "total_grupos": len(salida)},
+                status=status.HTTP_200_OK,
+            )
         except Exception:
             logger.exception("Error inesperado en {}".format(request.path))
             return Response(

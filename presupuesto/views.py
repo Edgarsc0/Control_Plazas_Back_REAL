@@ -8,6 +8,7 @@ from .serializers import (
     ConstantesSistemaSerializer,
     ConceptosPresupuestalSerializer,
 )
+from .valuacion import calcular_valuacion
 from django.db import connection
 from django.db.models import Q
 
@@ -225,164 +226,10 @@ class CatalogoPlazasViewSet(viewsets.ModelViewSet):
         if not plazas_input:
             return Response({"error": "No se enviaron plazas para calcular"}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Map catalog ids to quantities
-        plazas_map = {item['catalogo_id']: item['plazas'] for item in plazas_input}
-        ids = list(plazas_map.keys())
-
-        # Fetch relevant catalog entries
-        catalogo = CatalogoPlazas.objects.filter(id__in=ids)
-        
-        # Intermediate sums
-        u305 = 0 # sueldo
-        y305 = 0 # apoyo_capacitacion
-        aa305 = 0 # compensacion_garantizada
-        w306 = 0 # asignaciones adicionales (despensa + prev_social + ayuda_serv + apoyo_cap + ayuda_trans)
-        ab305 = 0 # gastos_medicos (hardcoded to 0 in todo.md example)
-        ai305 = 0 # cuota_issste
-        aj305 = 0 # cuota_fovissste
-        ak305 = 0 # cuota_cesantia
-        bh305 = 0 # epr_quincenal (if tiene_epr)
-        
-        u_gv1 = 0 # grupo_vacaciones = 1
-        u_gv2 = 0 # grupo_vacaciones = 2
-        u_gg1 = 0 # grupo_gratificacion = 1
-        u_gg2 = 0 # grupo_gratificacion = 2
-        
-        total_plazas = 0
-        tabla_2022 = []
-
-        for plaza in catalogo:
-            p_qty = plazas_map.get(plaza.id, 0)
-            if p_qty <= 0:
-                continue
-            
-            total_plazas += p_qty
-            
-            # Sums
-            u305 += float(plaza.sueldo) * p_qty
-            y305 += float(plaza.apoyo_capacitacion) * p_qty
-            aa305 += float(plaza.compensacion_garantizada) * p_qty
-            
-            asignaciones_plaza = (
-                float(plaza.despensa) +
-                float(plaza.prev_social_multiple) +
-                float(plaza.ayuda_servicios) +
-                float(plaza.apoyo_capacitacion) +
-                float(plaza.ayuda_transporte)
-            )
-            w306 += asignaciones_plaza * p_qty
-            
-            ai305 += float(plaza.cuota_issste) * p_qty
-            aj305 += float(plaza.cuota_fovissste) * p_qty
-            ak305 += float(plaza.cuota_cesantia) * p_qty
-            
-            if plaza.tiene_epr:
-                bh305 += float(plaza.epr_quincenal) * p_qty
-            
-            # Vacation groups
-            if plaza.grupo_vacaciones == 1:
-                u_gv1 += float(plaza.sueldo) * p_qty
-            else:
-                u_gv2 += float(plaza.sueldo) * p_qty
-                
-            # Gratification groups
-            if plaza.grupo_gratificacion == 1:
-                u_gg1 += float(plaza.sueldo) * p_qty
-            else:
-                u_gg2 += float(plaza.sueldo) * p_qty
-
-            # Table 2022 row
-            tabla_2022.append({
-                "nivel": plaza.nivel,
-                "zona": plaza.zona,
-                "codigo": plaza.codigo,
-                "puesto": plaza.denominacion,
-                "plazas": p_qty,
-                "sueldo": float(plaza.sueldo),
-                "sueldo_colectivo_periodo": float(plaza.sueldo) * p_qty * meses,
-                "compensacion": float(plaza.compensacion_garantizada),
-                "compensacion_colectiva_periodo": float(plaza.compensacion_garantizada) * p_qty * meses,
-            })
-
-        # Calculations for 13201 and 13202
-        u322 = u_gv1 + u_gv2 + (u_gv2 * 0.15)
-        t_13201 = u322 / 3
-        r_13201 = (t_13201 * meses) / 12
-
-        u326 = (u_gg1 / 30) * 40 * 1.35
-        u327 = (u_gg2 / 30) * 40 * 1.17
-        t_13202 = u326 + u327
-        r_13202 = (t_13202 * meses) / 12
-
-        # Concept rows
-        r_12201 = u305 * meses
-        t_12201 = u305 * 12
-        r_15402 = aa305 * meses
-        t_15402 = aa305 * 12
-
-        conceptos_data = [
-            ("12201", "Sueldos Base", r_12201, t_12201),
-            ("13101", "(Reservado)", 0, 0),
-            ("13201", "Primas de vacaciones y dominical", r_13201, t_13201),
-            ("13202", "Gratificación de fin de año", r_13202, t_13202),
-            ("13409", "(Reservado)", 0, 0),
-            ("14101", "Aportaciones ISSSTE", ai305 * meses, ai305 * 12),
-            ("14201", "Aportaciones FOVISSSTE", aj305 * meses, aj305 * 12),
-            ("14401", "Cuota sindical (1.4%)", (r_12201 + r_15402) * 0.014, (t_12201 + t_15402) * 0.014),
-            ("14403", "Cuotas gastos médicos", ab305 * meses, ab305 * 12),
-            ("14404", "Seg. separación individualizado", 0, 0),
-            ("14405", "Seg. colectivo de retiro", 35.45 * total_plazas * meses, 35.45 * total_plazas * 12),
-            ("14301", "Aportación solidaria FOVISSSTE 2%", (u305 + y305) * meses * 0.02, (u305 + y305) * 12 * 0.02),
-            ("14105", "Cesantía edad avanzada", ak305 * meses, ak305 * 12),
-            ("14302", "Ahorro solidario (res.)", 0, 0),
-            ("15402", "Compensación Garantizada", r_15402, t_15402),
-            ("15403", "Asignaciones adicionales", w306 * meses, w306 * 12),
-        ]
-
-        tabla_q322_t348 = []
-        subtotal1 = {"periodo": 0, "anual": 0, "complemento": 0}
-        
-        for c, desc, r, t in conceptos_data:
-            row = {
-                "concepto": c,
-                "descripcion": desc,
-                "periodo": r,
-                "anual": t,
-                "complemento": t - r
-            }
-            tabla_q322_t348.append(row)
-            subtotal1["periodo"] += r
-            subtotal1["anual"] += t
-            subtotal1["complemento"] += (t - r)
-
-        c_15901 = {
-            "concepto": "15901",
-            "descripcion": "EPR Operativo",
-            "periodo": bh305 * meses,
-            "anual": bh305 * 12,
-            "complemento": (bh305 * 12) - (bh305 * meses)
-        }
-        tabla_q322_t348.append(c_15901)
-        
-        subtotal2 = {
-            "periodo": c_15901["periodo"],
-            "anual": c_15901["anual"],
-            "complemento": c_15901["complemento"]
-        }
-        
-        total = {
-            "periodo": subtotal1["periodo"] + subtotal2["periodo"],
-            "anual": subtotal1["anual"] + subtotal2["anual"],
-            "complemento": subtotal1["complemento"] + subtotal2["complemento"]
-        }
-
-        return Response({
-            "tabla_2022": tabla_2022,
-            "tabla_q322_t348": tabla_q322_t348,
-            "subtotal1": subtotal1,
-            "subtotal2": subtotal2,
-            "total": total
-        })
+        # La aritmética vive en `presupuesto/valuacion.py` porque la comparte
+        # con la generación del Anexo 3 (ver AnuenciaAnexo3View): los importes
+        # del simulador y los del Anexo 3 impreso tienen que ser los mismos.
+        return Response(calcular_valuacion(meses, plazas_input))
 
 
 class ConstantesSistemaViewSet(viewsets.ModelViewSet):

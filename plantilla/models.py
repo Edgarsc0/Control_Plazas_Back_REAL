@@ -1886,3 +1886,156 @@ class FiltroGuardado(models.Model):
 
     def __str__(self):
         return f"{self.usuario} - {self.vista} - {self.nombre}"
+
+
+class AnuenciaAnexo(models.Model):
+    """
+    Historial de capturas del ANEXO 2 (Solicitud de Ocupación de Plazas y/o
+    Contratación de Honorarios) — sub-tab "Anuencia" de Mov. Posiciones (ver
+    AnuenciaTab.jsx). Cada registro es un anexo completo (un libro de Excel)
+    que se puede recuperar para seguir editando o volver a generar su .xlsx.
+
+    Tres eventos de auditoría distintos, cada uno con su propio usuario y
+    fecha (no un solo "modificado_por" genérico, ver AuditedViewSetMixin en
+    views.py): quién lo CREÓ (una sola vez), quién lo MODIFICÓ por última vez
+    (cada guardado) y quién lo GENERÓ por última vez (cada descarga del
+    .xlsx, con contador — un mismo anexo puede descargarse varias veces a lo
+    largo de su vida, p. ej. si se corrige y se vuelve a mandar).
+
+    ``on_delete=models.PROTECT`` en los 3: la baja de un usuario nunca debe
+    borrar en cascada un registro de auditoría (mismo criterio que
+    CeldaOverride.usuario).
+    """
+
+    # Un anexo es un LIBRO con N hojas (cada una se vuelve una pestaña del
+    # .xlsx generado, ver construirWorkbookAnexo2 en anexo2Excel.js). Cada
+    # hoja trae su propio cuadro de plazas, su Unidad Administrativa y su
+    # justificación — una solicitud puede cubrir varias unidades, cada una
+    # con su propia argumentación.
+    #
+    # Forma de cada elemento (la escribe el front tal cual, ver
+    # `crearHojaVacia` en anexo2Schema.js):
+    #     {
+    #       "_id": "<uuid local, sólo para el key de React>",
+    #       "nombre": "<nombre de la pestaña>",
+    #       "unidad_administrativa": "...",
+    #       "justificacion": "...",
+    #       "filas": [ {<las 12 columnas del cuadro>}, ... ],
+    #       "_unidades_detectadas": ["...", ...]
+    #     }
+    #
+    # Es un JSONField y no un modelo hijo a propósito: las hojas no se
+    # consultan, filtran ni referencian por separado — sólo se guardan y se
+    # devuelven completas junto con su anexo.
+    hojas = models.JSONField(default=list)
+    firma_nombre = models.CharField(max_length=255, blank=True, default="Nombre y Firma de la DRH")
+    firma_puesto = models.CharField(max_length=255, blank=True, default="Directora de Recursos Humanos")
+    nombre_archivo = models.CharField(
+        max_length=255, blank=True, default="Anexo 2 solicitud de ocupación de plazas"
+    )
+
+    creado_por = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="anexos_anuencia_creados"
+    )
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    actualizado_por = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True,
+        related_name="anexos_anuencia_modificados",
+    )
+    actualizado_en = models.DateTimeField(auto_now=True)
+
+    generado_por = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True,
+        related_name="anexos_anuencia_generados",
+    )
+    generado_en = models.DateTimeField(null=True, blank=True)
+    veces_generado = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ["-actualizado_en"]
+        verbose_name = "Anexo de Anuencia"
+        verbose_name_plural = "Anexos de Anuencia"
+
+    def __str__(self):
+        return f"Anexo {self.id} · {self.nombre_archivo or 'sin nombre'}"
+
+
+class AnuenciaAnexo3Version(models.Model):
+    """
+    Una "versión" guardada del Anexo 3 (FUMP) generado a partir de un
+    AnuenciaAnexo (Anexo 2). El Anexo 3 se arma agrupando las plazas del
+    Anexo 2 por hoja + fecha de alta (ver AnuenciaAnexo3View), pero ese
+    agrupamiento se puede corregir a mano arrastrando plazas entre hojas del
+    resultado (ver Anexo3Editor.jsx) — como esa corrección es editable, un
+    mismo Anexo 2 puede tener varios acomodos guardados a la vez, cada uno
+    una versión distinta.
+
+    Se guardan tanto los AJUSTES (`overrides`/`reasignaciones`, lo mínimo
+    para poder recalcular contra los datos actuales al reabrir) como un
+    `grupos` ya calculado (snapshot, sólo para listar/previsualizar sin
+    tener que recomputar) — al reabrir una versión para seguir editando
+    SIEMPRE se recalcula en el momento contra `overrides`/`reasignaciones`,
+    nunca se confía ciegamente en el snapshot (el tabulador pudo cambiar
+    desde que se guardó).
+    """
+
+    anexo = models.ForeignKey(AnuenciaAnexo, on_delete=models.CASCADE, related_name="anexo3_versiones")
+    nombre = models.CharField(max_length=255)
+
+    # {"<clave_de_grupo>": {"fecha_fin": "YYYY-MM-DD", "nombre_hoja": "..."}}
+    overrides = models.JSONField(default=dict, blank=True)
+    # {"<codigo_federal_de_puesto>": "<clave_de_grupo_destino>"}
+    reasignaciones = models.JSONField(default=dict, blank=True)
+    # Snapshot de la respuesta de AnuenciaAnexo3View al momento de guardar.
+    grupos = models.JSONField(default=list, blank=True)
+
+    creado_por = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="anexo3_versiones_creadas"
+    )
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    actualizado_por = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True,
+        related_name="anexo3_versiones_modificadas",
+    )
+    actualizado_en = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-actualizado_en"]
+        constraints = [
+            models.UniqueConstraint(fields=["anexo", "nombre"], name="uniq_anexo3_version_nombre_por_anexo"),
+        ]
+        verbose_name = "Versión de Anexo 3"
+        verbose_name_plural = "Versiones de Anexo 3"
+
+    def __str__(self):
+        return f"Anexo3 v.{self.id} · {self.nombre} (anexo {self.anexo_id})"
+
+
+class AnuenciaJustificacionCatalogo(models.Model):
+    """
+    Catálogo de justificaciones reutilizables para la tabla de "Justificación"
+    del Anexo 2 (sub-tab "Anuencia" de Mov. Posiciones, ver AnuenciaTab.jsx).
+
+    Muchas solicitudes repiten argumentos casi idénticos (p. ej. "cubrir
+    licencia médica", "carga de trabajo por incremento de operaciones"), así
+    que el usuario guarda aquí las que usa seguido y las inserta en la hoja
+    que esté editando con un clic (ver JustificacionCatalogoModal.jsx), en
+    vez de reescribirlas cada vez.
+    """
+
+    nombre = models.CharField(max_length=255)
+    texto = models.TextField()
+    creado_por = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="justificaciones_anuencia_creadas"
+    )
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["nombre"]
+        verbose_name = "Justificación de Anuencia (catálogo)"
+        verbose_name_plural = "Justificaciones de Anuencia (catálogo)"
+
+    def __str__(self):
+        return self.nombre

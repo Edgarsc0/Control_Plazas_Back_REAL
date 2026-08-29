@@ -1,5 +1,8 @@
 from rest_framework import serializers
 from .models import (
+    AnuenciaAnexo,
+    AnuenciaAnexo3Version,
+    AnuenciaJustificacionCatalogo,
     CatAcciones,
     CatAccionesMotivos,
     CatNivelJerarquicoPlaza,
@@ -69,3 +72,145 @@ class CatNivelJerarquicoPlazaSerializer(serializers.ModelSerializer):
         # nivel_jerarquico se deriva de descripcion_nivel_jerarquico en el modelo;
         # nvl_direc_origen sólo lo escribe la sincronización automática de ZAFIRO.
         read_only_fields = ["nivel_jerarquico", "nvl_direc_origen", "modificado_por", "fecha_modificacion"]
+
+
+# Campos de "quién" en vez del FK crudo — un historial que sólo mostrara el
+# id de usuario no serviría de mucho en pantalla (ver AnuenciaHistorialModal.jsx).
+class _UsuarioAuditoriaMixin(serializers.ModelSerializer):
+    creado_por_email = serializers.ReadOnlyField(source="creado_por.email")
+    actualizado_por_email = serializers.ReadOnlyField(source="actualizado_por.email")
+    generado_por_email = serializers.ReadOnlyField(source="generado_por.email")
+
+
+class AnuenciaAnexoListSerializer(_UsuarioAuditoriaMixin):
+    """Fila del historial (sub-tab Anuencia) — sólo el resumen del libro, sin
+    el contenido de sus hojas, para que listar el historial no transfiera el
+    cuadro entero de cada anexo (ver AnuenciaAnexoDetailSerializer para eso)."""
+
+    total_hojas = serializers.SerializerMethodField()
+    total_filas = serializers.SerializerMethodField()
+    unidades_administrativas = serializers.SerializerMethodField()
+
+    class Meta:
+        model = AnuenciaAnexo
+        fields = [
+            "id", "nombre_archivo", "total_hojas", "total_filas", "unidades_administrativas",
+            "creado_por_email", "creado_en",
+            "actualizado_por_email", "actualizado_en",
+            "generado_por_email", "generado_en", "veces_generado",
+        ]
+
+    def get_total_hojas(self, obj):
+        return len(obj.hojas or [])
+
+    def get_total_filas(self, obj):
+        """Plazas de TODO el libro, sumando las de cada hoja."""
+        return sum(len(hoja.get("filas") or []) for hoja in (obj.hojas or []))
+
+    def get_unidades_administrativas(self, obj):
+        """UAs distintas del libro, en orden de aparición — es lo que
+        identifica al anexo de un vistazo en el historial."""
+        vistas = []
+        for hoja in obj.hojas or []:
+            ua = (hoja.get("unidad_administrativa") or "").strip()
+            if ua and ua not in vistas:
+                vistas.append(ua)
+        return vistas
+
+
+class AnuenciaAnexoDetailSerializer(_UsuarioAuditoriaMixin):
+    """Anexo completo (todas sus hojas) — lo que se recupera al abrir uno del
+    historial para seguir editándolo o volver a generar su .xlsx."""
+
+    def validate_nombre_archivo(self, value):
+        """No se permiten dos libros con el mismo nombre (sin distinguir
+        mayúsculas ni espacios de sobra) — el nombre es lo único que
+        identifica a un anexo de un vistazo en el historial (ver
+        AnuenciaHistorialModal.jsx), así que un duplicado sería indistinguible
+        del original ahí. Se valida en cada guardado, no sólo al crear: un
+        anexo que cambia de nombre a uno ya usado debe rechazarse igual."""
+        nombre = (value or "").strip()
+        if nombre:
+            en_uso = AnuenciaAnexo.objects.filter(nombre_archivo__iexact=nombre)
+            if self.instance is not None:
+                en_uso = en_uso.exclude(pk=self.instance.pk)
+            if en_uso.exists():
+                raise serializers.ValidationError("Ya existe un anexo guardado con este nombre. Usa uno distinto.")
+        return value
+
+    class Meta:
+        model = AnuenciaAnexo
+        fields = [
+            "id", "hojas",
+            "firma_nombre", "firma_puesto", "nombre_archivo",
+            "creado_por_email", "creado_en",
+            "actualizado_por_email", "actualizado_en",
+            "generado_por_email", "generado_en", "veces_generado",
+        ]
+        read_only_fields = [
+            "creado_por_email", "creado_en", "actualizado_por_email", "actualizado_en",
+            "generado_por_email", "generado_en", "veces_generado",
+        ]
+
+
+class AnuenciaAnexo3VersionListSerializer(serializers.ModelSerializer):
+    """Fila del historial de versiones de un Anexo 3 (ver
+    Anexo3VersionesModal.jsx) — resumen desde el snapshot `grupos`, sin
+    mandar `overrides`/`reasignaciones`/`grupos` completos al listar."""
+
+    creado_por_email = serializers.ReadOnlyField(source="creado_por.email")
+    actualizado_por_email = serializers.ReadOnlyField(source="actualizado_por.email")
+    total_hojas = serializers.SerializerMethodField()
+    total_plazas = serializers.SerializerMethodField()
+
+    class Meta:
+        model = AnuenciaAnexo3Version
+        fields = [
+            "id", "anexo", "nombre", "total_hojas", "total_plazas",
+            "creado_por_email", "creado_en", "actualizado_por_email", "actualizado_en",
+        ]
+
+    def get_total_hojas(self, obj):
+        return len(obj.grupos or [])
+
+    def get_total_plazas(self, obj):
+        return sum(int(g.get("total_plazas") or 0) for g in (obj.grupos or []))
+
+
+class AnuenciaAnexo3VersionDetailSerializer(serializers.ModelSerializer):
+    """Versión completa — lo que se recupera al abrir una del historial para
+    seguir editándola (ver Anexo3Editor.jsx)."""
+
+    creado_por_email = serializers.ReadOnlyField(source="creado_por.email")
+    actualizado_por_email = serializers.ReadOnlyField(source="actualizado_por.email")
+
+    def validate_nombre(self, value):
+        """Mismo criterio que `validate_nombre_archivo` en
+        AnuenciaAnexoDetailSerializer, pero la unicidad es POR ANEXO: dos
+        Anexo 2 distintos sí pueden tener cada uno una versión "v1"."""
+        nombre = (value or "").strip()
+        if nombre:
+            anexo = self.instance.anexo if self.instance is not None else self.initial_data.get("anexo")
+            en_uso = AnuenciaAnexo3Version.objects.filter(anexo=anexo, nombre__iexact=nombre)
+            if self.instance is not None:
+                en_uso = en_uso.exclude(pk=self.instance.pk)
+            if en_uso.exists():
+                raise serializers.ValidationError("Ya existe una versión con este nombre para este Anexo 2.")
+        return value
+
+    class Meta:
+        model = AnuenciaAnexo3Version
+        fields = [
+            "id", "anexo", "nombre", "overrides", "reasignaciones", "grupos",
+            "creado_por_email", "creado_en", "actualizado_por_email", "actualizado_en",
+        ]
+        read_only_fields = ["creado_por_email", "creado_en", "actualizado_por_email", "actualizado_en"]
+
+
+class AnuenciaJustificacionCatalogoSerializer(serializers.ModelSerializer):
+    creado_por_email = serializers.ReadOnlyField(source="creado_por.email")
+
+    class Meta:
+        model = AnuenciaJustificacionCatalogo
+        fields = ["id", "nombre", "texto", "creado_por_email", "creado_en"]
+        read_only_fields = ["creado_por_email", "creado_en"]
