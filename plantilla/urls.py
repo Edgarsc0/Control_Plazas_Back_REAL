@@ -83,6 +83,7 @@ from .views import (
     DesgloseJerarquicoOcupadosView,
     AduanasOcupacionVacanciaView,
     ColumnasQuincenalView,
+    RotacionTitularesAduanasView,
 )
 
 urlpatterns = [
@@ -100,6 +101,11 @@ urlpatterns = [
         "movimientos-personal/historial/",
         MovimientosPersonalHistorialView.as_view(),
         name="movimientos-personal-historial",
+    ),
+    path(
+        "rotacion-titulares-aduanas/",
+        RotacionTitularesAduanasView.as_view(),
+        name="rotacion-titulares-aduanas",
     ),
     path(
         "organigrama-deptos/",

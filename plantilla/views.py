@@ -9105,3 +9105,221 @@ class AnuenciaAnexo3View(APIView):
             return Response(
                 {"error": "Error interno del servidor"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+
+class RotacionTitularesAduanasView(APIView):
+    """
+    Línea de tiempo de titularidad de las 50 aduanas del país.
+
+    Devuelve, por aduana, las gestiones de cada titular (entrada, salida, motivo,
+    movimientos ocurridos durante su gestión) y los periodos en que la aduana
+    quedó acéfala. Alimenta el subtab "Rotación de titulares de Aduanas" de
+    MovimientosPersonalTab.
+
+    El algoritmo vive en plantilla/rotacion_aduanas.py — ahí está documentado por
+    qué la aduana se resuelve por `un_admin` contra el catálogo de su época y no
+    por `desc_larga_un`. Esta vista solo hace las tres consultas y arma la
+    respuesta.
+
+    La derivación necesita la trayectoria COMPLETA de cada titular (no solo sus
+    movimientos en los dos puestos de titularidad), porque la fecha de salida de
+    una aduana es la del siguiente movimiento del empleado, que ya está fuera.
+
+    ?refrescar=1 salta el caché.
+    """
+
+    view_permission = (
+        "authentication.view_plantilla_mov_posiciones",
+        "authentication.view_plantilla_movimientos",
+    )
+
+    CACHE_KEY = "rotacion_titulares_aduanas_v1"
+    CACHE_TTL = 1800  # 30 min; la tabla de movimientos se recarga por lotes
+
+    def get(self, request):
+        from django.core.cache import cache
+
+        from .rotacion_aduanas import PUESTOS_TITULARIDAD, construir_rotacion
+
+        if request.query_params.get("refrescar") not in ("1", "true", "True"):
+            cacheado = cache.get(self.CACHE_KEY)
+            if cacheado is not None:
+                return Response(cacheado, status=status.HTTP_200_OK)
+
+        try:
+            catalogo = self._catalogo_unidades()
+            catalogo_puestos = {
+                (cd or "").strip(): nombre
+                for cd, nombre in CatPtoFunc.objects.exclude(
+                    cd_pto_funcional__isnull=True
+                ).values_list("cd_pto_funcional", "nombre_puesto_funcional")
+            }
+            movimientos = self._trayectorias_de_titulares()
+            adscripcion = self._adscripcion_por_plaza(
+                sorted({
+                    m["posicion"] for m in movimientos
+                    if m.get("posicion") and m.get("cd_puesto") in PUESTOS_TITULARIDAD
+                })
+            )
+
+            resultado = construir_rotacion(
+                movimientos,
+                catalogo_vigente=catalogo,
+                hoy=datetime.date.today(),
+                adscripcion_plaza=adscripcion,
+                catalogo_puestos=catalogo_puestos,
+            )
+            resultado = _serializar_fechas(resultado)
+
+            cache.set(self.CACHE_KEY, resultado, self.CACHE_TTL)
+            return Response(resultado, status=status.HTTP_200_OK)
+        except Exception:
+            logger.exception("Error inesperado en {}".format(request.path))
+            return Response(
+                {"error": "Error interno del servidor"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+    def _catalogo_unidades(self):
+        """{cd_ua: unidad_administrativa} desde EMPLEADOS_COMPLETOS_SIG.
+
+        Es el catálogo autoritativo: 65 códigos, de los cuales 101-150 son
+        exactamente las 50 aduanas.
+        """
+        from django.db import connection
+
+        from .rotacion_aduanas import normalizar_unidad
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT DISTINCT `Cd UA`, `Unidad Administrativa` "
+                "FROM EMPLEADOS_COMPLETOS_SIG "
+                "WHERE `Cd UA` IS NOT NULL AND `Unidad Administrativa` IS NOT NULL"
+            )
+            return {
+                (cd or "").strip(): normalizar_unidad(unidad)
+                for cd, unidad in cursor.fetchall()
+                if (cd or "").strip() and normalizar_unidad(unidad)
+            }
+
+    def _trayectorias_de_titulares(self):
+        """Trayectoria completa de todo empleado que alguna vez fue titular.
+
+        Dos pasos deliberados: primero los num_empleado distintos de los dos
+        puestos, después TODOS sus movimientos. Traer solo las filas de los dos
+        puestos dejaría sin fecha de salida a quien se fue a otro puesto.
+        """
+        from django.db import connection
+
+        from .rotacion_aduanas import PUESTOS_TITULARIDAD
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT DISTINCT num_empleado FROM cp_tbl_mov_completo_29_05_26 "
+                "WHERE cd_puesto IN (%s, %s) AND num_empleado IS NOT NULL",
+                list(PUESTOS_TITULARIDAD),
+            )
+            empleados = [row[0] for row in cursor.fetchall()]
+
+            if not empleados:
+                return []
+
+            marcadores = ", ".join(["%s"] * len(empleados))
+            cursor.execute(
+                f"""
+                SELECT
+                    id, posicion, num_empleado,
+                    nombre, ap_pat, ap_mat,
+                    accion, accion_nombre,
+                    motivo, motivo_nombre,
+                    fecha_efectiva, sec, fecha_captura,
+                    est_hr, estado_pago, partida_presup,
+                    un, un_admin,
+                    id_depto, depen_direc,
+                    plan_sal, grado, escala,
+                    puesto_ptal, nivel_tabular,
+                    gp_pago, prog_benef, sal_base,
+                    cd_puesto, ubicacion, id_estbl,
+                    salida_prevista, fecha_ult_actz, por,
+                    ult_inicio, fecha_inicial, gp_trabajo,
+                    grupo_cd_sal, antiguo_empr,
+                    rfc, curp, id_persona,
+                    desc_larga_p, nv_jerarquico, desc_larga_un,
+                    sexo, fecha_entrada, fecha_posicion
+                FROM cp_tbl_mov_completo_29_05_26
+                WHERE num_empleado IN ({marcadores})
+                  AND fecha_efectiva IS NOT NULL
+                ORDER BY num_empleado ASC, fecha_efectiva ASC, sec ASC, id ASC
+                """,
+                empleados,
+            )
+            columnas = [d[0] for d in cursor.description]
+            return [dict(zip(columnas, fila)) for fila in cursor.fetchall()]
+
+    def _adscripcion_por_plaza(self, plazas):
+        """Devuelve un callable (posicion, fecha) -> (cd_ua, motivo) según MOV_POS.
+
+        Sirve para detectar las filas de personal que conservaron el código de
+        unidad viejo después de que su plaza ya había sido renumerada.
+        """
+        from django.db import connection
+
+        if not plazas:
+            return lambda posicion, fecha: None
+
+        marcadores = ", ".join(["%s"] * len(plazas))
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"""
+                SELECT `Nº Pos Actual`, `F Efva`, `Unidad Adva#`, `Motivo`
+                FROM MOV_POS
+                WHERE `Nº Pos Actual` IN ({marcadores})
+                """,
+                list(plazas),
+            )
+            filas = cursor.fetchall()
+
+        historia = {}
+        for posicion, f_efva, cd_ua, motivo in filas:
+            fecha = _parsear_fecha_mov_pos(f_efva)
+            if fecha is None:
+                continue
+            historia.setdefault(posicion, []).append((fecha, (cd_ua or "").strip(), motivo or ""))
+        for registros in historia.values():
+            registros.sort(key=lambda r: r[0])
+
+        def adscripcion(posicion, fecha):
+            vigente = None
+            for f_registro, cd_ua, motivo in historia.get(posicion, ()):
+                if f_registro <= fecha:
+                    vigente = (cd_ua, motivo)
+                else:
+                    break
+            return vigente
+
+        return adscripcion
+
+
+def _parsear_fecha_mov_pos(valor):
+    """MOV_POS guarda las fechas como varchar; conviven dos formatos."""
+    if isinstance(valor, datetime.date):
+        return valor
+    if not valor:
+        return None
+    for formato in ("%Y-%m-%d", "%d/%m/%Y"):
+        try:
+            return datetime.datetime.strptime(valor.strip(), formato).date()
+        except (ValueError, AttributeError):
+            continue
+    return None
+
+
+def _serializar_fechas(valor):
+    """date/datetime -> ISO, recursivo. DRF no lo hace dentro de dicts anidados."""
+    if isinstance(valor, dict):
+        return {k: _serializar_fechas(v) for k, v in valor.items()}
+    if isinstance(valor, list):
+        return [_serializar_fechas(v) for v in valor]
+    if hasattr(valor, "isoformat"):
+        return valor.isoformat()
+    return valor
