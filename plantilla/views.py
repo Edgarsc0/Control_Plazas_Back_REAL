@@ -9134,7 +9134,12 @@ class RotacionTitularesAduanasView(APIView):
     )
 
     CACHE_KEY = "rotacion_titulares_aduanas_v1"
-    CACHE_TTL = 1800  # 30 min; la tabla de movimientos se recarga por lotes
+    # Sin expiración propia (`timeout=None` en cache.set más abajo) — se
+    # borra solo cuando algo la invalida explícitamente: `?refrescar=1` de
+    # esta misma vista, o /invalidar-cache/ (InvalidarCacheManualView,
+    # invalidar_todo_el_cache_servidor barre TODAS las keys de caché del
+    # servidor, esta incluida). Antes expiraba sola a los 30 min, lo que
+    # servía datos viejos hasta esa ventana aun después de invalidar a mano.
 
     def get(self, request):
         from django.core.cache import cache
@@ -9171,7 +9176,7 @@ class RotacionTitularesAduanasView(APIView):
             )
             resultado = _serializar_fechas(resultado)
 
-            cache.set(self.CACHE_KEY, resultado, self.CACHE_TTL)
+            cache.set(self.CACHE_KEY, resultado, timeout=None)
             return Response(resultado, status=status.HTTP_200_OK)
         except Exception:
             logger.exception("Error inesperado en {}".format(request.path))
