@@ -300,6 +300,11 @@ def _armar_gestion(aduana, tramo, siguiente, previo, aduana_de, catalogo_puestos
         "salida_completo": _fila_completa(salida, catalogo_puestos) if salida else None,
         "tipo_salida": tipo,
         "origen": origen,
+        # Fila cruda completa del movimiento previo a la entrada (todas las
+        # columnas del SQL) — cuando `origen.tipo == "PUESTO"`, "origen" solo
+        # trae el código de puesto; esto le da al front la plaza/UA/depto de
+        # donde vino, mismo criterio que `salida_completo` para el destino.
+        "origen_completo": _fila_completa(previo, catalogo_puestos) if previo is not None else None,
         "corregida_por_mov_pos": any(m.get("_override_mov_pos") for m in tramo),
         "total_movimientos": len(tramo),
         # Filas completas (todas las columnas), en el mismo orden cronológico
