@@ -8907,14 +8907,27 @@ class AnuenciaAnexo3View(APIView):
                     clave_natural, {"hoja_indice": r["hoja_indice"], "nombre_hoja_anexo2": r["hoja"]}
                 )
 
-            # Hoja indice reservado para las hojas creadas al arrastrar una
-            # plaza fuera de cualquier hoja existente (ver Anexo3Editor.jsx,
-            # zona "+ Agregar una hoja"): no existen en `identidad_por_clave`
-            # porque no las "posee" ninguna plaza de forma natural, así que se
-            # ordenan siempre al final y se les da nombre/UA en blanco para
-            # que el usuario los ponga a mano.
+            # Hojas creadas al soltar una plaza en un hueco entre hojas (o en
+            # el menú contextual "Generar nueva hoja a partir de esta plaza",
+            # ver Anexo3Editor.jsx): no existen en `identidad_por_clave`
+            # porque no las "posee" ninguna plaza de forma natural, así que
+            # se les da nombre/UA en blanco para que el usuario los ponga a
+            # mano. El front incrusta en la propia clave la posición donde se
+            # soltó ("nueva:<posición>:<uuid>||<fecha>") para que ese lugar
+            # en la lista se mantenga en los siguientes recálculos de esta
+            # misma sesión (la posición viaja con `reasignaciones`); si por
+            # algún motivo no se puede leer, cae hasta el final.
             NUEVA_HOJA_BASE_INDICE = 10 ** 9
             identidades_nuevas = {}
+
+            def _posicion_incrustada(clave):
+                coincide = re.match(r"^nueva:(-?[\d.]+):", clave)
+                if not coincide:
+                    return None
+                try:
+                    return float(coincide.group(1))
+                except ValueError:
+                    return None
 
             index = _build_catalogo_index()
             grupos = {}
@@ -8971,9 +8984,14 @@ class AnuenciaAnexo3View(APIView):
                     # arrastró una plaza a la zona "+ Agregar una hoja". No
                     # hereda nombre ni UA de nadie — el usuario los define.
                     es_hoja_nueva = True
+                    posicion_incrustada = _posicion_incrustada(clave)
                     identidad = identidades_nuevas.setdefault(
                         clave,
-                        {"hoja_indice": NUEVA_HOJA_BASE_INDICE + len(identidades_nuevas), "nombre_hoja_anexo2": "Hoja nueva"},
+                        {
+                            "hoja_indice": posicion_incrustada if posicion_incrustada is not None
+                            else NUEVA_HOJA_BASE_INDICE + len(identidades_nuevas),
+                            "nombre_hoja_anexo2": "Hoja nueva",
+                        },
                     )
 
                 grupo = grupos.get(clave)
