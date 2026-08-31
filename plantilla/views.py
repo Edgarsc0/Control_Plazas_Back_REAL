@@ -8788,7 +8788,7 @@ class AnuenciaAnexo3View(APIView):
         {
           "hojas": [ {"filas": [{"codigo": ..., "fecha_alta_solicitada": "YYYY-MM-DD",
                                  "numero_plazas": 1}, ...]}, ... ],
-          "overrides": {"<clave_grupo>": {"fecha_fin": "YYYY-MM-DD", "nombre_hoja": "..."}}
+          "overrides": {"<clave_grupo>": {"fecha_fin": "YYYY-MM-DD", "nombre_hoja": "...", "orden": 1.5}}
         }
 
     Devuelve los grupos ya valuados más el detalle de todo lo que quedó fuera
@@ -9063,8 +9063,22 @@ class AnuenciaAnexo3View(APIView):
             # 5) Valuar cada grupo. Por default el período corre hasta el 31 de
             #    diciembre del año de la fecha de alta (igual que el Anexo 3
             #    oficial de referencia); el front puede mandar otro `fecha_fin`.
+            #
+            #    Orden de las hojas: por defecto es `hoja_indice` (el orden en
+            #    que aparecen en el Anexo 2), pero el usuario puede arrastrar
+            #    una hoja completa en Anexo3Editor.jsx para reacomodarla —
+            #    ese reacomodo se guarda como `overrides[clave].orden` (un
+            #    número) y, si existe, manda sobre el orden natural. No toca
+            #    identidad/nombre/UA de la hoja, sólo en qué lugar se dibuja.
+            def _orden_de_hoja(clave, hoja_indice):
+                orden = (overrides.get(clave) or {}).get("orden")
+                return orden if isinstance(orden, (int, float)) else hoja_indice
+
             salida = []
-            for clave, g in sorted(grupos.items(), key=lambda kv: (kv[1]["hoja_indice"], kv[1]["fecha_inicio"])):
+            for clave, g in sorted(
+                grupos.items(),
+                key=lambda kv: (_orden_de_hoja(kv[0], kv[1]["hoja_indice"]), kv[1]["fecha_inicio"]),
+            ):
                 ov = overrides.get(clave) or {}
                 fecha_inicio = datetime.datetime.strptime(g["fecha_inicio"], "%Y-%m-%d").date()
                 fecha_fin_str = str(ov.get("fecha_fin") or "").strip() or f"{fecha_inicio.year}-12-31"
