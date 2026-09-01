@@ -8189,6 +8189,90 @@ class AnuenciaSugerenciasView(APIView):
             )
 
 
+def _resolver_datos_anuencia(codigos):
+    """
+    Resuelve el autollenado de Anuencia para VARIOS Códigos Federales de
+    Puesto de golpe — el mismo cruce que hace ``AnuenciaLookupView`` para uno
+    solo, factorizado aquí para poder reusarlo en bulk (ver
+    ``AnuenciaLookupBulkView``, que rellena Unidad de Negocio/Rango Salarial
+    al ABRIR un Anexo 2 ya guardado, sin pegarle a la BD código por código).
+
+    :returns: ``{codigo: {...los mismos campos que devuelve el GET de uno
+        solo, salvo "codigo"...} }`` — un código que no resuelve simplemente
+        no aparece en el dict (no es un error por sí solo en el caso bulk).
+    """
+    codigos_por_upper = {str(c).strip().upper(): str(c).strip() for c in codigos if str(c or "").strip()}
+    if not codigos_por_upper:
+        return {}
+
+    mapa = _get_mapa_codigos()
+    posicion_por_codigo = {}
+    for pos, cod in mapa.items():
+        cod_upper = str(cod or "").strip().upper()
+        if cod_upper in codigos_por_upper:
+            posicion_por_codigo[codigos_por_upper[cod_upper]] = pos
+
+    posiciones = list(posicion_por_codigo.values())
+    if not posiciones:
+        return {}
+
+    datos_mov_pos = _get_datos_mov_pos_bulk_map(posiciones)
+    cd_puestos = {str(d.get("cd_puesto") or "").strip() for d in datos_mov_pos.values()}
+    pares_presupuestal = set()
+    for d in datos_mov_pos.values():
+        puesto_ptal = str(d.get("puesto_ptal") or "").strip()
+        try:
+            escala = int(str(d.get("esc") or "").strip())
+        except ValueError:
+            escala = None
+        if puesto_ptal:
+            pares_presupuestal.add((puesto_ptal, escala))
+
+    mapa_puesto_funcional = _get_mapa_puesto_funcional(cd_puestos)
+    mapa_presupuestal = _get_mapa_cod_presupuestal(pares_presupuestal)
+    mapa_fecha_vacancia = _get_fecha_vacancia_bulk_map(posiciones)
+    mapa_mov_pos_id = _get_mov_pos_id_bulk_map(posiciones)
+    posiciones_ocupadas = _get_posiciones_ocupadas_set()
+    mapa_nombres = {
+        f["posicion"]: f["nombres"]
+        for f in EmpleadosCompletosSig.objects.filter(posicion__in=posiciones).values("posicion", "nombres")
+    }
+
+    resultado = {}
+    for codigo, posicion in posicion_por_codigo.items():
+        datos_mp = datos_mov_pos.get(posicion)
+        if not datos_mp:
+            continue
+        cd_puesto = str(datos_mp.get("cd_puesto") or "").strip()
+        puesto_ptal = str(datos_mp.get("puesto_ptal") or "").strip()
+        try:
+            escala = int(str(datos_mp.get("esc") or "").strip())
+        except ValueError:
+            escala = None
+        datos_presupuestal = mapa_presupuestal.get((puesto_ptal, escala), {})
+        ocupada = posicion in posiciones_ocupadas
+        resultado[codigo] = {
+            "codigo": codigo,
+            "posicion": posicion,
+            "ramo": RAMO_ANAM,
+            "unidad_responsable": _parse_unidad_responsable(codigo),
+            "denominacion_puesto": mapa_puesto_funcional.get(cd_puesto, ""),
+            "nivel_salarial": datos_presupuestal.get("nivel") or "",
+            "rango_salarial": (
+                str(datos_presupuestal["smn"]) if datos_presupuestal.get("smn") is not None else "0"
+            ),
+            "numero_plazas": 1,
+            "numero_horas": "",
+            "tipo_contratacion": _TIPO_CONTRATACION_ANEXO2.get(str(datos_mp.get("partida_ptal") or "").strip(), ""),
+            "fecha_inicio_vacancia": mapa_fecha_vacancia.get(posicion, ""),
+            "mov_pos_id": mapa_mov_pos_id.get(posicion),
+            "unidad_de_negocio": str(datos_mp.get("unidad_de_negocio") or "").strip(),
+            "ocupada": ocupada,
+            "ocupante": (mapa_nombres.get(posicion) or "") if ocupada else "",
+        }
+    return resultado
+
+
 class AnuenciaLookupView(APIView):
     """Autollenado de una fila del Anexo 2 (Solicitud de Ocupación de Plazas) a
     partir del Código Federal de Puesto — sub-tab "Anuencia" dentro de
@@ -8204,6 +8288,11 @@ class AnuenciaLookupView(APIView):
     tipo de contratación sale de ``partida_ptal`` (11301 Permanente, 12201
     Eventual). Todo lo devuelto es editable en el front: esto es una
     comodidad de captura, no una restricción.
+
+    La resolución en sí vive en ``_resolver_datos_anuencia`` (compartida con
+    ``AnuenciaLookupBulkView``, que resuelve muchos códigos de golpe para
+    rellenar Unidad de Negocio/Rango Salarial al abrir un Anexo 2 guardado
+    ANTES de que existieran esas dos columnas).
     """
 
     view_permission = "authentication.view_plantilla_mov_posiciones"
@@ -8217,78 +8306,48 @@ class AnuenciaLookupView(APIView):
             )
 
         try:
-            # `_get_mapa_codigos` es {posicion: codigo} y está cacheado 30 min;
-            # aquí se necesita al revés. Se invierte sobre el mapa ya cacheado
-            # en vez de consultar la tabla, para no pegarle a la BD por cada
-            # tecla del capturista.
-            mapa = _get_mapa_codigos()
-            objetivo = codigo.upper()
-            posicion = next(
-                (pos for pos, cod in mapa.items() if str(cod or "").strip().upper() == objetivo),
-                None,
-            )
-            if not posicion:
+            resultado = _resolver_datos_anuencia([codigo]).get(codigo)
+            if not resultado:
                 return Response(
                     {"error": f"No se encontró ninguna posición con el código '{codigo}'."},
                     status=status.HTTP_404_NOT_FOUND,
                 )
-
-            datos_mp = _get_datos_mov_pos_bulk_map([posicion]).get(posicion)
-            if not datos_mp:
-                return Response(
-                    {"error": f"La posición {posicion} no existe en MOV_POS."},
-                    status=status.HTTP_404_NOT_FOUND,
-                )
-
-            cd_puesto = str(datos_mp.get("cd_puesto") or "").strip()
-            puesto_ptal = str(datos_mp.get("puesto_ptal") or "").strip()
-            try:
-                escala = int(str(datos_mp.get("esc") or "").strip())
-            except ValueError:
-                escala = None
-
-            nombre_puesto_funcional = _get_mapa_puesto_funcional([cd_puesto]).get(cd_puesto, "")
-            datos_presupuestal = _get_mapa_cod_presupuestal([(puesto_ptal, escala)]).get(
-                (puesto_ptal, escala), {}
-            )
-
-            fila = EmpleadosCompletosSig.objects.filter(posicion=posicion).values("nombres").first() or {}
-            unidad_responsable = _parse_unidad_responsable(codigo)
-            partida = str(datos_mp.get("partida_ptal") or "").strip()
-            ocupada = posicion in _get_posiciones_ocupadas_set()
-
+            return Response(resultado, status=status.HTTP_200_OK)
+        except Exception:
+            logger.exception("Error inesperado en {}".format(request.path))
             return Response(
-                {
-                    "codigo": codigo,
-                    "posicion": posicion,
-                    "ramo": RAMO_ANAM,
-                    "unidad_responsable": unidad_responsable,
-                    "denominacion_puesto": nombre_puesto_funcional,
-                    "nivel_salarial": datos_presupuestal.get("nivel") or "",
-                    # Salario Mensual Neto (rc_cat_cod_presupuestal) — el
-                    # formato oficial reportaba 0 aquí antes de tener esta
-                    # fuente; ahora se autollena y sigue siendo editable.
-                    "rango_salarial": (
-                        str(datos_presupuestal["smn"]) if datos_presupuestal.get("smn") is not None else "0"
-                    ),
-                    "numero_plazas": 1,
-                    # Sólo aplica a Honorarios — vacío para plaza presupuestal.
-                    "numero_horas": "",
-                    "tipo_contratacion": _TIPO_CONTRATACION_ANEXO2.get(partida, ""),
-                    "fecha_inicio_vacancia": _get_fecha_vacancia_bulk_map([posicion]).get(posicion, ""),
-                    # id de MOV_POS (misma resolución "latest" que la fecha de
-                    # arriba) para que el front pueda abrir el mismo modal de
-                    # Detalle de Vacancia que usan Mov. Posiciones y Plantilla
-                    # Detalle (VacanciaDetalleModal, keyed por este id).
-                    "mov_pos_id": _get_mov_pos_id_bulk_map([posicion]).get(posicion),
-                    # Contexto para el capturista (no son columnas del Anexo 2):
-                    # si la plaza está ocupada, solicitar su ocupación es un error.
-                    "unidad_de_negocio": str(datos_mp.get("unidad_de_negocio") or "").strip(),
-                    "ocupada": ocupada,
-                    "ocupante": (fila.get("nombres") or "") if ocupada else "",
-                },
-                status=status.HTTP_200_OK,
+                {"error": "Error interno del servidor"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+
+class AnuenciaLookupBulkView(APIView):
+    """
+    Como ``AnuenciaLookupView`` pero para VARIOS códigos a la vez — usada al
+    ABRIR un Anexo 2 ya guardado (ver ``AnuenciaTab.jsx``,
+    ``backfillUnidadNegocioYRango``) para rellenar Unidad de Negocio y Rango
+    Salarial en filas capturadas ANTES de que esas dos columnas existieran
+    (antes, Unidad de Negocio no se guardaba y Rango Salarial se dejaba en
+    "0" fijo). Sólo rellena lo que venga vacío/"0" en el front — aquí siempre
+    se manda la resolución completa y actual, sin distinguir "ya se había
+    resuelto antes"; esa decisión de qué pisar es del front, no de aquí.
+
+    POST body: ``{"codigos": ["06-H00-001589", ...]}`` (hasta 500 por
+    llamada). Devuelve ``{"resultados": {"<codigo>": {...}}}`` — un código
+    que no resuelve simplemente no aparece en el dict.
+    """
+
+    view_permission = "authentication.view_plantilla_mov_posiciones"
+
+    def post(self, request, *args, **kwargs):
+        codigos = request.data.get("codigos") or []
+        if not isinstance(codigos, list) or not codigos:
+            return Response(
+                {"error": "'codigos' debe ser una lista no vacía."}, status=status.HTTP_400_BAD_REQUEST
+            )
+        codigos = codigos[:500]
+
+        try:
+            return Response({"resultados": _resolver_datos_anuencia(codigos)}, status=status.HTTP_200_OK)
         except Exception:
             logger.exception("Error inesperado en {}".format(request.path))
             return Response(

@@ -75,6 +75,7 @@ from .views import (
     AnuenciaAnexoViewSet,
     AnuenciaJustificacionCatalogoViewSet,
     AnuenciaLookupView,
+    AnuenciaLookupBulkView,
     AnuenciaSugerenciasView,
     CuadroVacanciaView,
     ConteoPlazasHistoricoSerieView,
@@ -513,6 +514,11 @@ urlpatterns = [
         "anuencia/lookup/",
         AnuenciaLookupView.as_view(),
         name="anuencia_lookup",
+    ),
+    path(
+        "anuencia/lookup_bulk/",
+        AnuenciaLookupBulkView.as_view(),
+        name="anuencia_lookup_bulk",
     ),
     path(
         "anuencia/sugerencias/",
