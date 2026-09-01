@@ -1130,6 +1130,42 @@ def _get_mapa_codigos():
     return _get_mapa_correccion("codigo")
 
 
+def _get_mapa_codigos_en_anuencia():
+    """
+    ``{codigo: nombre_archivo}`` — para cada Código Federal de Puesto que ya
+    aparece en la lista `filas` de alguna hoja de ALGÚN Anexo 2 guardado
+    (``AnuenciaAnexo``). Usada en Mov. Posiciones (``MovPosDetalleView``) para
+    marcar que una plaza ya está en proceso de anuencia y no debería volverse
+    a pedir en otro Anexo 2 — y en el flujo de "Agregar a Anexo 2" (ver
+    ``AnuenciaAgregarPlazasView``) para no duplicarla.
+
+    No hay noción de "Anexo 2 resuelto/cancelado" en el modelo (sin campo de
+    estado) — cualquier Anexo 2 guardado cuenta, sin importar cuán viejo sea.
+    Cacheado 5 min porque escanea el JSON de ``hojas`` de todos los Anexo 2;
+    se invalida también al crear/actualizar uno (ver ``AnuenciaAnexoViewSet``)
+    para que una plaza recién agregada no tarde en marcarse.
+    """
+    mapa = cache.get("mapa_codigos_en_anuencia")
+    if mapa is not None:
+        return mapa
+    mapa = {}
+    # `.order_by()` vacío cancela el `Meta.ordering` (-actualizado_en) del
+    # modelo — sin esto, MySQL hace un filesort cargando la columna `hojas`
+    # completa (JSON grande) por cada fila para poder ordenar, y con varios
+    # Anexo 2 de cientos de plazas se queda sin sort_buffer_size (error 1038,
+    # mismo caso ya resuelto en `AnuenciaAnexoViewSet.get_queryset` con
+    # `.defer("hojas")` — aquí no se puede diferir porque sí se necesita leer
+    # `hojas`, así que se cancela el ORDER BY en su lugar).
+    for nombre, hojas in AnuenciaAnexo.objects.order_by().values_list("nombre_archivo", "hojas"):
+        for hoja in hojas or []:
+            for fila in hoja.get("filas") or []:
+                codigo = str(fila.get("codigo") or "").strip()
+                if codigo and codigo not in mapa:
+                    mapa[codigo] = nombre
+    cache.set("mapa_codigos_en_anuencia", mapa, 300)
+    return mapa
+
+
 def _completar_aduana_row(r, mapa_tipo_aduana=None, mapa_dg_aduana=None):
     """
     Completa `tipo_de_aduana`/`dg_o_aduana_compactada` con el valor del
@@ -1336,6 +1372,99 @@ def _get_mov_pos_id_bulk_map(posiciones):
 
     qs = MovPos.objects.filter(id__in=sub_ids, no_pos_actual__in=list(posiciones))
     return dict(qs.values_list("no_pos_actual", "id"))
+
+
+def _get_datos_mov_pos_bulk_map(posiciones):
+    """
+    ``{posicion: {cd_puesto, puesto_ptal, esc, partida_ptal, unidad_de_negocio}}``
+    de la fila MÁS RECIENTE de MOV_POS para cada posición — fuente para el
+    autollenado del Anexo 2 (``AnuenciaLookupView``) y para la Unidad de
+    Negocio del Anexo 3 (``AnuenciaAnexo3View``), en vez de Plantilla Detalle
+    (``EmpleadosCompletosSig``). ``cd_puesto``/``puesto_ptal`` son las llaves
+    para cruzar contra ``CAT_PTO_FUNC``/``rc_cat_cod_presupuestal`` (ver
+    ``_get_mapa_puesto_funcional``/``_get_mapa_cod_presupuestal``).
+    """
+    mapa_ids = _get_mov_pos_id_bulk_map(posiciones)
+    if not mapa_ids:
+        return {}
+    filas = {
+        f["id"]: f
+        for f in MovPos.objects.filter(id__in=mapa_ids.values()).values(
+            "id", "cd_puesto", "puesto_ptal", "esc", "partida_ptal", "unidad_de_negocio"
+        )
+    }
+    return {pos: filas[mov_id] for pos, mov_id in mapa_ids.items() if mov_id in filas}
+
+
+def _get_mapa_puesto_funcional(codigos_puesto):
+    """``{cd_puesto: nombre_puesto_funcional}`` desde CAT_PTO_FUNC."""
+    codigos = {str(c).strip() for c in codigos_puesto if c}
+    if not codigos:
+        return {}
+    return dict(
+        CatPtoFunc.objects.filter(cd_pto_funcional__in=codigos).values_list(
+            "cd_pto_funcional", "nombre_puesto_funcional"
+        )
+    )
+
+
+def _get_mapa_cod_presupuestal(pares_codigo_escala):
+    """``{(puesto_ptal, escala): {nivel, smn}}`` desde rc_cat_cod_presupuestal
+    (catálogo "Códigos Presupuestales" en Catálogos > Estructura
+    Organizacional) — llave compuesta código+escala, igual que en BD."""
+    pares = {(c, e) for c, e in pares_codigo_escala if c and e is not None}
+    if not pares:
+        return {}
+    codigos = {c for c, _ in pares}
+    filas = RcCatCodPresupuestal.objects.filter(codigo_presupuestal__in=codigos).values(
+        "codigo_presupuestal", "escala", "nivel", "smn"
+    )
+    return {(f["codigo_presupuestal"], f["escala"]): f for f in filas}
+
+
+def _escala_entera(valor):
+    try:
+        return int(str(valor or "").strip())
+    except ValueError:
+        return None
+
+
+def enriquecer_mov_pos_rows(resultados):
+    """
+    Agrega a cada fila de MOV_POS (ya con sus campos crudos vía `.values()`)
+    las mismas columnas "resueltas" que ya autollena el Anexo 2 — Puesto,
+    Nivel Salarial, Salario Mensual Neto y Tipo de contratación (ver
+    `AnuenciaLookupView`/`_get_datos_mov_pos_bulk_map`) — y si la posición ya
+    está en algún Anexo 2 guardado, en qué archivo. Requiere que cada fila ya
+    traiga `codigo` (bolt-on de `_get_mapa_codigos`, ver los tres bucles de
+    `MovPosDetalleView`). Muta `resultados` in-place; no hace nada si viene
+    vacío.
+    """
+    if not resultados:
+        return
+
+    cd_puestos = {r.get("cd_puesto") for r in resultados if r.get("cd_puesto")}
+    pares_presupuestal = {
+        (r.get("puesto_ptal"), _escala_entera(r.get("esc")))
+        for r in resultados
+        if r.get("puesto_ptal")
+    }
+    mapa_puesto_funcional = _get_mapa_puesto_funcional(cd_puestos)
+    mapa_presupuestal = _get_mapa_cod_presupuestal(pares_presupuestal)
+    mapa_en_anuencia = _get_mapa_codigos_en_anuencia()
+
+    for r in resultados:
+        r["denominacion_puesto"] = mapa_puesto_funcional.get(r.get("cd_puesto"), "")
+        datos_presupuestal = mapa_presupuestal.get(
+            (r.get("puesto_ptal"), _escala_entera(r.get("esc"))), {}
+        )
+        r["nivel_salarial"] = datos_presupuestal.get("nivel") or ""
+        smn = datos_presupuestal.get("smn")
+        r["salario_mensual_neto"] = str(smn) if smn is not None else ""
+        r["tipo_contratacion"] = _TIPO_CONTRATACION_ANEXO2.get(
+            str(r.get("partida_ptal") or "").strip(), ""
+        )
+        r["anuencia_anexo_nombre"] = mapa_en_anuencia.get(str(r.get("codigo") or "").strip(), "")
 
 
 def populate_movpos_occupant_details(resultados, posiciones_ocupadas):
@@ -4027,6 +4156,7 @@ class MovPosDetalleView(APIView):
                     r, pos, posiciones_ocupadas, fecha_anuencia_overrides,
                     fecha_anuencia_overrides_texto, fecha_anuencia_baseline_texto,
                 )
+            enriquecer_mov_pos_rows(resultados)
 
             is_excel_mode = (
                 request.query_params.get("no_pagination", "false").strip().lower()
@@ -4080,6 +4210,7 @@ class MovPosDetalleView(APIView):
                     r, pos, posiciones_ocupadas, fecha_anuencia_overrides,
                     fecha_anuencia_overrides_texto, fecha_anuencia_baseline_texto,
                 )
+            enriquecer_mov_pos_rows(resultados)
             return paginator.get_paginated_response(resultados)
 
         resultados = list(queryset.values())
@@ -4114,6 +4245,7 @@ class MovPosDetalleView(APIView):
                 r, pos, posiciones_ocupadas, fecha_anuencia_overrides,
                 fecha_anuencia_overrides_texto, fecha_anuencia_baseline_texto,
             )
+        enriquecer_mov_pos_rows(resultados)
         return Response(resultados)
 
 
@@ -7570,9 +7702,13 @@ class AnuenciaAnexoViewSet(viewsets.ModelViewSet):
         # generado_en aparte, con una llamada explícita a `generar/` justo
         # después de crear (ver handleExportar en el front).
         serializer.save(creado_por=self.request.user, actualizado_por=self.request.user)
+        # Un Anexo 2 nuevo puede traer plazas que Mov. Posiciones debe marcar
+        # de inmediato como "ya en anuencia" (ver `_get_mapa_codigos_en_anuencia`).
+        cache.delete("mapa_codigos_en_anuencia")
 
     def perform_update(self, serializer):
         serializer.save(actualizado_por=self.request.user)
+        cache.delete("mapa_codigos_en_anuencia")
 
     @action(detail=True, methods=["post"])
     def generar(self, request, pk=None):
@@ -8060,9 +8196,14 @@ class AnuenciaLookupView(APIView):
 
     El código es la llave que el usuario captura; de ahí se resuelve la
     posición (``cat_correccion_posicion``, misma fuente que la columna "Código"
-    de Plantilla Detalle) y con ella el resto de las columnas que el sistema ya
-    conoce. Todo lo devuelto es editable en el front: esto es una comodidad de
-    captura, no una restricción.
+    de Plantilla Detalle) y con ella el resto de las columnas, que se sacan de
+    MOV_POS (no de Plantilla Detalle): Unidad de Negocio viene directo de esa
+    tabla; el puesto se cruza por ``cd_puesto`` contra CAT_PTO_FUNC; el nivel
+    salarial y el Salario Mensual Neto se cruzan por ``puesto_ptal`` + ``esc``
+    contra ``rc_cat_cod_presupuestal`` (catálogo "Códigos Presupuestales"); el
+    tipo de contratación sale de ``partida_ptal`` (11301 Permanente, 12201
+    Eventual). Todo lo devuelto es editable en el front: esto es una
+    comodidad de captura, no una restricción.
     """
 
     view_permission = "authentication.view_plantilla_mov_posiciones"
@@ -8092,15 +8233,28 @@ class AnuenciaLookupView(APIView):
                     status=status.HTTP_404_NOT_FOUND,
                 )
 
-            fila = EmpleadosCompletosSig.objects.filter(posicion=posicion).values().first()
-            if not fila:
+            datos_mp = _get_datos_mov_pos_bulk_map([posicion]).get(posicion)
+            if not datos_mp:
                 return Response(
-                    {"error": f"La posición {posicion} no existe en la plantilla."},
+                    {"error": f"La posición {posicion} no existe en MOV_POS."},
                     status=status.HTTP_404_NOT_FOUND,
                 )
 
+            cd_puesto = str(datos_mp.get("cd_puesto") or "").strip()
+            puesto_ptal = str(datos_mp.get("puesto_ptal") or "").strip()
+            try:
+                escala = int(str(datos_mp.get("esc") or "").strip())
+            except ValueError:
+                escala = None
+
+            nombre_puesto_funcional = _get_mapa_puesto_funcional([cd_puesto]).get(cd_puesto, "")
+            datos_presupuestal = _get_mapa_cod_presupuestal([(puesto_ptal, escala)]).get(
+                (puesto_ptal, escala), {}
+            )
+
+            fila = EmpleadosCompletosSig.objects.filter(posicion=posicion).values("nombres").first() or {}
             unidad_responsable = _parse_unidad_responsable(codigo)
-            partida = str(fila.get("partida") or "").strip()
+            partida = str(datos_mp.get("partida_ptal") or "").strip()
             ocupada = posicion in _get_posiciones_ocupadas_set()
 
             return Response(
@@ -8109,11 +8263,14 @@ class AnuenciaLookupView(APIView):
                     "posicion": posicion,
                     "ramo": RAMO_ANAM,
                     "unidad_responsable": unidad_responsable,
-                    "denominacion_puesto": fila.get("nombre_puesto_funcional") or "",
-                    "nivel_salarial": fila.get("nivel") or "",
-                    # El formato oficial reporta 0 salvo que el ejecutor del
-                    # gasto indique otro rango; se deja editable.
-                    "rango_salarial": "0",
+                    "denominacion_puesto": nombre_puesto_funcional,
+                    "nivel_salarial": datos_presupuestal.get("nivel") or "",
+                    # Salario Mensual Neto (rc_cat_cod_presupuestal) — el
+                    # formato oficial reportaba 0 aquí antes de tener esta
+                    # fuente; ahora se autollena y sigue siendo editable.
+                    "rango_salarial": (
+                        str(datos_presupuestal["smn"]) if datos_presupuestal.get("smn") is not None else "0"
+                    ),
                     "numero_plazas": 1,
                     # Sólo aplica a Honorarios — vacío para plaza presupuestal.
                     "numero_horas": "",
@@ -8126,7 +8283,7 @@ class AnuenciaLookupView(APIView):
                     "mov_pos_id": _get_mov_pos_id_bulk_map([posicion]).get(posicion),
                     # Contexto para el capturista (no son columnas del Anexo 2):
                     # si la plaza está ocupada, solicitar su ocupación es un error.
-                    "unidad_administrativa": fila.get("unidad_administrativa") or "",
+                    "unidad_de_negocio": str(datos_mp.get("unidad_de_negocio") or "").strip(),
                     "ocupada": ocupada,
                     "ocupante": (fila.get("nombres") or "") if ocupada else "",
                 },
@@ -8779,9 +8936,10 @@ class AnuenciaAnexo3View(APIView):
     usa para decidir el agrupamiento (antes se resolvía desde el Código
     Federal de Puesto precisamente para no confiar en el campo de texto
     libre de la hoja); ahora la identidad de la hoja del Anexo 2 manda. La UA
-    resuelta por código se sigue usando únicamente para los datos que sí
-    dependen de la posición (encabezado del documento, unidad_responsable,
-    etc.), no para decidir qué plazas comparten hoja.
+    resuelta por código (Unidad de Negocio de MOV_POS, ver
+    `_get_datos_mov_pos_bulk_map`) se sigue usando únicamente para los datos
+    que sí dependen de la posición (encabezado del documento,
+    unidad_responsable, etc.), no para decidir qué plazas comparten hoja.
 
     POST body::
 
@@ -8876,19 +9034,25 @@ class AnuenciaAnexo3View(APIView):
                     "fecha_alta": fecha_alta, "cantidad": max(1, cantidad),
                 })
 
-            # 3) Datos de plantilla detalle para todas las posiciones de golpe.
+            # 3) Datos de plantilla detalle para todas las posiciones de golpe
+            #    (el tabulador/valuación sigue viniendo de aquí, sin cambios).
             posiciones = [r["posicion"] for r in resueltas]
             detalle = {
                 d["posicion"]: d
                 for d in EmpleadosCompletosSig.objects.filter(posicion__in=posiciones).values(
                     "posicion", "codigo_presupuestal", "nivel", "escala", "partida",
-                    "unidad_administrativa", "dg_o_aduana_compactada", "nombre_puesto_funcional",
+                    "dg_o_aduana_compactada",
                 )
             }
             # "DG o Aduana compactada" viene vacía en ~2/3 de las filas crudas
             # de ZAFIRO; el catálogo de corrección la completa (mismo mecanismo
             # que Plantilla Detalle, ver `_completar_aduana_row`).
             mapa_dg = _get_mapa_correccion("dg_o_aduana_compactada")
+            # La Unidad Administrativa que se imprime en cada hoja del Anexo 3
+            # ya no sale de Plantilla Detalle — sale de MOV_POS (Unidad de
+            # Negocio), igual que el autollenado del Anexo 2 (ver
+            # AnuenciaLookupView / `_get_datos_mov_pos_bulk_map`).
+            datos_mov_pos = _get_datos_mov_pos_bulk_map(posiciones)
 
             # 4) Agrupar por (hoja del Anexo 2, fecha de alta) y resolver el
             #    tabulador de cada plaza — la UA resuelta por código ya NO
@@ -8962,7 +9126,7 @@ class AnuenciaAnexo3View(APIView):
                     })
                     continue
 
-                ua = str(d.get("unidad_administrativa") or "").strip()
+                ua = str((datos_mov_pos.get(r["posicion"]) or {}).get("unidad_de_negocio") or "").strip()
                 clave_natural = f"{r['hoja_indice']}||{r['fecha_alta']}"
                 clave_destino = str(reasignaciones.get(r["codigo"]) or "").strip()
                 # Un reacomodo manual sólo se respeta si el grupo destino es
