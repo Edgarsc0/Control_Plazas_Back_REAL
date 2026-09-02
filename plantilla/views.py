@@ -1805,26 +1805,21 @@ class EmpleadosCompletosEstatusNominaResumenView(APIView):
     view_permission = "authentication.view_plantilla_detalle"
 
     def get(self, request, *args, **kwargs):
-        cache_key = "empleados_completos_estatus_resumen"
-        cached_data = cache.get(cache_key)
-        if cached_data is not None:
-            return Response(cached_data, status=status.HTTP_200_OK)
-
         try:
-            # 1. Obtener posiciones actualmente activas
-            active_position_codes = obtener_posiciones_activas()
-            total_registros = len(active_position_codes)
-
-            # 2. Agrupar EmpleadosCompletosSig en posiciones activas por estado_nomina
-            #    (+ val_estat como respaldo, ver abajo)
-            conteo_raw = (
-                EmpleadosCompletosSig.objects.filter(posicion__in=active_position_codes)
-                .values("estado_nomina", "val_estat")
-                .annotate(total=Count("pk"))
-            )
+            # Se agrega SIEMPRE sobre el mismo dataset cacheado que alimenta
+            # la tabla de Detalle (`_obtener_detalle_activos_cacheado`), en
+            # vez de correr su propia query con su propio caché de 20 min:
+            # antes, como sólo el caché de Detalle se invalida al editar
+            # (`_invalidar_cache_detalle_plantilla`), esta tarjeta podía
+            # quedar hasta 20 minutos desfasada frente al conteo real de la
+            # tabla (p. ej. justo después de una sincronización de nómina).
+            # Al derivarse del mismo dataset ya cacheado, tarjeta y tabla
+            # quedan sincronizadas por construcción, sin depender de acordarse
+            # de invalidar dos cachés en paralelo.
+            filas = _obtener_detalle_activos_cacheado()
 
             resumen = {
-                "total_registros": total_registros,
+                "total_registros": len(filas),
                 "Activo": 0,
                 "Vacante": 0,
                 "Suspendido": 0,
@@ -1832,10 +1827,9 @@ class EmpleadosCompletosEstatusNominaResumenView(APIView):
                 "Licencia_Medica": 0,
             }
 
-            for item in conteo_raw:
-                estado = item.get("estado_nomina")
-                val_estat = item.get("val_estat")
-                total = item.get("total") or 0
+            for fila in filas:
+                estado = fila.get("estado_nomina")
+                val_estat = fila.get("val_estat")
 
                 # Normalizar estados según el mapeo solicitado. `val_estat`
                 # ("Ocupada"/"Vacante") es un respaldo para cuando
@@ -1861,9 +1855,8 @@ class EmpleadosCompletosEstatusNominaResumenView(APIView):
                     else:
                         label = vacante_fallback
 
-                resumen[label] = resumen.get(label, 0) + total
+                resumen[label] = resumen.get(label, 0) + 1
 
-            cache.set(cache_key, resumen, 1200)
             return Response(resumen, status=status.HTTP_200_OK)
         except Exception:
             logger.exception("Error inesperado en {}".format(request.path))
@@ -1950,6 +1943,27 @@ def _paginated_or_full_response(request, data):
     return Response(data, status=status.HTTP_200_OK)
 
 
+def _obtener_detalle_activos_cacheado():
+    """
+    Filas enriquecidas de EmpleadosCompletosSig acotadas a posiciones activas
+    — mismo cache_key/TTL que la ruta sin filtros de
+    EmpleadosCompletosActivosDetalleView. Única fuente de verdad compartida
+    con EmpleadosCompletosEstatusNominaResumenView para que la tarjeta de
+    resumen nunca contradiga el conteo real de la tabla de Detalle (ver
+    docstring de esa vista).
+    """
+    cache_key = "empleados_completos_activos_detalle"
+    cached_data = cache.get(cache_key)
+    if cached_data is not None:
+        return cached_data
+
+    active_position_codes = obtener_posiciones_activas()
+    queryset = EmpleadosCompletosSig.objects.filter(posicion__in=active_position_codes)
+    resultados = _enriquecer_empleados_completos_rows(list(queryset.values()))
+    cache.set(cache_key, resultados, 1200)
+    return resultados
+
+
 class EmpleadosCompletosActivosDetalleView(APIView):
     # Dataset base compartido por 3 tabs (Detalle/Estatus/Mov. Posiciones cruzan
     # contra `detalle`) — cualquiera de los 3 permisos basta, no solo Detalle.
@@ -2021,24 +2035,8 @@ class EmpleadosCompletosActivosDetalleView(APIView):
                     {"error": "Error interno del servidor"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
                 )
 
-        cache_key = "empleados_completos_activos_detalle"
-        cached_data = cache.get(cache_key)
-        if cached_data is not None:
-            return _paginated_or_full_response(request, cached_data)
-
         try:
-            # 1. Obtener posiciones actualmente activas
-            active_position_codes = obtener_posiciones_activas()
-
-            # 2. Obtener todos los registros de EMPLEADOS_COMPLETOS_SIG en esas posiciones
-            queryset = EmpleadosCompletosSig.objects.filter(
-                posicion__in=active_position_codes
-            )
-
-            # 3. Serializar directamente
-            resultados = _enriquecer_empleados_completos_rows(list(queryset.values()))
-
-            cache.set(cache_key, resultados, 1200)
+            resultados = _obtener_detalle_activos_cacheado()
             return _paginated_or_full_response(request, resultados)
         except Exception:
             logger.exception("Error inesperado en {}".format(request.path))
