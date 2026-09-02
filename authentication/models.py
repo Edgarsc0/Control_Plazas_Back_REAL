@@ -94,6 +94,7 @@ class ModulePermission(models.Model):
             ("edit_plantilla_detalle", "Plantilla de Empleados: editar celdas en tab Detalle"),
             ("edit_datos_personales", "Plantilla de Empleados: editar Escolaridad/Contacto/Domicilio en Datos Personales"),
             ("view_plantilla_historico", "Plantilla de Empleados: consultar plantillas históricas (tab Detalle)"),
+            ("view_anuencia_eliminados", "Plantilla de Empleados: ver y reactivar Anexos 2 eliminados (Anuencia)"),
             # Fotografía de empleado — permiso independiente por tab/componente
             # (un rol puede ver el tab pero no la fotografía dentro de él).
             ("view_plantilla_detalle_foto", "Plantilla de Empleados: ver fotografía en tab Detalle"),

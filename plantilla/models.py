@@ -1952,6 +1952,20 @@ class AnuenciaAnexo(models.Model):
     generado_en = models.DateTimeField(null=True, blank=True)
     veces_generado = models.PositiveIntegerField(default=0)
 
+    # Soft delete: un Anexo 2 nunca se borra de verdad — sus plazas pueden
+    # haberse ocupado y vuelto a vacantar, y en ese momento hace falta poder
+    # "cerrarlo" para liberarlas (dejan de contar como "en anuencia" en Mov.
+    # Posiciones, ver `_get_mapa_codigos_en_anuencia`) sin perder el registro
+    # de que esa solicitud existió (auditoría/historial). `eliminado=True` lo
+    # saca de los listados normales (`AnuenciaAnexoViewSet.get_queryset`) pero
+    # la fila sigue en la base de datos indefinidamente.
+    eliminado = models.BooleanField(default=False)
+    eliminado_en = models.DateTimeField(null=True, blank=True)
+    eliminado_por = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True,
+        related_name="anexos_anuencia_eliminados",
+    )
+
     class Meta:
         ordering = ["-actualizado_en"]
         verbose_name = "Anexo de Anuencia"

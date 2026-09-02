@@ -88,6 +88,7 @@ class _UsuarioAuditoriaMixin(serializers.ModelSerializer):
     creado_por_email = serializers.ReadOnlyField(source="creado_por.email")
     actualizado_por_email = serializers.ReadOnlyField(source="actualizado_por.email")
     generado_por_email = serializers.ReadOnlyField(source="generado_por.email")
+    eliminado_por_email = serializers.ReadOnlyField(source="eliminado_por.email")
 
 
 class AnuenciaAnexoListSerializer(_UsuarioAuditoriaMixin):
@@ -106,6 +107,7 @@ class AnuenciaAnexoListSerializer(_UsuarioAuditoriaMixin):
             "creado_por_email", "creado_en",
             "actualizado_por_email", "actualizado_en",
             "generado_por_email", "generado_en", "veces_generado",
+            "eliminado", "eliminado_en", "eliminado_por_email",
         ]
 
     def get_total_hojas(self, obj):
@@ -136,10 +138,15 @@ class AnuenciaAnexoDetailSerializer(_UsuarioAuditoriaMixin):
         identifica a un anexo de un vistazo en el historial (ver
         AnuenciaHistorialModal.jsx), así que un duplicado sería indistinguible
         del original ahí. Se valida en cada guardado, no sólo al crear: un
-        anexo que cambia de nombre a uno ya usado debe rechazarse igual."""
+        anexo que cambia de nombre a uno ya usado debe rechazarse igual.
+
+        Los eliminados (soft delete) quedan fuera de esta comprobación: ya no
+        aparecen en ningún listado, así que bloquear su nombre para uno nuevo
+        sería una restricción invisible e inexplicable para quien la sufre.
+        """
         nombre = (value or "").strip()
         if nombre:
-            en_uso = AnuenciaAnexo.objects.filter(nombre_archivo__iexact=nombre)
+            en_uso = AnuenciaAnexo.objects.filter(nombre_archivo__iexact=nombre, eliminado=False)
             if self.instance is not None:
                 en_uso = en_uso.exclude(pk=self.instance.pk)
             if en_uso.exists():
@@ -154,10 +161,12 @@ class AnuenciaAnexoDetailSerializer(_UsuarioAuditoriaMixin):
             "creado_por_email", "creado_en",
             "actualizado_por_email", "actualizado_en",
             "generado_por_email", "generado_en", "veces_generado",
+            "eliminado", "eliminado_en", "eliminado_por_email",
         ]
         read_only_fields = [
             "creado_por_email", "creado_en", "actualizado_por_email", "actualizado_en",
             "generado_por_email", "generado_en", "veces_generado",
+            "eliminado", "eliminado_en", "eliminado_por_email",
         ]
 
 

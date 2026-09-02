@@ -1132,18 +1132,24 @@ def _get_mapa_codigos():
 
 def _get_mapa_codigos_en_anuencia():
     """
-    ``{codigo: nombre_archivo}`` — para cada Código Federal de Puesto que ya
-    aparece en la lista `filas` de alguna hoja de ALGÚN Anexo 2 guardado
-    (``AnuenciaAnexo``). Usada en Mov. Posiciones (``MovPosDetalleView``) para
-    marcar que una plaza ya está en proceso de anuencia y no debería volverse
-    a pedir en otro Anexo 2 — y en el flujo de "Agregar a Anexo 2" (ver
-    ``AnuenciaAgregarPlazasView``) para no duplicarla.
+    ``{codigo: [nombre_archivo, ...]}`` — para cada Código Federal de Puesto,
+    los nombres de TODOS los Anexo 2 guardados (no eliminados) que lo traen
+    en la lista `filas` de alguna de sus hojas. Usada en Mov. Posiciones
+    (``MovPosDetalleView``) para marcar que una plaza está en proceso de
+    anuencia — y en el flujo de "Agregar a Anexo 2" para avisarlo.
 
-    No hay noción de "Anexo 2 resuelto/cancelado" en el modelo (sin campo de
-    estado) — cualquier Anexo 2 guardado cuenta, sin importar cuán viejo sea.
+    Una plaza puede legítimamente aparecer en más de un Anexo 2 a lo largo
+    del tiempo (se solicita, se ocupa, vuelve a quedar vacante, se vuelve a
+    solicitar) — por eso esto es una lista y no un valor único, y por eso ya
+    NO bloquea agregarla de nuevo en otro Anexo 2 (sólo informa en cuáles ya
+    está). Los eliminados (soft delete, ver `AnuenciaAnexo.eliminado`) se
+    excluyen: "eliminar" un Anexo 2 es precisamente la forma de decir "esta
+    solicitud ya no cuenta" y liberar sus plazas sin perder el registro en la
+    base de datos.
+
     Cacheado 5 min porque escanea el JSON de ``hojas`` de todos los Anexo 2;
-    se invalida también al crear/actualizar uno (ver ``AnuenciaAnexoViewSet``)
-    para que una plaza recién agregada no tarde en marcarse.
+    se invalida también al crear/actualizar/eliminar uno (ver
+    ``AnuenciaAnexoViewSet``) para que el cambio se refleje sin esperar el TTL.
     """
     mapa = cache.get("mapa_codigos_en_anuencia")
     if mapa is not None:
@@ -1156,12 +1162,16 @@ def _get_mapa_codigos_en_anuencia():
     # mismo caso ya resuelto en `AnuenciaAnexoViewSet.get_queryset` con
     # `.defer("hojas")` — aquí no se puede diferir porque sí se necesita leer
     # `hojas`, así que se cancela el ORDER BY en su lugar).
-    for nombre, hojas in AnuenciaAnexo.objects.order_by().values_list("nombre_archivo", "hojas"):
+    qs = AnuenciaAnexo.objects.filter(eliminado=False).order_by()
+    for nombre, hojas in qs.values_list("nombre_archivo", "hojas"):
         for hoja in hojas or []:
             for fila in hoja.get("filas") or []:
                 codigo = str(fila.get("codigo") or "").strip()
-                if codigo and codigo not in mapa:
-                    mapa[codigo] = nombre
+                if not codigo:
+                    continue
+                lista = mapa.setdefault(codigo, [])
+                if nombre not in lista:
+                    lista.append(nombre)
     cache.set("mapa_codigos_en_anuencia", mapa, 300)
     return mapa
 
@@ -1449,10 +1459,17 @@ def enriquecer_mov_pos_rows(resultados):
     las mismas columnas "resueltas" que ya autollena el Anexo 2 — Puesto,
     Nivel Salarial, Salario Mensual Neto y Tipo de contratación (ver
     `AnuenciaLookupView`/`_get_datos_mov_pos_bulk_map`) — y si la posición ya
-    está en algún Anexo 2 guardado, en qué archivo. Requiere que cada fila ya
+    está en algún Anexo 2 guardado, en cuáles. Requiere que cada fila ya
     traiga `codigo` (bolt-on de `_get_mapa_codigos`, ver los tres bucles de
     `MovPosDetalleView`). Muta `resultados` in-place; no hace nada si viene
     vacío.
+
+    `anuencia_anexo_nombre` es el texto para mostrar en la celda (nombres
+    unidos con ", " — una plaza puede estar en más de un Anexo 2, ver
+    `_get_mapa_codigos_en_anuencia`); `anuencia_anexo_nombres` es la lista
+    cruda, la que realmente hay que usar para filtrar/agrupar (comparar
+    contra el texto unido rompería en cuanto una plaza esté en 2+ anexos —
+    ver `_match_lista_anuencia`).
     """
     if not resultados:
         return
@@ -1472,7 +1489,9 @@ def enriquecer_mov_pos_rows(resultados):
         r["tipo_contratacion"] = _TIPO_CONTRATACION_ANEXO2.get(
             str(r.get("partida_ptal") or "").strip(), ""
         )
-        r["anuencia_anexo_nombre"] = mapa_en_anuencia.get(str(r.get("codigo") or "").strip(), "")
+        nombres = mapa_en_anuencia.get(str(r.get("codigo") or "").strip(), [])
+        r["anuencia_anexo_nombres"] = nombres
+        r["anuencia_anexo_nombre"] = ", ".join(nombres)
 
 
 # Columnas de MOV_POS que NO son campos reales del modelo, calculadas en
@@ -3813,10 +3832,26 @@ class MovPosDetalleView(APIView):
                 return None
             if not _cache_columnas_derivadas:
                 _cache_columnas_derivadas.update(_calcular_columnas_derivadas_mov_pos(queryset))
-            match_pos = [
-                pos for pos, datos in _cache_columnas_derivadas.items()
-                if _match_columna_derivada(datos.get(base_field), suffix, val_list)
-            ]
+            # "anuencia_anexo_nombre" es multi-valor (una plaza puede estar en
+            # varios Anexo 2 a la vez, ver `_get_mapa_codigos_en_anuencia`):
+            # comparar contra el texto unido (`anuencia_anexo_nombre`) haría
+            # que marcar la casilla "Anexo A" nunca matcheara una plaza que
+            # está en "Anexo A, Anexo B" (el valor exacto de esa celda es la
+            # combinación completa, no "Anexo A" sola) — hay que comparar
+            # contra cada nombre de `anuencia_anexo_nombres` por separado.
+            if base_field == "anuencia_anexo_nombre":
+                match_pos = [
+                    pos for pos, datos in _cache_columnas_derivadas.items()
+                    if any(
+                        _match_columna_derivada(n, suffix, val_list)
+                        for n in (datos.get("anuencia_anexo_nombres") or [""])
+                    )
+                ]
+            else:
+                match_pos = [
+                    pos for pos, datos in _cache_columnas_derivadas.items()
+                    if _match_columna_derivada(datos.get(base_field), suffix, val_list)
+                ]
             return Q(no_pos_actual__in=match_pos) if match_pos else Q(pk__in=[])
 
         queryset = apply_dynamic_column_filters(
@@ -4010,10 +4045,23 @@ class MovPosDetalleView(APIView):
                 if "datos" not in _cache_columnas_derivadas_avanzados:
                     _cache_columnas_derivadas_avanzados["datos"] = _calcular_columnas_derivadas_mov_pos(queryset)
                 datos_por_pos = _cache_columnas_derivadas_avanzados["datos"]
-                match_pos = [
-                    pos for pos, datos in datos_por_pos.items()
-                    if text_condition_matches(datos.get(column, ""), condition, value)
-                ]
+                # Mismo motivo que en el resolver de "Aplicar Filtro" de
+                # arriba: "anuencia_anexo_nombre" es multi-valor, así que
+                # "es igual a 'Anexo A'" tiene que probar contra cada nombre
+                # de la lista, no contra el texto unido de la celda.
+                if column == "anuencia_anexo_nombre":
+                    match_pos = [
+                        pos for pos, datos in datos_por_pos.items()
+                        if any(
+                            text_condition_matches(n, condition, value)
+                            for n in (datos.get("anuencia_anexo_nombres") or [""])
+                        )
+                    ]
+                else:
+                    match_pos = [
+                        pos for pos, datos in datos_por_pos.items()
+                        if text_condition_matches(datos.get(column, ""), condition, value)
+                    ]
                 if not match_pos:
                     return Q(pk__in=[])
                 return Q(no_pos_actual__in=match_pos)
@@ -4088,9 +4136,18 @@ class MovPosDetalleView(APIView):
         if distinct_field in CAMPOS_DERIVADOS_MOV_POS:
             datos_por_pos = _calcular_columnas_derivadas_mov_pos(queryset)
             counts = {}
-            for datos in datos_por_pos.values():
-                val = datos.get(distinct_field, "")
-                counts[val] = counts.get(val, 0) + 1
+            if distinct_field == "anuencia_anexo_nombre":
+                # Multi-valor: cada nombre de Anexo 2 es su propia opción del
+                # dropdown (no la combinación completa) — una plaza en 2
+                # anexos suma 1 al conteo de CADA UNO, no a una entrada
+                # "Anexo A, Anexo B" aparte. Ver `_get_mapa_codigos_en_anuencia`.
+                for datos in datos_por_pos.values():
+                    for n in (datos.get("anuencia_anexo_nombres") or [""]):
+                        counts[n] = counts.get(n, 0) + 1
+            else:
+                for datos in datos_por_pos.values():
+                    val = datos.get(distinct_field, "")
+                    counts[val] = counts.get(val, 0) + 1
 
             distinct_search = request.query_params.get("distinct_search", "").strip()
             if distinct_search:
@@ -7809,19 +7866,37 @@ class AnuenciaAnexoViewSet(viewsets.ModelViewSet):
     "modificado_por" genérico): aquí se necesitan 3 eventos de auditoría
     distintos — creó / modificó / generó — ver docstring de `AnuenciaAnexo`.
 
-    Sin `destroy`: es un historial, no un CRUD donde borrar tenga sentido
-    (ver `http_method_names`, sin "delete"/"put" — sólo `partial_update`,
-    nunca reemplazo completo).
+    Sin `destroy` real (ver `http_method_names`, sin "delete"/"put" — sólo
+    `partial_update`, nunca reemplazo completo): "eliminar" un Anexo 2 es un
+    soft delete vía la acción `eliminar` (más abajo), nunca un DELETE ni un
+    borrado real de la fila — sirve para "cerrar" una solicitud ya resuelta
+    (sus plazas dejan de contar como "en anuencia") sin perder el registro
+    para auditoría. `get_queryset` excluye siempre los eliminados: una vez
+    eliminado, un Anexo 2 deja de ser alcanzable por esta API (list/retrieve/
+    patch/generar), aunque su fila siga en la base de datos para siempre.
 
     `GET` (list/retrieve) usa el mismo permiso que el resto de Anuencia
-    (`AnuenciaLookupView`/`AnuenciaSugerenciasView`); `POST`/`PATCH`/`generar`
-    caen al mismo permiso por no declarar `edit_permission` (ver
+    (`AnuenciaLookupView`/`AnuenciaSugerenciasView`); `POST`/`PATCH`/`generar`/
+    `eliminar` caen al mismo permiso por no declarar `edit_permission` (ver
     `HasModulePermission`) — no hay un permiso "editar anuencia" separado hoy.
+
+    `eliminados`/`reactivar` exigen el permiso aparte `view_anuencia_eliminados`
+    (ver `action_permissions`): ver y poder recuperar algo que alguien más
+    marcó como eliminado es más sensible que el uso normal de Anuencia, así
+    que no basta con el permiso general — un rol puede ver/editar Anexo 2
+    corrientes sin poder husmear ni reactivar los eliminados.
     """
 
-    queryset = AnuenciaAnexo.objects.select_related("creado_por", "actualizado_por", "generado_por").all()
+    queryset = AnuenciaAnexo.objects.select_related(
+        "creado_por", "actualizado_por", "generado_por", "eliminado_por"
+    ).filter(eliminado=False)
     view_permission = "authentication.view_plantilla_mov_posiciones"
     http_method_names = ["get", "post", "patch", "head", "options"]
+    action_permissions = {
+        "eliminados": "authentication.view_anuencia_eliminados",
+        "eliminado_detalle": "authentication.view_anuencia_eliminados",
+        "reactivar": "authentication.view_anuencia_eliminados",
+    }
 
     def get_queryset(self):
         qs = self.queryset
@@ -7870,6 +7945,64 @@ class AnuenciaAnexoViewSet(viewsets.ModelViewSet):
         anexo.veces_generado = F("veces_generado") + 1
         anexo.save(update_fields=["generado_por", "generado_en", "veces_generado"])
         anexo.refresh_from_db()
+        return Response(AnuenciaAnexoDetailSerializer(anexo).data)
+
+    @action(detail=True, methods=["post"])
+    def eliminar(self, request, pk=None):
+        """Soft delete: nunca se borra la fila (ver docstring de la clase y
+        de `AnuenciaAnexo.eliminado`) — sólo se marca, para que deje de
+        aparecer en el historial y sus plazas dejen de contar como "en
+        anuencia" en Mov. Posiciones, liberándolas para poder volver a
+        solicitarlas en un Anexo 2 nuevo."""
+        from django.utils import timezone
+
+        anexo = self.get_object()
+        anexo.eliminado = True
+        anexo.eliminado_por = request.user
+        anexo.eliminado_en = timezone.now()
+        anexo.save(update_fields=["eliminado", "eliminado_por", "eliminado_en"])
+        cache.delete("mapa_codigos_en_anuencia")
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=False, methods=["get"])
+    def eliminados(self, request):
+        """Anexo 2 eliminados (soft delete) — botón "Anexos eliminados" del
+        sub-tab Anuencia. Fuera de `get_queryset` a propósito: ese método
+        siempre filtra `eliminado=False` para el resto de acciones, así que
+        aquí se arma el queryset de cero en vez de reutilizarlo."""
+        qs = (
+            AnuenciaAnexo.objects.filter(eliminado=True)
+            .select_related("creado_por", "actualizado_por", "generado_por", "eliminado_por")
+            .defer("hojas")
+        )
+        return Response(AnuenciaAnexoListSerializer(qs, many=True).data)
+
+    @action(detail=True, methods=["get"])
+    def eliminado_detalle(self, request, pk=None):
+        """Detalle completo (con `hojas`) de un Anexo 2 eliminado — para el
+        botón "Ver" del modal de eliminados, que sólo consulta sin reactivar
+        (a diferencia de `reactivar`, que sí cambia el estado)."""
+        from django.shortcuts import get_object_or_404
+
+        anexo = get_object_or_404(
+            AnuenciaAnexo.objects.select_related("creado_por", "actualizado_por", "generado_por", "eliminado_por"),
+            pk=pk, eliminado=True,
+        )
+        return Response(AnuenciaAnexoDetailSerializer(anexo).data)
+
+    @action(detail=True, methods=["post"])
+    def reactivar(self, request, pk=None):
+        """Deshace el soft delete: el Anexo 2 vuelve a aparecer en el
+        historial normal y sus plazas vuelven a contar como "en anuencia" en
+        Mov. Posiciones."""
+        from django.shortcuts import get_object_or_404
+
+        anexo = get_object_or_404(AnuenciaAnexo, pk=pk, eliminado=True)
+        anexo.eliminado = False
+        anexo.eliminado_por = None
+        anexo.eliminado_en = None
+        anexo.save(update_fields=["eliminado", "eliminado_por", "eliminado_en"])
+        cache.delete("mapa_codigos_en_anuencia")
         return Response(AnuenciaAnexoDetailSerializer(anexo).data)
 
 

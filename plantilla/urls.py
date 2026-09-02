@@ -532,6 +532,11 @@ urlpatterns = [
         name="anuencia-anexos",
     ),
     path(
+        "anuencia/anexos/eliminados/",
+        AnuenciaAnexoViewSet.as_view({"get": "eliminados"}),
+        name="anuencia-anexos-eliminados",
+    ),
+    path(
         "anuencia/anexos/<int:pk>/",
         AnuenciaAnexoViewSet.as_view({"get": "retrieve", "patch": "partial_update"}),
         name="anuencia-anexos-detail",
@@ -540,6 +545,21 @@ urlpatterns = [
         "anuencia/anexos/<int:pk>/generar/",
         AnuenciaAnexoViewSet.as_view({"post": "generar"}),
         name="anuencia-anexos-generar",
+    ),
+    path(
+        "anuencia/anexos/<int:pk>/eliminar/",
+        AnuenciaAnexoViewSet.as_view({"post": "eliminar"}),
+        name="anuencia-anexos-eliminar",
+    ),
+    path(
+        "anuencia/anexos/<int:pk>/eliminado-detalle/",
+        AnuenciaAnexoViewSet.as_view({"get": "eliminado_detalle"}),
+        name="anuencia-anexos-eliminado-detalle",
+    ),
+    path(
+        "anuencia/anexos/<int:pk>/reactivar/",
+        AnuenciaAnexoViewSet.as_view({"post": "reactivar"}),
+        name="anuencia-anexos-reactivar",
     ),
     path(
         "anuencia/anexo3/",
