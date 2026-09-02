@@ -174,13 +174,19 @@ def insertar_foto_en_celda(worksheet, row, col, foto_bytesio):
     })
 
 
-def escribir_letterhead_xlsx(workbook, worksheet, num_cols):
+def escribir_letterhead_xlsx(workbook, worksheet, num_cols, extra_legend=None):
     """Réplica en xlsxwriter del membretado institucional (misma fuente que
     ``excel_letterhead.py``, la versión openpyxl que ya usan los demás
     exports server-side, y ``excelLetterhead.js`` en el frontend) — mismo
     logo, título de 3 líneas, leyenda de fecha/hora y colores. Debe llamarse
     ANTES de escribir cualquier otro contenido; el contenido real arranca en
-    la fila devuelta (0-indexed)."""
+    la fila devuelta (0-indexed).
+
+    ``extra_legend`` (ej. "Plantilla histórica al DD/MM/AAAA") agrega una
+    fila extra bajo la leyenda de generación — usado por el export histórico
+    con fotos para dejar constancia de qué representan los datos, igual que
+    ``excelLetterhead.js`` en el front. Por default ``None`` (sin fila extra,
+    comportamiento idéntico al de siempre)."""
     from .excel_letterhead import LOGO_PATH, TITLE_LINES, LETTERHEAD_ROWS, _fecha_hora_generacion
 
     num_cols = max(num_cols, 1)
@@ -215,15 +221,26 @@ def escribir_letterhead_xlsx(workbook, worksheet, num_cols):
     )
     worksheet.set_row(2, 18)
 
-    worksheet.set_row(3, 8)
+    next_row = 3
+    if extra_legend:
+        extra_format = workbook.add_format({
+            "bold": True, "italic": True, "font_size": 9, "font_name": "Calibri",
+            "font_color": "#621F32", "align": "center", "valign": "vcenter",
+        })
+        worksheet.merge_range(next_row, 0, next_row, num_cols - 1, extra_legend, extra_format)
+        worksheet.set_row(next_row, 18)
+        next_row += 1
 
-    return LETTERHEAD_ROWS
+    worksheet.set_row(next_row, 8)
+
+    return next_row + 1 if extra_legend else LETTERHEAD_ROWS
 
 
 def generar_workbook_excel_con_fotos(
     *, columnas, rows, incluir_fotos, sheet_name,
     numero_empleado_key="numempleado", mono_keys=(),
     estado_nomina_key=None, mapear_estado_nomina=None,
+    extra_legend=None,
 ):
     """Arma un workbook xlsxwriter con el membretado institucional + una
     tabla de ``columnas`` sobre ``rows`` (lista de dicts), con una columna
@@ -242,7 +259,7 @@ def generar_workbook_excel_con_fotos(
         workbook.add_vba_project(str(VBA_BIN_PATH))
     worksheet = workbook.add_worksheet(sheet_name[:31])
 
-    header_row = escribir_letterhead_xlsx(workbook, worksheet, num_cols)
+    header_row = escribir_letterhead_xlsx(workbook, worksheet, num_cols, extra_legend=extra_legend)
 
     header_fmt = workbook.add_format({
         "bold": True, "font_color": "#FFFFFF", "bg_color": "#2B4C7E",

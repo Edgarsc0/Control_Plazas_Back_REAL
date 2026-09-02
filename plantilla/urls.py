@@ -18,6 +18,7 @@ from .views import (
     DatosPersonalesBulkView,
     DatosPersonalesCeldaOverrideView,
     ExportarPlantillaDetalleConFotosView,
+    ExportarPlantillaHistoricaConFotosView,
     ExportarMovimientosPersonalConFotosView,
     ExportarBajasConFotosView,
     ExportarEmpleadosPorPosicionConFotosView,
@@ -57,6 +58,7 @@ from .views import (
     MovimientosPersonalListView,
     MovimientosPersonalStatsView,
     MovimientosPersonalHistorialView,
+    MovimientosPosicionHistorialView,
     OrganigramaDeptoView,
     OrganigramaTreeView,
     OrganigramaPosicionInfoView,
@@ -103,6 +105,11 @@ urlpatterns = [
         "movimientos-personal/historial/",
         MovimientosPersonalHistorialView.as_view(),
         name="movimientos-personal-historial",
+    ),
+    path(
+        "movimientos-posicion/historial/",
+        MovimientosPosicionHistorialView.as_view(),
+        name="movimientos-posicion-historial",
     ),
     path(
         "rotacion-titulares-aduanas/",
@@ -340,6 +347,11 @@ urlpatterns = [
         "exportar_plantilla_detalle_con_fotos/",
         ExportarPlantillaDetalleConFotosView.as_view(),
         name="exportar_plantilla_detalle_con_fotos",
+    ),
+    path(
+        "exportar_plantilla_historica_con_fotos/",
+        ExportarPlantillaHistoricaConFotosView.as_view(),
+        name="exportar_plantilla_historica_con_fotos",
     ),
     path(
         "exportar_movimientos_personal_con_fotos/",

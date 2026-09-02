@@ -2603,6 +2603,71 @@ class ExportarPlantillaDetalleConFotosView(APIView):
         return _excel_con_fotos_response(buffer, incluir_fotos, "Plantilla_Empleados")
 
 
+class ExportarPlantillaHistoricaConFotosView(APIView):
+    """Export "con fotos" de la reconstrucción histórica (botón "Consultar
+    plantillas pasadas" en Plantilla Detalle) — hermano de
+    ExportarPlantillaDetalleConFotosView, pero SIN re-consultar
+    EMPLEADOS_COMPLETOS_SIG por posición: esa vista re-deriva el ocupante
+    ACTUAL de cada posición, lo que en modo histórico mostraría a la persona
+    equivocada (la que ocupa la plaza HOY, no la de la fecha consultada).
+
+    El front ya tiene las filas correctas (`historicoFilas`, resueltas por
+    PlantillaHistoricaView) y ya las mapea a valores de pantalla (Partida,
+    Tipo de Contratación, Rango, Estado Nómina — mismo mapeo que el export
+    sin fotos, ver handleExportExcel en PlantillaDetalleTab.jsx) antes de
+    mandarlas aquí: esta vista sólo arma el Excel (membretado + fotos vía
+    `numempleado`, que sí corresponde a la persona histórica correcta) sin
+    tocar la DB salvo para el cruce opcional de Datos Personales.
+    """
+
+    view_permission = "authentication.view_plantilla_historico"
+
+    def post(self, request):
+        from .excel_fotos import generar_workbook_excel_con_fotos
+
+        fecha = (request.data.get("fecha") or "").strip()
+        rows = request.data.get("rows") or []
+        columnas = request.data.get("columnas") or []
+        incluir_fotos = bool(request.data.get("incluir_fotos")) and request.user.has_perm(
+            "authentication.view_plantilla_detalle_foto"
+        )
+        incluir_datos_personales = bool(request.data.get("incluir_datos_personales"))
+
+        if not fecha or not rows or not columnas:
+            return Response({"error": "Faltan 'fecha', 'rows' o 'columnas'."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Mismo tope que el export en vivo (ver ExportarPlantillaDetalleConFotosView).
+        if incluir_fotos and len(rows) > 15000:
+            return Response(
+                {"error": f"El conjunto tiene {len(rows)} filas — el máximo para incluir fotografías es 15,000."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if incluir_datos_personales:
+            mapa_dp = _get_datos_personales_bulk_map([r.get("numempleado") for r in rows])
+            for r in rows:
+                registro_dp = mapa_dp.get(str(r.get("numempleado") or "").strip(), {})
+                for campo, _label in DATOS_PERSONALES_EXPORT_FIELDS:
+                    r[f"dp_{campo}"] = registro_dp.get(campo, "")
+            columnas = list(columnas) + [
+                {"key": f"dp_{campo}", "label": label} for campo, label in DATOS_PERSONALES_EXPORT_FIELDS
+            ]
+
+        try:
+            fecha_legend = datetime.datetime.strptime(fecha, "%Y-%m-%d").strftime("%d/%m/%Y")
+        except ValueError:
+            fecha_legend = fecha
+
+        buffer = generar_workbook_excel_con_fotos(
+            columnas=columnas, rows=rows, incluir_fotos=incluir_fotos,
+            sheet_name="Plantilla_Empleados", numero_empleado_key="numempleado",
+            mono_keys=["posicion", "id_empleado", "rfc", "curp", "nivel", "codigo_presupuestal",
+                       "ua", "cent", "dir", "subd", "jd", "depto", "numeral"],
+            extra_legend=f"Plantilla histórica al {fecha_legend}",
+        )
+        return _excel_con_fotos_response(buffer, incluir_fotos, f"Plantilla de Empleados ({fecha})")
+
+
 class ExportarMovimientosPersonalConFotosView(APIView):
     """
     Genera el Excel de Movimientos (personal, tab "Movimientos" —
@@ -8247,6 +8312,126 @@ class MovimientosPersonalHistorialView(APIView):
 
         with connection.cursor() as cursor:
             cursor.execute(sql, emp_ids)
+            cols = [d[0] for d in cursor.description]
+            rows = cursor.fetchall()
+
+        results = []
+        for row in rows:
+            record = {}
+            for i, col in enumerate(cols):
+                val = row[i]
+                if hasattr(val, "isoformat"):
+                    val = val.isoformat()
+                record[col] = val
+            results.append(record)
+
+        return Response(results)
+
+
+class MovimientosPosicionHistorialView(APIView):
+    """
+    Devuelve el historial completo (sin filtro de año) de las posiciones
+    indicadas, ordenado por posición ASC y fecha efectiva DESCENDENTE (el
+    movimiento más reciente primero, el más viejo al final) — a diferencia
+    de MovimientosPersonalHistorialView (ASC), a pedido explícito del
+    usuario para el tab "Historial de posición" del expediente de plaza
+    (EmployeesModal.jsx). Consulta directa a MOV_POS via raw SQL, mismo
+    patrón que MovimientosPersonalHistorialView.
+
+    Usar POST con body {"posicion": ["10300009", ...]} para listas grandes
+    (evita el límite de longitud de URL de un GET); también acepta
+    ?posicion__in= por GET, igual que el endpoint de empleados.
+
+    Cada carril de este tab en pantalla es una unidad administrativa
+    (`Unidad Adva#` de MOV_POS, no `Unidad de Negocio` ni `Cd UN` — ver
+    comprobación 2026-09-02: el código de 3 dígitos de `Unidad Adva#`
+    coincide con la parte numérica de `Cd UN`, y `Unidad de Negocio` ya es
+    el nombre legible de ese mismo código), así que se exponen ambos como
+    `unidad_adva` (código) y `unidad_administrativa` (nombre).
+    """
+    view_permission = (
+        "authentication.view_plantilla_detalle",
+        "authentication.view_plantilla_estatus_nomina",
+        "authentication.view_plantilla_mov_posiciones",
+        "authentication.view_plantilla_movimientos",
+        "authentication.view_plantilla_bajas",
+        "authentication.view_plantilla_geografia",
+    )
+
+    def get(self, request):
+        raw_param = request.query_params.get("posicion__in", "").strip()
+        posiciones = [p.strip() for p in raw_param.split(",") if p.strip()]
+        return self._historial(posiciones)
+
+    def post(self, request):
+        posiciones = request.data.get("posicion", [])
+        if isinstance(posiciones, str):
+            posiciones = [p.strip() for p in posiciones.split(",") if p.strip()]
+        else:
+            posiciones = [str(p).strip() for p in posiciones if str(p).strip()]
+        return self._historial(posiciones)
+
+    def _historial(self, posiciones):
+        from django.db import connection
+
+        if not posiciones:
+            return Response([])
+
+        placeholders = ", ".join(["%s"] * len(posiciones))
+        sql = f"""
+            SELECT
+                id,
+                `Nº Pos Actual` AS posicion,
+                `F Efva` AS fecha_efectiva,
+                `Estado Psn` AS estado_posicion,
+                `Fecha Captura` AS fecha_captura,
+                `FECHA VACANCIA` AS fecha_vacancia,
+                `Cd Motivo` AS cd_motivo,
+                `Motivo` AS motivo,
+                `Cd UN` AS cd_un,
+                `Unidad de Negocio` AS unidad_administrativa,
+                `Unidad Adva#` AS unidad_adva,
+                `Cd Departamento` AS cd_departamento,
+                `Cd Puesto` AS cd_puesto,
+                `Estado Ptal` AS estado_ptal,
+                `Fecha Est` AS fecha_establecimiento,
+                `Máximo` AS maximo,
+                `Depnd Drt` AS dependencia_directa,
+                `Depnd Indrt` AS dependencia_indirecta,
+                `Ubicación` AS ubicacion,
+                `Nvl Direc` AS nivel_direccion,
+                `Plan Sal` AS plan_salarial,
+                `Grado` AS grado,
+                `Esc` AS escala,
+                `Puesto Ptal` AS puesto_presupuestal,
+                `Partida Ptal` AS partida_presupuestal,
+                `Gp Pago` AS grupo_pago,
+                `Prog Beneficios` AS programa_beneficios,
+                `F/H Últ Actz` AS fecha_ultima_actualizacion,
+                `Por` AS por,
+                `Hr Estd/Semn` AS horas_estandar_semana,
+                `Descr` AS descripcion,
+                `Gp Trabajo` AS grupo_trabajo,
+                `Org Code` AS codigo_organizacional,
+                `Grupo Cd Sal` AS grupo_codigo_salarial,
+                `FormalDesc` AS descripcion_formal,
+                `Pto Compt` AS puesto_compartido,
+                `Posn Clv` AS posicion_clave,
+                `Presupuesto` AS presupuesto,
+                `Nombre Puesto` AS nombre_puesto_funcional,
+                `CATEGORIA_VACANCIA` AS categoria_vacancia,
+                `idRegistroDesicivo` AS id_registro_decisivo,
+                `TUVO_INSUBSISTENCIA` AS tuvo_insubsistencia,
+                `idInsubsistenciaDetectada` AS id_insubsistencia_detectada,
+                `FECHA_OCUPACION` AS fecha_ocupacion,
+                `ID_REGISTRO_DES_FECHA_OCUPACION` AS id_registro_des_fecha_ocupacion
+            FROM MOV_POS
+            WHERE `Nº Pos Actual` IN ({placeholders})
+            ORDER BY `Nº Pos Actual` ASC, `F Efva` DESC, `Fecha Captura` DESC, id DESC
+        """
+
+        with connection.cursor() as cursor:
+            cursor.execute(sql, posiciones)
             cols = [d[0] for d in cursor.description]
             rows = cursor.fetchall()
 
