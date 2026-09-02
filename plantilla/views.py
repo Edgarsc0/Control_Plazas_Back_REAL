@@ -1816,9 +1816,10 @@ class EmpleadosCompletosEstatusNominaResumenView(APIView):
             total_registros = len(active_position_codes)
 
             # 2. Agrupar EmpleadosCompletosSig en posiciones activas por estado_nomina
+            #    (+ val_estat como respaldo, ver abajo)
             conteo_raw = (
                 EmpleadosCompletosSig.objects.filter(posicion__in=active_position_codes)
-                .values("estado_nomina")
+                .values("estado_nomina", "val_estat")
                 .annotate(total=Count("pk"))
             )
 
@@ -1833,11 +1834,20 @@ class EmpleadosCompletosEstatusNominaResumenView(APIView):
 
             for item in conteo_raw:
                 estado = item.get("estado_nomina")
+                val_estat = item.get("val_estat")
                 total = item.get("total") or 0
 
-                # Normalizar estados según el mapeo solicitado
+                # Normalizar estados según el mapeo solicitado. `val_estat`
+                # ("Ocupada"/"Vacante") es un respaldo para cuando
+                # `estado_nomina` llega vacío/código no reconocido pese a que
+                # la plaza sí tiene ocupante real (acciones de personal muy
+                # recientes donde nómina aún no asigna el código A/S/L/P) —
+                # mismo criterio que mapEstadoNomina en el frontend
+                # (PlantillaDetalleTab.jsx), para que esta tarjeta de resumen
+                # no contradiga el conteo real de la tabla.
+                vacante_fallback = "Activo" if val_estat == "Ocupada" else "Vacante"
                 if not estado or estado.strip() == "":
-                    label = "Vacante"
+                    label = vacante_fallback
                 else:
                     estado_upper = estado.strip().upper()
                     if estado_upper == "A":
@@ -1849,7 +1859,7 @@ class EmpleadosCompletosEstatusNominaResumenView(APIView):
                     elif estado_upper == "P":
                         label = "Licencia_Medica"
                     else:
-                        label = "Vacante"
+                        label = vacante_fallback
 
                 resumen[label] = resumen.get(label, 0) + total
 
