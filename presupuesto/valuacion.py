@@ -47,6 +47,14 @@ def calcular_meses_periodo(fecha_inicio: date, fecha_fin: date) -> float:
     """Meses de evaluación entre dos fechas, en meses virtuales de 30 días.
 
     Devuelve 0.0 si el período es inválido (fin anterior al inicio).
+
+    El resultado se redondea a 4 decimales (p. ej. 6.0333, no
+    6.033333333333333) — es el valor que se multiplica tal cual contra
+    sueldos y compensaciones en `calcular_valuacion`, así que la precisión se
+    fija aquí, en el origen, para que todos los importes derivados usen
+    exactamente el mismo número redondeado. Espejo exacto en el front:
+    `calcularMeses` en SimuladorValuacion.jsx — si se toca una, hay que
+    tocar la otra.
     """
     if not fecha_inicio or not fecha_fin or fecha_fin < fecha_inicio:
         return 0.0
@@ -55,14 +63,14 @@ def calcular_meses_periodo(fecha_inicio: date, fecha_fin: date) -> float:
     dv_fin = _dia_virtual(fecha_fin)
 
     if (fecha_inicio.year, fecha_inicio.month) == (fecha_fin.year, fecha_fin.month):
-        return max(0, dv_fin - dv_ini + 1) / DIAS_MES_VIRTUAL
+        return round(max(0, dv_fin - dv_ini + 1) / DIAS_MES_VIRTUAL, 4)
 
     fraccion_inicio = (DIAS_MES_VIRTUAL + 1 - dv_ini) / DIAS_MES_VIRTUAL
     fraccion_fin = dv_fin / DIAS_MES_VIRTUAL
     meses_completos = (
         (fecha_fin.year * 12 + fecha_fin.month) - (fecha_inicio.year * 12 + fecha_inicio.month) - 1
     )
-    return fraccion_inicio + max(0, meses_completos) + fraccion_fin
+    return round(fraccion_inicio + max(0, meses_completos) + fraccion_fin, 4)
 
 
 # --- Valuación --------------------------------------------------------------

@@ -220,7 +220,16 @@ class CatalogoPlazasViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'])
     def calcular(self, request):
-        meses = request.data.get('meses', 12)
+        # El front (SimuladorValuacion.jsx, `calcularMeses`) ya manda `meses`
+        # redondeado a 4 decimales, pero se redondea también aquí — no
+        # confiar en que quien llame este endpoint (hoy sólo el simulador,
+        # pero es una API) respete esa precisión — para que todos los
+        # importes derivados salgan de exactamente el mismo número que usa
+        # `calcular_meses_periodo` en `presupuesto/valuacion.py`.
+        try:
+            meses = round(float(request.data.get('meses', 12)), 4)
+        except (TypeError, ValueError):
+            meses = 12
         plazas_input = request.data.get('plazas', []) # List of {catalogo_id: number, plazas: number}
 
         if not plazas_input:
