@@ -5,3 +5,6 @@ __pycache__/
 staticfiles/
 DEPLOY.md
 media/
+.env.bak.20260704151656
+Anexo 2_ Sol Ocupación 875 plazas UAs_.xlsx
+logs/sicre_media_sync.log
