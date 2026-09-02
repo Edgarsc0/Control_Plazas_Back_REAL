@@ -1396,30 +1396,44 @@ def _get_datos_mov_pos_bulk_map(posiciones):
     return {pos: filas[mov_id] for pos, mov_id in mapa_ids.items() if mov_id in filas}
 
 
-def _get_mapa_puesto_funcional(codigos_puesto):
-    """``{cd_puesto: nombre_puesto_funcional}`` desde CAT_PTO_FUNC."""
-    codigos = {str(c).strip() for c in codigos_puesto if c}
-    if not codigos:
-        return {}
-    return dict(
-        CatPtoFunc.objects.filter(cd_pto_funcional__in=codigos).values_list(
-            "cd_pto_funcional", "nombre_puesto_funcional"
+def _get_mapa_puesto_funcional():
+    """``{cd_puesto: nombre_puesto_funcional}`` desde CAT_PTO_FUNC, catálogo
+    completo cacheado 30 min (551 filas — trivial de tener entero en memoria).
+
+    Antes filtraba por los códigos presentes en cada request
+    (``CatPtoFunc.objects.filter(cd_pto_funcional__in=codigos)``), lo que
+    repetía esa consulta sin cachear en cada apertura del dropdown de
+    "Puesto" en Mov. Posiciones (~1.3s extra medidos sólo en esta consulta,
+    sobre las ~13k filas de `is_latest=true`) — cachear el catálogo entero
+    es más simple y más rápido que cachear por combinación de códigos.
+    Invalidado en ``CatPtoFuncViewSet`` al crear/editar/borrar.
+    """
+    mapa = cache.get("mapa_puesto_funcional_completo")
+    if mapa is None:
+        mapa = dict(
+            CatPtoFunc.objects.values_list("cd_pto_funcional", "nombre_puesto_funcional")
         )
-    )
+        cache.set("mapa_puesto_funcional_completo", mapa, 1800)
+    return mapa
 
 
-def _get_mapa_cod_presupuestal(pares_codigo_escala):
+def _get_mapa_cod_presupuestal():
     """``{(puesto_ptal, escala): {nivel, smn}}`` desde rc_cat_cod_presupuestal
     (catálogo "Códigos Presupuestales" en Catálogos > Estructura
-    Organizacional) — llave compuesta código+escala, igual que en BD."""
-    pares = {(c, e) for c, e in pares_codigo_escala if c and e is not None}
-    if not pares:
-        return {}
-    codigos = {c for c, _ in pares}
-    filas = RcCatCodPresupuestal.objects.filter(codigo_presupuestal__in=codigos).values(
-        "codigo_presupuestal", "escala", "nivel", "smn"
-    )
-    return {(f["codigo_presupuestal"], f["escala"]): f for f in filas}
+    Organizacional) — llave compuesta código+escala, igual que en BD.
+
+    Catálogo completo cacheado 30 min (192 filas), mismo motivo que
+    ``_get_mapa_puesto_funcional``. Invalidado en
+    ``RcCatCodPresupuestalViewSet`` al crear/editar/borrar.
+    """
+    mapa = cache.get("mapa_cod_presupuestal_completo")
+    if mapa is None:
+        filas = RcCatCodPresupuestal.objects.values(
+            "codigo_presupuestal", "escala", "nivel", "smn"
+        )
+        mapa = {(f["codigo_presupuestal"], f["escala"]): f for f in filas}
+        cache.set("mapa_cod_presupuestal_completo", mapa, 1800)
+    return mapa
 
 
 def _escala_entera(valor):
@@ -1443,14 +1457,8 @@ def enriquecer_mov_pos_rows(resultados):
     if not resultados:
         return
 
-    cd_puestos = {r.get("cd_puesto") for r in resultados if r.get("cd_puesto")}
-    pares_presupuestal = {
-        (r.get("puesto_ptal"), _escala_entera(r.get("esc")))
-        for r in resultados
-        if r.get("puesto_ptal")
-    }
-    mapa_puesto_funcional = _get_mapa_puesto_funcional(cd_puestos)
-    mapa_presupuestal = _get_mapa_cod_presupuestal(pares_presupuestal)
+    mapa_puesto_funcional = _get_mapa_puesto_funcional()
+    mapa_presupuestal = _get_mapa_cod_presupuestal()
     mapa_en_anuencia = _get_mapa_codigos_en_anuencia()
 
     for r in resultados:
@@ -1465,6 +1473,42 @@ def enriquecer_mov_pos_rows(resultados):
             str(r.get("partida_ptal") or "").strip(), ""
         )
         r["anuencia_anexo_nombre"] = mapa_en_anuencia.get(str(r.get("codigo") or "").strip(), "")
+
+
+# Columnas de MOV_POS que NO son campos reales del modelo, calculadas en
+# Python después de la consulta — filtrar/ordenar/mostrar el dropdown de
+# estas columnas no puede resolverse con SQL directo (a diferencia de
+# "ocupacion"/"fecha_anuencia", que si tiran a una anotación o un mapa
+# barato); necesitan materializar la fila completa vía `enriquecer_mov_pos_rows`
+# (ver `_calcular_columnas_derivadas_mov_pos` y su uso en `MovPosDetalleView`
+# para filtros de columna, filtros avanzados y el dropdown de cada una).
+CAMPOS_DERIVADOS_MOV_POS = {
+    "codigo",
+    "denominacion_puesto",
+    "nivel_salarial",
+    "salario_mensual_neto",
+    "tipo_contratacion",
+    "anuencia_anexo_nombre",
+}
+
+
+def _calcular_columnas_derivadas_mov_pos(queryset):
+    """
+    ``{no_pos_actual: {codigo, denominacion_puesto, nivel_salarial,
+    salario_mensual_neto, tipo_contratacion, anuencia_anexo_nombre}}`` para
+    TODAS las filas de `queryset` (sin paginar) — reusa exactamente
+    `enriquecer_mov_pos_rows` (la misma que rellena esas columnas para
+    mostrarlas en pantalla) para que un filtro sobre una de ellas nunca
+    pueda "mentir" respecto a lo que se ve en la tabla.
+    """
+    filas = list(queryset.values("no_pos_actual", "cd_puesto", "puesto_ptal", "esc", "partida_ptal"))
+    if not filas:
+        return {}
+    mapa_codigos = _get_mapa_codigos()
+    for f in filas:
+        f["codigo"] = mapa_codigos.get(f["no_pos_actual"], "")
+    enriquecer_mov_pos_rows(filas)
+    return {f["no_pos_actual"]: f for f in filas}
 
 
 def populate_movpos_occupant_details(resultados, posiciones_ocupadas):
@@ -3716,7 +3760,25 @@ class MovPosDetalleView(APIView):
             if f.get_internal_type() in ["CharField", "TextField"]
         ]
 
-        def fecha_anuencia_column_resolver(base_field, suffix, val_list, is_exclude):
+        _cache_columnas_derivadas = {}
+
+        def _match_columna_derivada(valor, suffix, val_list):
+            valor_str = str(valor if valor is not None else "")
+            if suffix in (None, "in"):
+                return valor_str in set(val_list)
+            needle = str(val_list[0] if val_list else "").lower()
+            s = valor_str.lower()
+            if suffix == "icontains":
+                return needle in s
+            if suffix == "istartswith":
+                return s.startswith(needle)
+            if suffix == "iendswith":
+                return s.endswith(needle)
+            if suffix == "iexact":
+                return s == needle
+            return False
+
+        def mov_pos_column_filter_resolver(base_field, suffix, val_list, is_exclude):
             # Sólo intercepta la selección múltiple del dropdown (__in / valor
             # único, que es como llega desde "Aplicar Filtro" en el front) —
             # ver docstring de apply_dynamic_column_filters. Sin esto,
@@ -3724,22 +3786,43 @@ class MovPosDetalleView(APIView):
             # anotación DateField y tiraba 500 en cuanto la selección incluía
             # una categoría de texto (p. ej. "Nueva Creación") o el token de
             # vacío (bug reportado: aplicar el filtro no actualizaba la tabla).
-            if base_field != "fecha_anuencia":
+            if base_field == "fecha_anuencia":
+                posiciones_ocupadas = get_posiciones_ocupadas_set()
+                wanted = set(val_list)
+                match_pos = [
+                    pos for pos, fa in queryset.values_list("no_pos_actual", "fecha_anuencia")
+                    if resolve_fecha_anuencia_value(
+                        pos, fa, posiciones_ocupadas,
+                        fecha_anuencia_overrides_texto, fecha_anuencia_baseline_texto,
+                    ) in wanted
+                ]
+                return Q(no_pos_actual__in=match_pos) if match_pos else Q(pk__in=[])
+
+            # "codigo"/"denominacion_puesto"/"nivel_salarial"/
+            # "salario_mensual_neto"/"tipo_contratacion"/"anuencia_anexo_nombre"
+            # no son campos reales de MOV_POS — sin este resolver, la rama
+            # genérica de apply_dynamic_column_filters los saltaba en
+            # silencio (`base_field not in valid_fields`) y "Aplicar Filtro"
+            # no hacía nada en esas columnas (el dropdown sí mostraba
+            # opciones porque `distinct_field` ya las resolvía aparte, pero
+            # aplicar el filtro quedaba mudo). Memoizado: si se filtra más de
+            # una de estas columnas en la misma request, sólo se calcula una
+            # vez (el valor de cada columna es propio de la posición, no
+            # depende de qué tan angosto esté `queryset` en ese momento).
+            if base_field not in CAMPOS_DERIVADOS_MOV_POS:
                 return None
-            posiciones_ocupadas = get_posiciones_ocupadas_set()
-            wanted = set(val_list)
+            if not _cache_columnas_derivadas:
+                _cache_columnas_derivadas.update(_calcular_columnas_derivadas_mov_pos(queryset))
             match_pos = [
-                pos for pos, fa in queryset.values_list("no_pos_actual", "fecha_anuencia")
-                if resolve_fecha_anuencia_value(
-                    pos, fa, posiciones_ocupadas,
-                    fecha_anuencia_overrides_texto, fecha_anuencia_baseline_texto,
-                ) in wanted
+                pos for pos, datos in _cache_columnas_derivadas.items()
+                if _match_columna_derivada(datos.get(base_field), suffix, val_list)
             ]
             return Q(no_pos_actual__in=match_pos) if match_pos else Q(pk__in=[])
 
         queryset = apply_dynamic_column_filters(
-            queryset, request, MovPos, extra_valid_fields={"fecha_anuencia"},
-            computed_field_resolver=fecha_anuencia_column_resolver,
+            queryset, request, MovPos,
+            extra_valid_fields={"fecha_anuencia", *CAMPOS_DERIVADOS_MOV_POS},
+            computed_field_resolver=mov_pos_column_filter_resolver,
         )
 
         # "ocupacion" is a computed column (not a real model field), so the
@@ -3846,6 +3929,8 @@ class MovPosDetalleView(APIView):
         # columnas calculadas (no campos reales del modelo), por eso
         # apply_advanced_filters() necesita este resolver; el resto es genérico
         # (ver apply_advanced_filters).
+        _cache_columnas_derivadas_avanzados = {}
+
         def mov_pos_computed_resolver(column, condition, value):
             def get_posiciones_ocupadas():
                 cache_key_ocupadas = "mov_pos_ocupadas_set"
@@ -3917,9 +4002,35 @@ class MovPosDetalleView(APIView):
                     return Q(pk__in=[])
                 return Q(no_pos_actual__in=match_pos)
 
+            # Mismas 6 columnas calculadas que en el resolver de "Aplicar
+            # Filtro" de arriba (ver `mov_pos_column_filter_resolver`) —
+            # aquí también faltaban, así que "Filtros Avanzados" tampoco
+            # filtraba nada al usarlas.
+            if column in CAMPOS_DERIVADOS_MOV_POS:
+                if "datos" not in _cache_columnas_derivadas_avanzados:
+                    _cache_columnas_derivadas_avanzados["datos"] = _calcular_columnas_derivadas_mov_pos(queryset)
+                datos_por_pos = _cache_columnas_derivadas_avanzados["datos"]
+                match_pos = [
+                    pos for pos, datos in datos_por_pos.items()
+                    if text_condition_matches(datos.get(column, ""), condition, value)
+                ]
+                if not match_pos:
+                    return Q(pk__in=[])
+                return Q(no_pos_actual__in=match_pos)
+
             return None
 
         queryset = apply_advanced_filters(
+            # OJO: a diferencia de apply_dynamic_column_filters, aquí
+            # `extra_valid_fields` hace que la columna se trate como campo
+            # REAL en la lógica genérica — `computed_resolver` sólo se llama
+            # para columnas que NO estén en `valid_fields` (ver
+            # `build_condition_q`: "if column not in valid_fields"). Por eso
+            # las 6 columnas calculadas de MOV_POS (CAMPOS_DERIVADOS_MOV_POS)
+            # NO van aquí, igual que "ocupacion"/"total_movimientos" tampoco
+            # van — deben quedar AFUERA de `valid_fields` para que caigan al
+            # resolver en vez de a la rama genérica, que las trataría como un
+            # campo real inexistente y filtraría en silencio sin resultado.
             queryset, request, MovPos, computed_resolver=mov_pos_computed_resolver,
             extra_valid_fields={"fecha_anuencia"},
         )
@@ -3967,18 +4078,25 @@ class MovPosDetalleView(APIView):
                 results = []
             return Response(results)
 
-        # "codigo" se inyecta post-query desde CatCorreccionPosicion (ver
-        # `_get_mapa_codigos`/`r["codigo"] = ...` más abajo), no es un campo
-        # real de MovPos -> no está en `valid_fields` y sin esta rama caía al
-        # fallback de abajo, devolviendo el listado paginado completo en vez
-        # de valores distintos (rompía el dropdown de filtro de esa columna).
-        if distinct_field == "codigo":
-            mapa_codigos = _get_mapa_codigos()
-            all_pos = list(queryset.values_list("no_pos_actual", flat=True))
+        # "codigo"/"denominacion_puesto"/"nivel_salarial"/
+        # "salario_mensual_neto"/"tipo_contratacion"/"anuencia_anexo_nombre"
+        # se calculan post-query (ver CAMPOS_DERIVADOS_MOV_POS), no son campos
+        # reales de MovPos -> no están en `valid_fields` y sin esta rama
+        # caían al fallback genérico de abajo, devolviendo el listado
+        # paginado completo en vez de valores distintos (rompía el dropdown
+        # de filtro de esas columnas).
+        if distinct_field in CAMPOS_DERIVADOS_MOV_POS:
+            datos_por_pos = _calcular_columnas_derivadas_mov_pos(queryset)
             counts = {}
-            for pos in all_pos:
-                val = mapa_codigos.get(pos, "")
+            for datos in datos_por_pos.values():
+                val = datos.get(distinct_field, "")
                 counts[val] = counts.get(val, 0) + 1
+
+            distinct_search = request.query_params.get("distinct_search", "").strip()
+            if distinct_search:
+                needle = distinct_search.lower()
+                counts = {k: v for k, v in counts.items() if needle in str(k).lower()}
+
             results = [
                 {"value": k, "count": v} for k, v in sorted(counts.items())
             ]
@@ -7425,6 +7543,22 @@ class CatPtoFuncViewSet(AuditedViewSetMixin, viewsets.ModelViewSet):
     serializer_class = CatPtoFuncSerializer
     view_permission = "authentication.view_plantilla_catalogos"
 
+    # `_get_mapa_puesto_funcional` cachea este catálogo completo 30 min (ver
+    # su docstring) — sin invalidar aquí, un código recién agregado/editado
+    # tardaría hasta 30 min en verse reflejado en la columna "Puesto" de
+    # Mov. Posiciones / Anexo 2, en vez de al momento.
+    def perform_create(self, serializer):
+        super().perform_create(serializer)
+        cache.delete("mapa_puesto_funcional_completo")
+
+    def perform_update(self, serializer):
+        super().perform_update(serializer)
+        cache.delete("mapa_puesto_funcional_completo")
+
+    def perform_destroy(self, instance):
+        super().perform_destroy(instance)
+        cache.delete("mapa_puesto_funcional_completo")
+
 
 class RcCatCodPresupuestalViewSet(AuditedViewSetMixin, viewsets.ModelViewSet):
     """
@@ -7438,6 +7572,19 @@ class RcCatCodPresupuestalViewSet(AuditedViewSetMixin, viewsets.ModelViewSet):
     queryset = RcCatCodPresupuestal.objects.all()
     serializer_class = RcCatCodPresupuestalSerializer
     view_permission = "authentication.view_plantilla_catalogos"
+
+    # Mismo motivo que en CatPtoFuncViewSet — ver `_get_mapa_cod_presupuestal`.
+    def perform_create(self, serializer):
+        super().perform_create(serializer)
+        cache.delete("mapa_cod_presupuestal_completo")
+
+    def perform_update(self, serializer):
+        super().perform_update(serializer)
+        cache.delete("mapa_cod_presupuestal_completo")
+
+    def perform_destroy(self, instance):
+        super().perform_destroy(instance)
+        cache.delete("mapa_cod_presupuestal_completo")
 
     def get_object(self):
         from django.shortcuts import get_object_or_404
@@ -8217,19 +8364,8 @@ def _resolver_datos_anuencia(codigos):
         return {}
 
     datos_mov_pos = _get_datos_mov_pos_bulk_map(posiciones)
-    cd_puestos = {str(d.get("cd_puesto") or "").strip() for d in datos_mov_pos.values()}
-    pares_presupuestal = set()
-    for d in datos_mov_pos.values():
-        puesto_ptal = str(d.get("puesto_ptal") or "").strip()
-        try:
-            escala = int(str(d.get("esc") or "").strip())
-        except ValueError:
-            escala = None
-        if puesto_ptal:
-            pares_presupuestal.add((puesto_ptal, escala))
-
-    mapa_puesto_funcional = _get_mapa_puesto_funcional(cd_puestos)
-    mapa_presupuestal = _get_mapa_cod_presupuestal(pares_presupuestal)
+    mapa_puesto_funcional = _get_mapa_puesto_funcional()
+    mapa_presupuestal = _get_mapa_cod_presupuestal()
     mapa_fecha_vacancia = _get_fecha_vacancia_bulk_map(posiciones)
     mapa_mov_pos_id = _get_mov_pos_id_bulk_map(posiciones)
     posiciones_ocupadas = _get_posiciones_ocupadas_set()
