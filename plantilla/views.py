@@ -8491,6 +8491,140 @@ class AnuenciaLookupBulkView(APIView):
             )
 
 
+def _mapa_columnas_plantilla_historica():
+    """db_column crudo (tal como lo devuelve `sp_plantilla_historica`) -> field
+    name snake_case, derivado de `EmpleadosCompletosSig` (mismo esquema que el
+    SP reconstruye) + las 2 columnas que el SP agrega y que no existen en ese
+    modelo (`Estado Plaza`, calculado por posición; `Salario base (mov)`,
+    tomado del movimiento del empleado). Derivarlo del modelo (en vez de
+    mantener un diccionario manual, como mapVacanteRow.js en el front) evita
+    que ambos se desincronicen si el modelo gana/pierde una columna."""
+    mapa = {field.column: field.name for field in EmpleadosCompletosSig._meta.fields}
+    mapa["Estado Plaza"] = "estado_plaza"
+    mapa["Salario base (mov)"] = "salario_base_mov"
+    return mapa
+
+
+def _mapear_fila_plantilla_historica(row, cols, mapa_columnas):
+    from decimal import Decimal
+
+    fila = {}
+    for key, value in zip(cols, row):
+        if isinstance(value, Decimal):
+            value = float(value)
+        fila[mapa_columnas.get(key, key)] = value
+    # Etiqueta lista para pintar (Activa/Inactiva) — evita que cada consumidor
+    # del front tenga que traducir el código A/I de `estado_plaza`.
+    fila["estado_plaza_label"] = "Activa" if fila.get("estado_plaza") == "A" else "Inactiva"
+    return fila
+
+
+class PlantillaHistoricaView(APIView):
+    """Reconstruye la plantilla completa (una fila por plaza, con su estado
+    Activa/Inactiva y su ocupante si aplica) a una fecha pasada arbitraria —
+    botón "Consultar plantillas pasadas" en el tab Plantilla Detalle.
+
+    Combina 2 stored procedures con el mismo criterio de corte:
+      - `sp_conteo_plazas_historico`: desglose plazas totales/activas/
+        inactivas/ocupadas/vacantes (barato, sin reconstruir cada fila) — se
+        usa como resumen "oficial" en las tarjetas del front.
+      - `sp_plantilla_historica`: la reconstrucción fila por fila (pesado:
+        ~90s, joins completos sobre MOV_POS/cp_tbl_mov_completo_29_05_26) +
+        su propio resumen (se toma sólo para las 2 columnas de anomalías,
+        que `sp_conteo_plazas_historico` no calcula).
+
+    GET ?fecha=YYYY-MM-DD (obligatoria, entre 2022-01-01 y hoy — mismo límite
+    inferior que exigen ambos SPs: inicio de MOV_POS/ANAM).
+    """
+
+    view_permission = "authentication.view_plantilla_historico"
+
+    _FECHA_MINIMA = datetime.date(2022, 1, 1)
+
+    def get(self, request, *args, **kwargs):
+        from django.db import connection
+
+        fecha_str = (request.query_params.get("fecha") or "").strip()
+        try:
+            fecha = datetime.datetime.strptime(fecha_str, "%Y-%m-%d").date()
+        except ValueError:
+            return Response(
+                {"error": "Parámetro 'fecha' inválido u omitido, se espera formato YYYY-MM-DD."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        hoy = datetime.date.today()
+        if fecha < self._FECHA_MINIMA or fecha > hoy:
+            return Response(
+                {
+                    "error": (
+                        f"'fecha' debe estar entre {self._FECHA_MINIMA.isoformat()} y "
+                        f"{hoy.isoformat()} (inicio de MOV_POS/ANAM)."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        cache_key = f"plantilla_historica_{fecha.isoformat()}"
+        cached_data = cache.get(cache_key)
+        if cached_data is not None:
+            return Response(cached_data, status=status.HTTP_200_OK)
+
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("CALL sp_conteo_plazas_historico(%s)", [fecha])
+                conteo_cols = [col[0] for col in cursor.description]
+                conteo_row = cursor.fetchone()
+                conteo = dict(zip(conteo_cols, conteo_row)) if conteo_row else {}
+                cursor.nextset()
+
+                cursor.execute("CALL sp_plantilla_historica(%s)", [fecha])
+                resumen_cols = [col[0] for col in cursor.description]
+                resumen_row = cursor.fetchone()
+                resumen_sp = dict(zip(resumen_cols, resumen_row)) if resumen_row else {}
+                cursor.nextset()
+
+                filas_cols = [col[0] for col in cursor.description]
+                filas_rows = cursor.fetchall()
+                cursor.nextset()
+
+            mapa_columnas = _mapa_columnas_plantilla_historica()
+            filas = [
+                _mapear_fila_plantilla_historica(row, filas_cols, mapa_columnas)
+                for row in filas_rows
+            ]
+
+            def _entero(valor):
+                return int(valor) if valor is not None else None
+
+            resumen = {
+                "plazas_totales": _entero(conteo.get("Plazas totales", resumen_sp.get("Plazas totales"))),
+                "plazas_activas": _entero(conteo.get("Plazas activas", resumen_sp.get("Plazas activas"))),
+                "plazas_inactivas": _entero(conteo.get("Plazas inactivas", resumen_sp.get("Plazas inactivas"))),
+                "ocupadas": _entero(conteo.get("Ocupadas", resumen_sp.get("Ocupadas"))),
+                "vacantes": _entero(conteo.get("Vacantes", resumen_sp.get("Vacantes"))),
+                "anomalia_ocupante_en_plaza_inactiva": _entero(resumen_sp.get("Anomalia ocupante en plaza inactiva")),
+                "anomalia_ocupante_sin_plaza": _entero(resumen_sp.get("Anomalia ocupante sin plaza")),
+            }
+
+            payload = _serializar_fechas({
+                "fecha": fecha.isoformat(),
+                "resumen": resumen,
+                "filas": filas,
+            })
+            # 24h: una fecha pasada cerrada nunca cambia de resultado (MOV_POS/
+            # cp_tbl_mov_completo_29_05_26 son históricos append-only); si
+            # `fecha` es hoy, el corte sí puede moverse durante el día, pero
+            # 24h de margen es aceptable frente al costo (~90s) de repetir el
+            # cálculo en cada consulta.
+            cache.set(cache_key, payload, 60 * 60 * 24)
+            return Response(payload, status=status.HTTP_200_OK)
+        except Exception:
+            logger.exception("Error inesperado en {}".format(request.path))
+            return Response(
+                {"error": "Error interno del servidor"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
 class ConteoPlazasHistoricoSerieView(APIView):
     # Serie mensual (corte a fin de cada mes desde 2022-01) de plazas
     # totales/activas/inactivas/ocupadas/vacantes, para la gráfica histórica

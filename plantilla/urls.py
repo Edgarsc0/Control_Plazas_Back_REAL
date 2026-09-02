@@ -79,6 +79,7 @@ from .views import (
     AnuenciaSugerenciasView,
     CuadroVacanciaView,
     ConteoPlazasHistoricoSerieView,
+    PlantillaHistoricaView,
     PlazasMovimientoMesView,
     DesgloseJerarquicoView,
     DesgloseJerarquicoOcupadosView,
@@ -569,6 +570,11 @@ urlpatterns = [
         "conteo_plazas_historico_serie/",
         ConteoPlazasHistoricoSerieView.as_view(),
         name="conteo_plazas_historico_serie",
+    ),
+    path(
+        "plantilla_historica/",
+        PlantillaHistoricaView.as_view(),
+        name="plantilla_historica",
     ),
     path(
         "plazas_movimiento_mes/",
