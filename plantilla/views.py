@@ -6382,6 +6382,73 @@ class CeldaUpdatesSSEView(View):
         return response
 
 
+class AnuenciaAnexoUpdatesSSEView(View):
+    """
+    SSE dedicado a cambios de AnuenciaAnexo (sub-tab "Anuencia" de Mov.
+    Posiciones), para reflejar en vivo cuando alguien agrega/quita plazas de
+    un Anexo 2 desde OTRA sesión — típicamente, agregarlas desde el menú
+    contextual de la tabla de Mov. Posiciones (ver AgregarAAnexo2Modal.jsx)
+    mientras ese mismo Anexo 2 está abierto en AnuenciaTab.jsx en otra
+    pestaña/usuario (ver `_notificar_actualizacion_anuencia_anexo`).
+
+    Mismo patrón exacto que CeldaUpdatesSSEView (token por query param, sin
+    fallback por BD porque no hay una "última corrida" que consultar aquí).
+    """
+
+    def get(self, request):
+        import time
+
+        import redis
+        from django.db import connections
+        from django.http import HttpResponseForbidden, StreamingHttpResponse
+        from rest_framework.authtoken.models import Token
+
+        token_key = request.GET.get("token")
+        token_obj = (
+            Token.objects.filter(key=token_key).select_related("user").first()
+            if token_key else None
+        )
+        user = token_obj.user if token_obj else None
+        if not user or not user.is_active or not user.has_perm("authentication.view_plantilla_mov_posiciones"):
+            return HttpResponseForbidden("No autorizado.")
+
+        def event_stream():
+            r = redis.Redis.from_url(settings.CELERY_BROKER_URL)
+            pubsub = r.pubsub()
+            pubsub.subscribe("anuencia_anexo_updates")
+
+            yield "data: init\n\n"
+            start = time.monotonic()
+
+            try:
+                while True:
+                    if time.monotonic() - start > SSE_MAX_LIFETIME_SECONDS:
+                        break
+                    message = pubsub.get_message(
+                        ignore_subscribe_messages=True, timeout=20.0
+                    )
+                    if message:
+                        data_str = message["data"].decode("utf-8")
+                        yield f"data: {data_str}\n\n"
+                    else:
+                        yield ": ping\n\n"
+            finally:
+                try:
+                    pubsub.unsubscribe("anuencia_anexo_updates")
+                    pubsub.close()
+                except Exception:
+                    pass
+                connections.close_all()
+
+        response = StreamingHttpResponse(
+            event_stream(), content_type="text/event-stream"
+        )
+        response["Cache-Control"] = "no-cache"
+        response["X-Accel-Buffering"] = "no"
+        response["Content-Encoding"] = "identity"
+        return response
+
+
 from .models import BajasSig
 
 
@@ -7934,6 +8001,39 @@ class OrganigramaAnamViewSet(AuditedViewSetMixin, viewsets.ModelViewSet):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+def _notificar_actualizacion_anuencia_anexo(anexo, usuario):
+    """
+    Publica en el canal Redis "anuencia_anexo_updates" para que
+    AnuenciaAnexoUpdatesSSEView lo reenvíe a cualquier pestaña con este mismo
+    Anexo 2 abierto en AnuenciaTab.jsx — mismo patrón que
+    `celda_override.notificar_cambio_celda`/"plantilla_celda_updates".
+
+    El Anexo 2 es colaborativo: dos personas pueden tenerlo abierto a la vez
+    (una capturándolo directo en Anuencia, otra agregándole plazas desde el
+    menú contextual de Mov. Posiciones — ver AgregarAAnexo2Modal.jsx, que
+    hace PATCH sobre este mismo ViewSet). Sin este aviso, la pestaña que lo
+    tiene abierto nunca se entera de las plazas nuevas hasta recargar la
+    página a mano.
+
+    Va sólo el id (no `hojas`, que puede pesar cientos de KB): el cliente
+    decide si conviene traer el detalle completo o no (ver
+    useAnuenciaAnexoUpdatesRealtime.js — si hay cambios sin guardar en curso,
+    no se pisa el borrador local con un refetch silencioso).
+    """
+    import redis as redis_lib
+
+    r = redis_lib.Redis.from_url(settings.CELERY_BROKER_URL)
+    r.publish(
+        "anuencia_anexo_updates",
+        json.dumps({
+            "type": "anexo_update",
+            "anexo_id": anexo.id,
+            "usuario": usuario.username,
+            "usuario_nombre": usuario.get_full_name() or usuario.username,
+        }),
+    )
+
+
 class AnuenciaAnexoViewSet(viewsets.ModelViewSet):
     """
     Historial del ANEXO 2 (sub-tab "Anuencia" de Mov. Posiciones, ver
@@ -8002,10 +8102,12 @@ class AnuenciaAnexoViewSet(viewsets.ModelViewSet):
         # Un Anexo 2 nuevo puede traer plazas que Mov. Posiciones debe marcar
         # de inmediato como "ya en anuencia" (ver `_get_mapa_codigos_en_anuencia`).
         cache.delete("mapa_codigos_en_anuencia")
+        _notificar_actualizacion_anuencia_anexo(serializer.instance, self.request.user)
 
     def perform_update(self, serializer):
         serializer.save(actualizado_por=self.request.user)
         cache.delete("mapa_codigos_en_anuencia")
+        _notificar_actualizacion_anuencia_anexo(serializer.instance, self.request.user)
 
     @action(detail=True, methods=["post"])
     def generar(self, request, pk=None):
@@ -8037,6 +8139,7 @@ class AnuenciaAnexoViewSet(viewsets.ModelViewSet):
         anexo.eliminado_en = timezone.now()
         anexo.save(update_fields=["eliminado", "eliminado_por", "eliminado_en"])
         cache.delete("mapa_codigos_en_anuencia")
+        _notificar_actualizacion_anuencia_anexo(anexo, request.user)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=False, methods=["get"])
@@ -8078,6 +8181,7 @@ class AnuenciaAnexoViewSet(viewsets.ModelViewSet):
         anexo.eliminado_en = None
         anexo.save(update_fields=["eliminado", "eliminado_por", "eliminado_en"])
         cache.delete("mapa_codigos_en_anuencia")
+        _notificar_actualizacion_anuencia_anexo(anexo, request.user)
         return Response(AnuenciaAnexoDetailSerializer(anexo).data)
 
 

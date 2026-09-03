@@ -48,6 +48,7 @@ from .views import (
     InvalidarCacheZafiroView,
     ZafiroSSEView,
     CeldaUpdatesSSEView,
+    AnuenciaAnexoUpdatesSSEView,
     BajasSigListView,
     BajasMotivosPieView,
     BajasHistoricoView,
@@ -547,6 +548,11 @@ urlpatterns = [
         "anuencia/anexos/eliminados/",
         AnuenciaAnexoViewSet.as_view({"get": "eliminados"}),
         name="anuencia-anexos-eliminados",
+    ),
+    path(
+        "anuencia/anexos/updates/sse/",
+        AnuenciaAnexoUpdatesSSEView.as_view(),
+        name="anuencia-anexos-updates-sse",
     ),
     path(
         "anuencia/anexos/<int:pk>/",
