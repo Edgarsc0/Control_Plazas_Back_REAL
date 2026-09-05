@@ -90,6 +90,9 @@ from .views import (
     AduanasOcupacionVacanciaView,
     ColumnasQuincenalView,
     RotacionTitularesAduanasView,
+    PlazaSugerenciasView,
+    HistoriaPlazaView,
+    HistoriaEmpleadoView,
 )
 
 urlpatterns = [
@@ -117,6 +120,23 @@ urlpatterns = [
         "rotacion-titulares-aduanas/",
         RotacionTitularesAduanasView.as_view(),
         name="rotacion-titulares-aduanas",
+    ),
+    path(
+        "plazas/sugerencias/",
+        PlazaSugerenciasView.as_view(),
+        name="plazas-sugerencias",
+    ),
+    # Arbol de movimientos: el tronco (plaza) y las ramas (empleado) son dos
+    # rutas separadas porque el arbol se carga por nodo, bajo demanda.
+    path(
+        "historia-plaza/<str:posicion>/",
+        HistoriaPlazaView.as_view(),
+        name="historia-plaza",
+    ),
+    path(
+        "historia-empleado/<str:num_empleado>/",
+        HistoriaEmpleadoView.as_view(),
+        name="historia-empleado",
     ),
     path(
         "organigrama-deptos/",

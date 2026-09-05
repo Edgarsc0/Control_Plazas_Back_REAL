@@ -10630,3 +10630,203 @@ def _serializar_fechas(valor):
     if hasattr(valor, "isoformat"):
         return valor.isoformat()
     return valor
+
+
+# =============================================================================
+# Árbol de movimientos — subtab de MovimientosPersonalTab
+# =============================================================================
+# Dos vistas deliberadamente separadas porque el árbol se carga POR NODO, bajo
+# demanda: cargarlo completo crecería de forma explosiva (cada plaza abre N
+# empleados y cada empleado N plazas). El front pide el tronco al escribir la
+# plaza y sólo pide la rama de un empleado cuando el usuario la expande.
+#
+# Todo el algoritmo vive en los SPs (ver PLAN_SP_HISTORIA_PLAZA_2026-09-03.md);
+# estas vistas sólo llaman e hidratan la respuesta.
+
+
+def _filas_de_sp(cursor):
+    """Filas del cursor como lista de dicts con fechas ya en ISO."""
+    columnas = [col[0] for col in cursor.description]
+    return [_serializar_fechas(dict(zip(columnas, fila))) for fila in cursor.fetchall()]
+
+
+class PlazaSugerenciasView(APIView):
+    """Autocompletado del número de plaza mientras se escribe (input de
+    "Árbol de movimientos", ver ArbolMovimientosSubTab.jsx).
+
+    Filtra sobre EMPLEADOS_COMPLETOS_SIG (posición indexada, ~40 mil filas)
+    en vez de cp_tbl_mov_completo_29_05_26 (histórico, sin índice sobre
+    posición) — cubre las plazas vigentes en el dataset de ZAFIRO, que es
+    el caso de uso real de este buscador.
+
+    GET /plantilla/plazas/sugerencias/?q=<prefijo>
+
+    Si la plaza está ocupada, incluye "ocupante" (nombre completo) para que
+    se pueda distinguir sin tener que abrir el árbol.
+    """
+
+    view_permission = (
+        "authentication.view_plantilla_mov_posiciones",
+        "authentication.view_plantilla_movimientos",
+    )
+    LIMITE_DEFAULT = 8
+    LIMITE_MAXIMO = 20
+
+    def get(self, request, *args, **kwargs):
+        termino = (request.query_params.get("q") or "").strip()
+        if len(termino) < 2:
+            return Response([], status=status.HTTP_200_OK)
+
+        try:
+            limite = min(int(request.query_params.get("limit", self.LIMITE_DEFAULT)), self.LIMITE_MAXIMO)
+        except (TypeError, ValueError):
+            limite = self.LIMITE_DEFAULT
+
+        filas = (
+            EmpleadosCompletosSig.objects.filter(posicion__istartswith=termino)
+            .exclude(posicion__isnull=True)
+            .exclude(posicion="")
+            .values("posicion", "nombre_puesto_funcional", "nombres")
+            .order_by("posicion")
+            .distinct()[:limite]
+        )
+        resultados = [
+            {
+                "posicion": f["posicion"],
+                "puesto": f["nombre_puesto_funcional"],
+                "ocupada": bool((f["nombres"] or "").strip()),
+                "ocupante": (f["nombres"] or "").strip() or None,
+            }
+            for f in filas
+        ]
+        return Response(resultados, status=status.HTTP_200_OK)
+
+
+class HistoriaPlazaView(APIView):
+    """Pila cronológica continua de una plaza: creación, ocupaciones, vacancias,
+    insubsistencias y movimientos de tránsito.
+
+    Es el TRONCO del árbol de movimientos. Devuelve `sp_historia_plaza` tal cual,
+    más un encabezado con el conteo de gestiones (sólo los periodos de tipo
+    `ocupacion` cuentan: insubsistencias y tránsitos no).
+
+    GET /plantilla/historia-plaza/<posicion>/
+    """
+
+    view_permission = (
+        "authentication.view_plantilla_mov_posiciones",
+        "authentication.view_plantilla_movimientos",
+    )
+
+    def get(self, request, posicion, *args, **kwargs):
+        posicion = (posicion or "").strip()
+        if not posicion:
+            return Response(
+                {"detail": "La posición es obligatoria."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        cache_key = f"historia_plaza_{posicion}"
+        if request.query_params.get("refrescar") != "1":
+            en_cache = cache.get(cache_key)
+            if en_cache is not None:
+                return Response(en_cache, status=status.HTTP_200_OK)
+
+        with connection.cursor() as cursor:
+            cursor.execute("CALL sp_historia_plaza(%s)", [posicion])
+            periodos = _filas_de_sp(cursor)
+            while cursor.nextset():
+                pass
+
+        if not periodos:
+            return Response(
+                {"detail": f"La posición {posicion} no existe o no tiene historia."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        actual = next((p for p in periodos if p.get("es_ocupante_actual")), None)
+        datos = {
+            "posicion": posicion,
+            "ocupada": actual is not None,
+            "ocupante_actual": actual.get("num_empleado") if actual else None,
+            "num_gestiones": sum(1 for p in periodos if p.get("tipo_periodo") == "ocupacion"),
+            "num_insubsistencias": sum(
+                1 for p in periodos if p.get("tipo_periodo") == "insubsistencia"
+            ),
+            # El front lo usa para avisar que el dato de origen se contradice.
+            "tiene_inconsistencias": any(p.get("inconsistente") for p in periodos),
+            "periodos": periodos,
+        }
+
+        # 5 min: el SP tarda ~30ms, pero el usuario expande y colapsa ramas
+        # repetidamente y no tiene sentido repetir la consulta cada vez.
+        cache.set(cache_key, datos, timeout=300)
+        return Response(datos, status=status.HTTP_200_OK)
+
+
+class HistoriaEmpleadoView(APIView):
+    """Tramos de un empleado en todas las plazas por las que pasó.
+
+    Es una RAMA del árbol: se pide sólo cuando el usuario expande un empleado.
+    No incluye periodos de vacancia — la vacancia es propiedad de la plaza, no
+    del empleado, y la aporta el tronco (HistoriaPlazaView).
+
+    GET /plantilla/historia-empleado/<num_empleado>/
+    """
+
+    view_permission = (
+        "authentication.view_plantilla_mov_posiciones",
+        "authentication.view_plantilla_movimientos",
+    )
+
+    def get(self, request, num_empleado, *args, **kwargs):
+        num_empleado = (num_empleado or "").strip()
+        if not num_empleado:
+            return Response(
+                {"detail": "El número de empleado es obligatorio."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        cache_key = f"historia_empleado_{num_empleado}"
+        if request.query_params.get("refrescar") != "1":
+            en_cache = cache.get(cache_key)
+            if en_cache is not None:
+                return Response(en_cache, status=status.HTTP_200_OK)
+
+        with connection.cursor() as cursor:
+            cursor.execute("CALL sp_historia_empleado(%s)", [num_empleado])
+            tramos = _filas_de_sp(cursor)
+            while cursor.nextset():
+                pass
+
+        if not tramos:
+            return Response(
+                {"detail": f"El empleado {num_empleado} no tiene movimientos registrados."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        nombre = ""
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT MAX(TRIM(CONCAT(COALESCE(nombre,''), ' ',
+                                       COALESCE(ap_pat,''), ' ',
+                                       COALESCE(ap_mat,''))))
+                FROM cp_tbl_mov_completo_29_05_26
+                WHERE num_empleado = %s
+                """,
+                [num_empleado],
+            )
+            fila = cursor.fetchone()
+            if fila and fila[0]:
+                nombre = fila[0]
+
+        datos = {
+            "num_empleado": num_empleado,
+            "nombre_completo": nombre,
+            "num_plazas": len({t["posicion"] for t in tramos}),
+            "num_tramos": len(tramos),
+            "tramos": tramos,
+        }
+        cache.set(cache_key, datos, timeout=300)
+        return Response(datos, status=status.HTTP_200_OK)
