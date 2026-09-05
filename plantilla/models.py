@@ -1975,6 +1975,38 @@ class AnuenciaAnexo(models.Model):
         return f"Anexo {self.id} · {self.nombre_archivo or 'sin nombre'}"
 
 
+class AnuenciaAnexoCambio(models.Model):
+    """
+    Historial de cambios de un Anexo 2 — a diferencia de `actualizado_por`/
+    `actualizado_en` en AnuenciaAnexo (que sólo guardan el ÚLTIMO editor),
+    aquí queda UNA fila por cada guardado con un resumen legible de QUÉ
+    cambió (hojas y plazas agregadas/eliminadas, campos editados a mano) —
+    para el botón "Historial de cambios" de AnuenciaTab.jsx. Se genera
+    comparando el `hojas` anterior contra el nuevo en cada guardado (ver
+    `_diff_hojas_anuencia` en views.py), tanto si lo dispara el usuario
+    (botón Guardar) como el auto-guardado.
+
+    `on_delete=PROTECT` en `usuario`: mismo criterio que el resto de campos
+    de auditoría de AnuenciaAnexo — la baja de un usuario nunca debe borrar
+    en cascada su historial de cambios. `anexo` sí es CASCADE (como
+    `anexo3_versiones`): es historial DE ese anexo, sin sentido huérfano.
+    """
+
+    anexo = models.ForeignKey(AnuenciaAnexo, on_delete=models.CASCADE, related_name="cambios")
+    usuario = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    fecha = models.DateTimeField(auto_now_add=True)
+    # Líneas legibles, ya armadas: ["Agregó 3 plazas a \"Hoja 1\"", "Eliminó la hoja \"SUBS\"", ...]
+    cambios = models.JSONField(default=list)
+
+    class Meta:
+        ordering = ["-fecha"]
+        verbose_name = "Cambio de Anexo de Anuencia"
+        verbose_name_plural = "Cambios de Anexo de Anuencia"
+
+    def __str__(self):
+        return f"Cambio en Anexo {self.anexo_id} · {self.fecha}"
+
+
 class AnuenciaAnexo3Version(models.Model):
     """
     Una "versión" guardada del Anexo 3 (FUMP) generado a partir de un

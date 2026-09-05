@@ -2,6 +2,7 @@ from rest_framework import serializers
 from .models import (
     AnuenciaAnexo,
     AnuenciaAnexo3Version,
+    AnuenciaAnexoCambio,
     AnuenciaJustificacionCatalogo,
     CatAcciones,
     CatAccionesMotivos,
@@ -168,6 +169,20 @@ class AnuenciaAnexoDetailSerializer(_UsuarioAuditoriaMixin):
             "generado_por_email", "generado_en", "veces_generado",
             "eliminado", "eliminado_en", "eliminado_por_email",
         ]
+
+
+class AnuenciaAnexoCambioSerializer(serializers.ModelSerializer):
+    """Una entrada del historial de cambios de un Anexo 2 (botón "Historial
+    de cambios" de AnuenciaTab.jsx) — ver AnuenciaAnexoCambio."""
+
+    usuario_nombre = serializers.SerializerMethodField()
+
+    class Meta:
+        model = AnuenciaAnexoCambio
+        fields = ["id", "fecha", "usuario_nombre", "cambios"]
+
+    def get_usuario_nombre(self, obj):
+        return obj.usuario.get_full_name() or obj.usuario.username
 
 
 class AnuenciaAnexo3VersionListSerializer(serializers.ModelSerializer):

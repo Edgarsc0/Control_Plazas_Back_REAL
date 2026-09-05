@@ -37,6 +37,7 @@ from .models import (
     AlineacionOrganizacionalHistorico,
     AnuenciaAnexo,
     AnuenciaAnexo3Version,
+    AnuenciaAnexoCambio,
     AnuenciaJustificacionCatalogo,
     CatAcciones,
     CatAccionesMotivos,
@@ -90,6 +91,7 @@ from .nivel_jerarquico_sync import aplicar_prioridad_nivel_jerarquico
 from .serializers import (
     AnuenciaAnexo3VersionDetailSerializer,
     AnuenciaAnexo3VersionListSerializer,
+    AnuenciaAnexoCambioSerializer,
     AnuenciaAnexoDetailSerializer,
     AnuenciaAnexoListSerializer,
     AnuenciaJustificacionCatalogoSerializer,
@@ -1176,6 +1178,69 @@ def _get_mapa_codigos_en_anuencia():
     return mapa
 
 
+def _get_mapa_fecha_alta_solicitada_anuencia():
+    """
+    ``{codigo: {"fecha_alta_solicitada", "anexo_id", "hoja_id", "fila_id",
+    "nombre_archivo"}}`` — para cada Código Federal de Puesto que esté en
+    algún Anexo 2 guardado (no eliminado), la ``fecha_alta_solicitada`` que
+    se capturó ahí, más las claves necesarias para poder editarla de vuelta
+    (ver ``MovPosFechaAltaSolicitadaOverrideView``).
+
+    Usado en Mov. Posiciones para mostrar la columna "Fecha de alta
+    solicitada" (ver ``enriquecer_mov_pos_rows``) sincronizada con el Anexo 2
+    sin duplicar el dato en un campo del modelo — el Anexo 2 (``hojas``) es
+    la única fuente de verdad.
+
+    Si un código está en más de un Anexo 2 (legítimo — ver
+    ``_get_mapa_codigos_en_anuencia``), se usa el más recientemente
+    actualizado: es el que refleja mejor el estado actual de la solicitud.
+
+    Cacheado 5 min; se invalida junto con "mapa_codigos_en_anuencia" (ver
+    ``_invalidar_cache_anuencia``).
+    """
+    mapa = cache.get("mapa_fecha_alta_solicitada_anuencia")
+    if mapa is not None:
+        return mapa
+    mapa = {}
+    # `.order_by()` vacío cancela el `Meta.ordering` (-actualizado_en) del
+    # modelo — igual que en `_get_mapa_codigos_en_anuencia`: un ORDER BY con
+    # la columna `hojas` (JSON grande) en juego fuerza un filesort en MySQL
+    # que se queda sin sort_buffer_size con varios Anexo 2 de cientos de
+    # plazas (error 1038, confirmado al probar este mismo cambio). El más
+    # reciente se decide en Python, no en SQL (ver abajo).
+    qs = AnuenciaAnexo.objects.filter(eliminado=False).order_by()
+    filas = list(qs.values_list("id", "nombre_archivo", "hojas", "actualizado_en"))
+    filas.sort(key=lambda f: f[3], reverse=True)
+    for anexo_id, nombre, hojas, _actualizado_en in filas:
+        for hoja in hojas or []:
+            hoja_id = hoja.get("_id")
+            for fila in hoja.get("filas") or []:
+                codigo = str(fila.get("codigo") or "").strip()
+                if not codigo or codigo in mapa:
+                    continue
+                fila_id = fila.get("_id")
+                if not fila_id:
+                    continue
+                mapa[codigo] = {
+                    "fecha_alta_solicitada": fila.get("fecha_alta_solicitada") or "",
+                    "anexo_id": anexo_id,
+                    "hoja_id": hoja_id,
+                    "fila_id": fila_id,
+                    "nombre_archivo": nombre,
+                }
+    cache.set("mapa_fecha_alta_solicitada_anuencia", mapa, 300)
+    return mapa
+
+
+def _invalidar_cache_anuencia():
+    """Invalida los mapas cacheados que Mov. Posiciones deriva de los Anexo 2
+    guardados (ver `_get_mapa_codigos_en_anuencia` /
+    `_get_mapa_fecha_alta_solicitada_anuencia`) — llamar tras cualquier
+    guardado, eliminación o reactivación de un Anexo 2."""
+    cache.delete("mapa_codigos_en_anuencia")
+    cache.delete("mapa_fecha_alta_solicitada_anuencia")
+
+
 def _completar_aduana_row(r, mapa_tipo_aduana=None, mapa_dg_aduana=None):
     """
     Completa `tipo_de_aduana`/`dg_o_aduana_compactada` con el valor del
@@ -1477,6 +1542,7 @@ def enriquecer_mov_pos_rows(resultados):
     mapa_puesto_funcional = _get_mapa_puesto_funcional()
     mapa_presupuestal = _get_mapa_cod_presupuestal()
     mapa_en_anuencia = _get_mapa_codigos_en_anuencia()
+    mapa_fecha_alta = _get_mapa_fecha_alta_solicitada_anuencia()
 
     for r in resultados:
         r["denominacion_puesto"] = mapa_puesto_funcional.get(r.get("cd_puesto"), "")
@@ -1489,9 +1555,17 @@ def enriquecer_mov_pos_rows(resultados):
         r["tipo_contratacion"] = _TIPO_CONTRATACION_ANEXO2.get(
             str(r.get("partida_ptal") or "").strip(), ""
         )
-        nombres = mapa_en_anuencia.get(str(r.get("codigo") or "").strip(), [])
+        codigo = str(r.get("codigo") or "").strip()
+        nombres = mapa_en_anuencia.get(codigo, [])
         r["anuencia_anexo_nombres"] = nombres
         r["anuencia_anexo_nombre"] = ", ".join(nombres)
+        # "Fecha de alta solicitada": vive únicamente dentro de `hojas` del
+        # Anexo 2 (no hay campo propio en MOV_POS) — sólo se puede editar
+        # desde aquí si el código está en alguno (ver
+        # MovPosFechaAltaSolicitadaOverrideView).
+        info_alta = mapa_fecha_alta.get(codigo)
+        r["fecha_alta_solicitada"] = (info_alta or {}).get("fecha_alta_solicitada") or ""
+        r["fecha_alta_solicitada_editable"] = info_alta is not None
 
 
 # Columnas de MOV_POS que NO son campos reales del modelo, calculadas en
@@ -1508,6 +1582,7 @@ CAMPOS_DERIVADOS_MOV_POS = {
     "salario_mensual_neto",
     "tipo_contratacion",
     "anuencia_anexo_nombre",
+    "fecha_alta_solicitada",
 }
 
 
@@ -4336,8 +4411,18 @@ class MovPosDetalleView(APIView):
         # Sorting
         sort_by_param = request.query_params.get("sort_by", "").strip()
         sort_order = request.query_params.get("sort_order", "desc").strip().lower()
-        if sort_by_param:
-            sort_fields = [f.strip() for f in sort_by_param.split(",")]
+        sort_fields = [f.strip() for f in sort_by_param.split(",")] if sort_by_param else []
+        # Columnas calculadas en Python DESPUÉS de la consulta (ver
+        # CAMPOS_DERIVADOS_MOV_POS/enriquecer_mov_pos_rows — Puesto, Nivel
+        # Salarial, Salario Mensual Neto, Tipo de Contratación, En Anuencia,
+        # Fecha de alta solicitada): no son campos ni anotaciones reales de
+        # MovPos, así que nunca entran a `valid_fields` y un ORDER BY de SQL
+        # sobre ellas no tiene efecto — ANTES esto se ignoraba en silencio
+        # (la petición se mandaba pero la tabla no se reordenaba). Se
+        # detectan aquí para ordenarlas aparte, en Python, sobre el
+        # resultado ya enriquecido (ver más abajo).
+        campos_derivados_sort = [f for f in sort_fields if f in CAMPOS_DERIVADOS_MOV_POS]
+        if sort_fields:
             order_by_args = []
             for field in sort_fields:
                 if field in valid_fields:
@@ -4360,32 +4445,25 @@ class MovPosDetalleView(APIView):
             # SELECT * FROM MOV_POS ORDERY BY fecha efectiva DESC, FECHA CAPTURA DESC, y ordenar tambien por posicion
             queryset = queryset.order_by("-f_efva", "-fecha_captura", "no_pos_actual")
 
-        # Excel download or full list without pagination (bypass pagination if is_latest is true)
-        no_pagination = (
-            request.query_params.get("no_pagination", "false").strip().lower() == "true"
-            or is_latest
-        )
-        # `pagination=true`: usado sólo por clientes externos (rendicionCuentasBack vía
-        # eje_central_client.py) para forzar el paginador real de abajo aun cuando
-        # is_latest quedó en su default true. eje_central_front nunca manda este flag,
-        # así que su respuesta (envelope completo, sin slicing real) no cambia.
-        if request.query_params.get("pagination", "false").strip().lower() == "true":
-            no_pagination = False
-        if no_pagination:
-            resultados = list(queryset.values())
+        def _enriquecer_resultados(resultados):
+            """Agrega a cada fila `total_movimientos`, `estatus_ocupacion`/
+            `ocupacion`, corrige `fecha_vacancia`/`fecha_anuencia` para las
+            ocupadas y resuelve las columnas derivadas (ver
+            `enriquecer_mov_pos_rows`) — mismo trabajo que antes se repetía
+            casi idéntico en las 3 ramas de respuesta de abajo."""
+            if not resultados:
+                return resultados
             counts = dict(
                 MovPos.objects.values_list("no_pos_actual").annotate(c=Count("id"))
             )
-
-            cache_key_ocupadas = "mov_pos_ocupadas_set"
-            posiciones_ocupadas = cache.get(cache_key_ocupadas)
+            posiciones_ocupadas = cache.get("mov_pos_ocupadas_set")
             if posiciones_ocupadas is None:
                 with connection.cursor() as cursor:
                     cursor.execute(OCUPADAS_RAW_SQL)
                     posiciones_ocupadas = set(
                         [row[0] for row in cursor.fetchall() if row[0]]
                     )
-                cache.set(cache_key_ocupadas, posiciones_ocupadas, 600)
+                cache.set("mov_pos_ocupadas_set", posiciones_ocupadas, 600)
 
             populate_movpos_occupant_details(resultados, posiciones_ocupadas)
             mapa_codigos = _get_mapa_codigos()
@@ -4405,7 +4483,90 @@ class MovPosDetalleView(APIView):
                     fecha_anuencia_overrides_texto, fecha_anuencia_baseline_texto,
                 )
             enriquecer_mov_pos_rows(resultados)
+            return resultados
 
+        # Excel download or full list without pagination (bypass pagination if is_latest is true)
+        no_pagination = (
+            request.query_params.get("no_pagination", "false").strip().lower() == "true"
+            or is_latest
+        )
+        # `pagination=true`: usado sólo por clientes externos (rendicionCuentasBack vía
+        # eje_central_client.py) para forzar el paginador real de abajo aun cuando
+        # is_latest quedó en su default true. eje_central_front nunca manda este flag,
+        # así que su respuesta (envelope completo, sin slicing real) no cambia.
+        if request.query_params.get("pagination", "false").strip().lower() == "true":
+            no_pagination = False
+
+        if campos_derivados_sort:
+            # No se puede ordenar en SQL por una columna calculada en Python
+            # (ver arriba) — se materializa TODO lo filtrado, se enriquece y
+            # se ordena en memoria, y recién después se pagina/recorta según
+            # lo que haya pedido el cliente. `sort()` es estable: se ordena
+            # de la columna menos prioritaria a la más prioritaria para que
+            # un `sort_by` con varias columnas se resuelva en el orden
+            # correcto (la primera manda, las demás desempatan).
+            resultados = _enriquecer_resultados(list(queryset.values()))
+            reverse = sort_order == "desc"
+
+            def _clave_ordenable(campo):
+                # Valor "puro" (sin marca de vacío): a un vacío se le da un
+                # placeholder de un tipo comparable con el resto (0.0 para
+                # numéricas, "" para texto) — no importa dónde caiga en este
+                # paso, el segundo `sort()` de abajo lo manda al final sin
+                # importar la dirección pedida.
+                es_numerico = campo == "salario_mensual_neto"
+
+                def _clave(r):
+                    val = r.get(campo)
+                    if val in (None, ""):
+                        return 0.0 if es_numerico else ""
+                    if es_numerico:
+                        try:
+                            return float(val)
+                        except (TypeError, ValueError):
+                            return 0.0
+                    return str(val).lower()
+
+                return _clave
+
+            for campo in reversed(campos_derivados_sort):
+                resultados.sort(key=_clave_ordenable(campo), reverse=reverse)
+
+            # Los vacíos SIEMPRE al final, sin importar asc/desc (si se
+            # horneara la marca de vacío dentro de la clave de arriba,
+            # `reverse=True` los mandaría al frente en descendente — no es lo
+            # que espera el usuario al ordenar una columna). `sort()` es
+            # estable, así que esto sólo reubica los vacíos sin desordenar lo
+            # que el paso anterior ya dejó bien puesto.
+            campo_principal = campos_derivados_sort[0]
+            resultados.sort(key=lambda r: r.get(campo_principal) in (None, ""))
+
+            if no_pagination:
+                is_excel_mode = (
+                    request.query_params.get("no_pagination", "false").strip().lower()
+                    == "true"
+                )
+                if not is_excel_mode:
+                    stats = get_mov_pos_stats()
+                    return Response(
+                        {
+                            "next": None,
+                            "previous": None,
+                            "count": len(resultados),
+                            "results": resultados,
+                            "stats": stats,
+                        }
+                    )
+                return Response(resultados)
+
+            paginator = self.pagination_class()
+            page = paginator.paginate_queryset(resultados, request, view=self)
+            if page is not None:
+                return paginator.get_paginated_response(page)
+            return Response(resultados)
+
+        if no_pagination:
+            resultados = _enriquecer_resultados(list(queryset.values()))
             is_excel_mode = (
                 request.query_params.get("no_pagination", "false").strip().lower()
                 == "true"
@@ -4426,74 +4587,10 @@ class MovPosDetalleView(APIView):
         paginator = self.pagination_class()
         page = paginator.paginate_queryset(queryset.values(), request, view=self)
         if page is not None:
-            resultados = list(page)
-            counts = dict(
-                MovPos.objects.values_list("no_pos_actual").annotate(c=Count("id"))
-            )
-
-            cache_key_ocupadas = "mov_pos_ocupadas_set"
-            posiciones_ocupadas = cache.get(cache_key_ocupadas)
-            if posiciones_ocupadas is None:
-                with connection.cursor() as cursor:
-                    cursor.execute(OCUPADAS_RAW_SQL)
-                    posiciones_ocupadas = set(
-                        [row[0] for row in cursor.fetchall() if row[0]]
-                    )
-                cache.set(cache_key_ocupadas, posiciones_ocupadas, 600)
-
-            populate_movpos_occupant_details(resultados, posiciones_ocupadas)
-            mapa_codigos = _get_mapa_codigos()
-            for r in resultados:
-                pos = r.get("no_pos_actual")
-                r["total_movimientos"] = counts.get(pos, 1)
-                r["estatus_ocupacion"] = (
-                    "Ocupada" if pos in posiciones_ocupadas else "Vacante"
-                )
-                r["ocupacion"] = r["estatus_ocupacion"]
-                r["fecha_vacancia"] = (
-                    "" if pos in posiciones_ocupadas else r.get("fecha_vacancia", "")
-                )
-                r["codigo"] = mapa_codigos.get(pos, "")
-                corregir_fecha_anuencia_row(
-                    r, pos, posiciones_ocupadas, fecha_anuencia_overrides,
-                    fecha_anuencia_overrides_texto, fecha_anuencia_baseline_texto,
-                )
-            enriquecer_mov_pos_rows(resultados)
+            resultados = _enriquecer_resultados(list(page))
             return paginator.get_paginated_response(resultados)
 
-        resultados = list(queryset.values())
-        counts = dict(
-            MovPos.objects.values_list("no_pos_actual").annotate(c=Count("id"))
-        )
-
-        cache_key_ocupadas = "mov_pos_ocupadas_set"
-        posiciones_ocupadas = cache.get(cache_key_ocupadas)
-        if posiciones_ocupadas is None:
-            with connection.cursor() as cursor:
-                cursor.execute(OCUPADAS_RAW_SQL)
-                posiciones_ocupadas = set(
-                    [row[0] for row in cursor.fetchall() if row[0]]
-                )
-            cache.set(cache_key_ocupadas, posiciones_ocupadas, 600)
-
-        populate_movpos_occupant_details(resultados, posiciones_ocupadas)
-        mapa_codigos = _get_mapa_codigos()
-        for r in resultados:
-            pos = r.get("no_pos_actual")
-            r["total_movimientos"] = counts.get(pos, 1)
-            r["estatus_ocupacion"] = (
-                "Ocupada" if pos in posiciones_ocupadas else "Vacante"
-            )
-            r["ocupacion"] = r["estatus_ocupacion"]
-            r["fecha_vacancia"] = (
-                "" if pos in posiciones_ocupadas else r.get("fecha_vacancia", "")
-            )
-            r["codigo"] = mapa_codigos.get(pos, "")
-            corregir_fecha_anuencia_row(
-                r, pos, posiciones_ocupadas, fecha_anuencia_overrides,
-                fecha_anuencia_overrides_texto, fecha_anuencia_baseline_texto,
-            )
-        enriquecer_mov_pos_rows(resultados)
+        resultados = _enriquecer_resultados(list(queryset.values()))
         return Response(resultados)
 
 
@@ -4595,6 +4692,91 @@ class MovPosFechaAnuenciaOverrideView(APIView):
         borrar_override_fecha_anuencia(no_pos_actual)
         fecha_anuencia = _recalcular_fecha_anuencia_actual(no_pos_actual)
         return Response({"no_pos_actual": no_pos_actual, "fecha_anuencia": fecha_anuencia})
+
+
+class MovPosFechaAltaSolicitadaOverrideView(APIView):
+    """
+    Edición de "Fecha de alta solicitada" desde Mov. Posiciones — a
+    diferencia de `MovPosFechaAnuenciaOverrideView` (que guarda en una tabla
+    de overrides propia), este campo NO tiene un dueño propio: vive dentro
+    de `hojas` de un AnuenciaAnexo (ver `_get_mapa_fecha_alta_solicitada_anuencia`),
+    así que editarlo aquí escribe directamente sobre esa fila del Anexo 2 y
+    dispara el mismo aviso SSE ("anuencia_anexo_updates") que usa
+    AnuenciaTab.jsx — por eso una pestaña con ese Anexo 2 abierto ve el
+    cambio sin recargar, igual que si se hubiera editado ahí mismo.
+
+    Sólo se puede editar si el Código Federal de Puesto ya está en algún
+    Anexo 2 guardado (no hay dónde más guardarlo); si no, 400.
+    """
+
+    edit_permission = (
+        "authentication.edit_plantilla_mov_posiciones",
+        "authentication.edit_plantilla_detalle",
+    )
+
+    def _aplicar(self, request, codigo, valor_nuevo):
+        from django.shortcuts import get_object_or_404
+
+        if not codigo:
+            return Response({"detail": "codigo es requerido."}, status=status.HTTP_400_BAD_REQUEST)
+
+        info = _get_mapa_fecha_alta_solicitada_anuencia().get(codigo)
+        if not info:
+            return Response(
+                {"detail": "Esta posición no está en ningún Anexo 2 guardado; agrégala primero para poder capturar su fecha de alta solicitada."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        anexo = get_object_or_404(AnuenciaAnexo, pk=info["anexo_id"], eliminado=False)
+        hojas = anexo.hojas or []
+        fila_encontrada = None
+        nombre_hoja = None
+        for hoja in hojas:
+            if hoja.get("_id") != info["hoja_id"]:
+                continue
+            nombre_hoja = hoja.get("nombre") or "(sin nombre)"
+            for fila in hoja.get("filas") or []:
+                if fila.get("_id") == info["fila_id"]:
+                    fila_encontrada = fila
+                    break
+            break
+
+        if fila_encontrada is None:
+            return Response(
+                {"detail": "No se encontró la plaza dentro de ese Anexo 2 (puede haber cambiado); recarga e intenta de nuevo."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        valor_anterior = fila_encontrada.get("fecha_alta_solicitada") or ""
+        valor_nuevo = valor_nuevo or ""
+        if valor_anterior == valor_nuevo:
+            return Response({"codigo": codigo, "fecha_alta_solicitada": valor_nuevo, "sin_cambios": True})
+
+        fila_encontrada["fecha_alta_solicitada"] = valor_nuevo
+        anexo.hojas = hojas
+        anexo.actualizado_por = request.user
+        anexo.save(update_fields=["hojas", "actualizado_por", "actualizado_en"])
+
+        _invalidar_cache_anuencia()
+        _notificar_actualizacion_anuencia_anexo(anexo, request.user)
+        resumen = _resumen_fila_anuencia(fila_encontrada)
+        etiqueta = "Editó" if valor_nuevo else "Borró"
+        detalle = (
+            f'{etiqueta} Fecha de alta solicitada de {resumen} en "{nombre_hoja}": '
+            f'"{valor_anterior or "—"}" → "{valor_nuevo or "—"}" (desde Mov. Posiciones)'
+        )
+        _registrar_cambio_anuencia_anexo(anexo, request.user, [detalle])
+
+        return Response({"codigo": codigo, "fecha_alta_solicitada": valor_nuevo, "anexo_id": anexo.id})
+
+    def post(self, request):
+        codigo = str(request.data.get("codigo") or "").strip()
+        valor_nuevo = request.data.get("valor_nuevo")
+        return self._aplicar(request, codigo, valor_nuevo)
+
+    def delete(self, request):
+        codigo = str(request.data.get("codigo") or "").strip()
+        return self._aplicar(request, codigo, "")
 
 
 class MovPosHistoriaView(APIView):
@@ -7999,6 +8181,138 @@ class OrganigramaAnamViewSet(AuditedViewSetMixin, viewsets.ModelViewSet):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+# Campos del cuadro del Anexo 2 sobre los que se detectan ediciones manuales
+# para el historial de cambios (ver _diff_hojas_anuencia) — mismo conjunto
+# que ANEXO2_COLUMNAS en el front (anexo2Schema.js), sin las columnas
+# puramente informativas (_unidadDeNegocioResuelta, _movPosId, etc.) que no
+# captura el usuario a mano.
+_CAMPOS_FILA_ANUENCIA_ANEXO2 = [
+    ("ramo", "Ramo"),
+    ("unidad_responsable", "Unidad Responsable"),
+    ("codigo", "Código"),
+    ("denominacion_puesto", "Denominación del puesto"),
+    ("nivel_salarial", "Nivel Salarial"),
+    ("rango_salarial", "Rango Salarial"),
+    ("numero_plazas", "Número de plazas"),
+    ("numero_horas", "Número de Horas"),
+    ("tipo_contratacion", "Tipo de contratación"),
+    ("fecha_inicio_vacancia", "Fecha de inicio de la vacancia"),
+    ("fecha_alta_solicitada", "Fecha de alta solicitada"),
+    ("oficio_autorizacion", "Oficio de autorización presupuestaria"),
+]
+
+# Tope defensivo: un guardado con cientos de ediciones a la vez (p. ej. el
+# backfill silencioso de Unidad de Negocio/Rango que corre AnuenciaTab.jsx al
+# abrir un anexo viejo, ver AnuenciaTab.jsx/backfillUnidadNegocioYRango) no
+# debe producir una entrada de historial de cientos de líneas ilegibles.
+_MAX_LINEAS_CAMBIO_ANUENCIA = 40
+
+
+def _resumen_fila_anuencia(fila):
+    codigo = str(fila.get("codigo") or "").strip()
+    denominacion = str(fila.get("denominacion_puesto") or "").strip()
+    if codigo and denominacion:
+        return f"{codigo} — {denominacion}"
+    return codigo or denominacion or "(plaza sin código)"
+
+
+def _diff_hojas_anuencia(hojas_antes, hojas_despues):
+    """
+    Compara el `hojas` de un AnuenciaAnexo antes/después de un guardado y
+    arma una lista de líneas legibles para el historial de cambios (ver
+    AnuenciaAnexoCambio) — hojas agregadas/eliminadas/renombradas, plazas
+    agregadas/eliminadas, y campos editados a mano en una plaza que ya
+    existía. Nunca lanza: ante cualquier forma inesperada de los datos, esa
+    comparación puntual simplemente se salta (mejor un historial incompleto
+    que un guardado que falla por esto) — de ahí el try/except al llamarla.
+    """
+    lineas = []
+
+    def por_id(lista):
+        return {h.get("_id"): h for h in (lista or []) if h.get("_id")}
+
+    mapa_antes = por_id(hojas_antes)
+    mapa_despues = por_id(hojas_despues)
+
+    for hoja_id, hoja in mapa_despues.items():
+        if hoja_id in mapa_antes:
+            continue
+        n = len(hoja.get("filas") or [])
+        nombre = hoja.get("nombre") or "(sin nombre)"
+        extra = f" con {n} {'plaza' if n == 1 else 'plazas'}" if n else ""
+        lineas.append(f'Agregó la hoja "{nombre}"{extra}')
+
+    for hoja_id, hoja in mapa_antes.items():
+        if hoja_id in mapa_despues:
+            continue
+        n = len(hoja.get("filas") or [])
+        nombre = hoja.get("nombre") or "(sin nombre)"
+        extra = f" (tenía {n} {'plaza' if n == 1 else 'plazas'})" if n else ""
+        lineas.append(f'Eliminó la hoja "{nombre}"{extra}')
+
+    for hoja_id, hoja_d in mapa_despues.items():
+        hoja_a = mapa_antes.get(hoja_id)
+        if not hoja_a:
+            continue
+        nombre_d = hoja_d.get("nombre") or "(sin nombre)"
+        nombre_a = hoja_a.get("nombre") or "(sin nombre)"
+        if nombre_a != nombre_d:
+            lineas.append(f'Renombró la hoja "{nombre_a}" a "{nombre_d}"')
+        if (hoja_a.get("unidad_administrativa") or "") != (hoja_d.get("unidad_administrativa") or ""):
+            lineas.append(f'Cambió la Unidad Administrativa de "{nombre_d}"')
+        if (hoja_a.get("justificacion") or "") != (hoja_d.get("justificacion") or ""):
+            lineas.append(f'Editó la justificación de "{nombre_d}"')
+
+        filas_a = por_id(hoja_a.get("filas"))
+        filas_d = por_id(hoja_d.get("filas"))
+
+        agregadas = [f for fid, f in filas_d.items() if fid not in filas_a]
+        eliminadas = [f for fid, f in filas_a.items() if fid not in filas_d]
+
+        if len(agregadas) == 1:
+            lineas.append(f'Agregó la plaza {_resumen_fila_anuencia(agregadas[0])} a "{nombre_d}"')
+        elif agregadas:
+            lineas.append(f'Agregó {len(agregadas)} plazas a "{nombre_d}"')
+
+        if len(eliminadas) == 1:
+            lineas.append(f'Eliminó la plaza {_resumen_fila_anuencia(eliminadas[0])} de "{nombre_d}"')
+        elif eliminadas:
+            lineas.append(f'Eliminó {len(eliminadas)} plazas de "{nombre_d}"')
+
+        for fid, fila_d in filas_d.items():
+            fila_a = filas_a.get(fid)
+            if not fila_a:
+                continue
+            for campo, etiqueta in _CAMPOS_FILA_ANUENCIA_ANEXO2:
+                antes = fila_a.get(campo)
+                despues = fila_d.get(campo)
+                if (antes or "") == (despues or ""):
+                    continue
+                if len(lineas) >= _MAX_LINEAS_CAMBIO_ANUENCIA:
+                    continue
+                lineas.append(
+                    f'Editó {etiqueta} de {_resumen_fila_anuencia(fila_d)} en "{nombre_d}": '
+                    f'"{antes or "—"}" → "{despues or "—"}"'
+                )
+
+    if len(lineas) > _MAX_LINEAS_CAMBIO_ANUENCIA:
+        lineas = lineas[:_MAX_LINEAS_CAMBIO_ANUENCIA] + ["… y más cambios (se omiten por espacio)"]
+
+    return lineas
+
+
+def _registrar_cambio_anuencia_anexo(anexo, usuario, cambios):
+    """Guarda una entrada de historial si `cambios` trae algo — nunca lanza
+    (ver docstring de _diff_hojas_anuencia): un fallo aquí no debe tumbar un
+    guardado que por lo demás salió bien."""
+    if not cambios:
+        return
+    try:
+        AnuenciaAnexoCambio.objects.create(anexo=anexo, usuario=usuario, cambios=cambios)
+    except Exception:
+        logger.exception("Error al registrar historial de cambios del Anexo 2 %s", anexo.id)
+
+
 def _notificar_actualizacion_anuencia_anexo(anexo, usuario):
     """
     Publica en el canal Redis "anuencia_anexo_updates" para que
@@ -8099,13 +8413,34 @@ class AnuenciaAnexoViewSet(viewsets.ModelViewSet):
         serializer.save(creado_por=self.request.user, actualizado_por=self.request.user)
         # Un Anexo 2 nuevo puede traer plazas que Mov. Posiciones debe marcar
         # de inmediato como "ya en anuencia" (ver `_get_mapa_codigos_en_anuencia`).
-        cache.delete("mapa_codigos_en_anuencia")
+        _invalidar_cache_anuencia()
         _notificar_actualizacion_anuencia_anexo(serializer.instance, self.request.user)
+        total_hojas = len(serializer.instance.hojas or [])
+        total_plazas = sum(len(h.get("filas") or []) for h in (serializer.instance.hojas or []))
+        _registrar_cambio_anuencia_anexo(
+            serializer.instance,
+            self.request.user,
+            [
+                f"Creó el Anexo 2 con {total_plazas} {'plaza' if total_plazas == 1 else 'plazas'} "
+                f"en {total_hojas} {'hoja' if total_hojas == 1 else 'hojas'}."
+            ],
+        )
 
     def perform_update(self, serializer):
+        # `serializer.instance` todavía trae el `hojas` de ANTES en este
+        # punto — `.save()` lo reemplaza (no lo muta), así que capturarlo
+        # aquí antes de guardar es suficiente para diffear sin una query
+        # extra (ver _diff_hojas_anuencia).
+        hojas_antes = serializer.instance.hojas
         serializer.save(actualizado_por=self.request.user)
-        cache.delete("mapa_codigos_en_anuencia")
+        _invalidar_cache_anuencia()
         _notificar_actualizacion_anuencia_anexo(serializer.instance, self.request.user)
+        try:
+            cambios = _diff_hojas_anuencia(hojas_antes, serializer.instance.hojas)
+        except Exception:
+            logger.exception("Error al comparar hojas de Anexo 2 %s para el historial", serializer.instance.id)
+            cambios = []
+        _registrar_cambio_anuencia_anexo(serializer.instance, self.request.user, cambios)
 
     @action(detail=True, methods=["post"])
     def generar(self, request, pk=None):
@@ -8136,8 +8471,9 @@ class AnuenciaAnexoViewSet(viewsets.ModelViewSet):
         anexo.eliminado_por = request.user
         anexo.eliminado_en = timezone.now()
         anexo.save(update_fields=["eliminado", "eliminado_por", "eliminado_en"])
-        cache.delete("mapa_codigos_en_anuencia")
+        _invalidar_cache_anuencia()
         _notificar_actualizacion_anuencia_anexo(anexo, request.user)
+        _registrar_cambio_anuencia_anexo(anexo, request.user, ["Eliminó el Anexo 2."])
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=False, methods=["get"])
@@ -8178,9 +8514,20 @@ class AnuenciaAnexoViewSet(viewsets.ModelViewSet):
         anexo.eliminado_por = None
         anexo.eliminado_en = None
         anexo.save(update_fields=["eliminado", "eliminado_por", "eliminado_en"])
-        cache.delete("mapa_codigos_en_anuencia")
+        _invalidar_cache_anuencia()
         _notificar_actualizacion_anuencia_anexo(anexo, request.user)
+        _registrar_cambio_anuencia_anexo(anexo, request.user, ["Reactivó el Anexo 2."])
         return Response(AnuenciaAnexoDetailSerializer(anexo).data)
+
+    @action(detail=True, methods=["get"])
+    def historial(self, request, pk=None):
+        """Historial de cambios del Anexo 2 (ver AnuenciaAnexoCambio) — botón
+        "Historial de cambios" de AnuenciaTab.jsx. A diferencia de
+        actualizado_por/actualizado_en (sólo el último editor), aquí se ve
+        CADA guardado con un resumen legible de qué cambió."""
+        anexo = self.get_object()
+        cambios = anexo.cambios.select_related("usuario").all()
+        return Response(AnuenciaAnexoCambioSerializer(cambios, many=True).data)
 
 
 class AnuenciaAnexo3VersionViewSet(viewsets.ModelViewSet):

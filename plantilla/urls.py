@@ -32,6 +32,7 @@ from .views import (
     MovPosDetalleView,
     MovPosExportExcelView,
     MovPosFechaAnuenciaOverrideView,
+    MovPosFechaAltaSolicitadaOverrideView,
     MovPosHistoriaView,
     MovPosVacanciaDetalleView,
     MovPosOcupacionDetalleView,
@@ -450,6 +451,11 @@ urlpatterns = [
         name="mov_pos_fecha_anuencia_override",
     ),
     path(
+        "mov_pos_detalle/fecha_alta_solicitada_override/",
+        MovPosFechaAltaSolicitadaOverrideView.as_view(),
+        name="mov_pos_fecha_alta_solicitada_override",
+    ),
+    path(
         "mov_pos_detalle/override/historial/",
         MovPosCeldaHistorialView.as_view(),
         name="mov_pos_override_historial",
@@ -578,6 +584,11 @@ urlpatterns = [
         "anuencia/anexos/<int:pk>/reactivar/",
         AnuenciaAnexoViewSet.as_view({"post": "reactivar"}),
         name="anuencia-anexos-reactivar",
+    ),
+    path(
+        "anuencia/anexos/<int:pk>/historial/",
+        AnuenciaAnexoViewSet.as_view({"get": "historial"}),
+        name="anuencia-anexos-historial",
     ),
     path(
         "anuencia/anexo3/",
