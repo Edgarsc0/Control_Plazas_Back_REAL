@@ -869,6 +869,12 @@ class MovPosBase(models.Model):
     id_registro_des_fecha_ocupacion = models.BigIntegerField(
         db_column="ID_REGISTRO_DES_FECHA_OCUPACION", blank=True, null=True
     )
+    # Llenados por sp_dias_ocupacion_masivo (ver sp_dias_ocupacion_masivo.sql
+    # en la raíz del repo), llamado desde InvalidarCacheZafiroView justo antes
+    # de invalidar el caché del servidor — mismo momento y mismo orden que
+    # fecha_ocupacion arriba.
+    dias_ocupada = models.IntegerField(db_column="DIAS_OCUPADA", blank=True, null=True)
+    dias_vacante = models.IntegerField(db_column="DIAS_VACANTE", blank=True, null=True)
 
     class Meta:
         abstract = True

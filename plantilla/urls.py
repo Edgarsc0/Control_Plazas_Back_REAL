@@ -1,5 +1,10 @@
 from django.urls import path
 
+from .rotacion_plazas import (
+    RotacionPlazasMetricasView,
+    RotacionPlazasPeriodosView,
+)
+
 from .views import (
     EmpleadosBusquedaView,
     TorreCaballitoSearchView,
@@ -120,6 +125,19 @@ urlpatterns = [
         "rotacion-titulares-aduanas/",
         RotacionTitularesAduanasView.as_view(),
         name="rotacion-titulares-aduanas",
+    ),
+    # Rotación de plazas: la tabla de métricas (vista de entrada) y los
+    # periodos de las plazas elegidas (swimlane). Ambas leen las tablas
+    # materializadas por sp_rotacion_plazas, nunca el SP por plaza.
+    path(
+        "rotacion-plazas/metricas/",
+        RotacionPlazasMetricasView.as_view(),
+        name="rotacion-plazas-metricas",
+    ),
+    path(
+        "rotacion-plazas/periodos/",
+        RotacionPlazasPeriodosView.as_view(),
+        name="rotacion-plazas-periodos",
     ),
     path(
         "plazas/sugerencias/",

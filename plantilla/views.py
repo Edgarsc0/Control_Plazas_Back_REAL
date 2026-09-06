@@ -646,6 +646,29 @@ def apply_advanced_filters(
             return None
 
         if column in numeric_fields:
+            # El front ofrece ADEMÁS las condiciones de texto (Contiene,
+            # Empieza con...) sobre columnas numéricas (ver
+            # ADV_NUMBER_TEXT_CONDITIONS) — sin esto, elegir una de ésas caía
+            # al `numeric_value = float(value)` de abajo, nunca encontraba un
+            # lookup para "contains" y terminaba en `return None`, que
+            # silenciosamente NO filtraba nada (bug real: "Días Ocupada
+            # contiene 66" devolvía el set completo sin filtrar). MySQL sí
+            # resuelve `__icontains`/`__istartswith`/etc. sobre una columna
+            # entera (cast implícito a texto), así que basta con reusar el
+            # mismo lookup de texto directo sobre `target_field` (que para un
+            # campo numérico es la columna cruda, sin Trim). 'equals'/
+            # 'not_equals' se EXCLUYEN a propósito: son ambiguos (también
+            # existen en `number_lookup_by_condition`/ADV_NUMBER_CONDITIONS,
+            # ver ADV_NUMBER_TEXT_CONDITIONS en advancedFilters.js) y deben
+            # resolverse como comparación numérica más abajo (`float(value)
+            # == numeric_value`), no como texto — si no, "066" no matchearía
+            # 66 (iexact compara strings) aunque numéricamente sí sean iguales.
+            if condition in text_lookup_by_condition and condition not in ("equals", "not_equals"):
+                lookup, negate = text_lookup_by_condition[condition]
+                q = Q(**{f"{target_field}__{lookup}": value})
+                if not negate:
+                    return q
+                return Q(**{f"{target_field}__isnull": True}) | ~q
             try:
                 numeric_value = float(value)
             except ValueError:
@@ -6351,6 +6374,23 @@ class InvalidarCacheZafiroView(APIView):
         except Exception:
             logger.exception(
                 "Error ejecutando sp_actualizar_fecha_ocupacion_mov_pos tras import ZAFIRO"
+            )
+
+        # Recalcula MOV_POS.DIAS_OCUPADA/DIAS_VACANTE para las plazas activas
+        # (sp_dias_ocupacion_masivo, ~12-15s sobre las 11,451 plazas activas).
+        # DEBE correr antes de invalidar_todo_el_cache_servidor() de abajo:
+        # el SP tiene su propio GET_LOCK BLOQUEANTE (a diferencia del de
+        # fecha_ocupacion, que se salta si el lock está ocupado) precisamente
+        # para que, si dos requests a este endpoint se traslapan, la 2a
+        # espere a que la 1a termine de escribir en MOV_POS antes de seguir
+        # — así ningún request invalida el caché mientras las columnas
+        # todavía no reflejan el cálculo más reciente.
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("CALL sp_dias_ocupacion_masivo();")
+        except Exception:
+            logger.exception(
+                "Error ejecutando sp_dias_ocupacion_masivo tras import ZAFIRO"
             )
 
         # Geolocaliza empleados activos sin latitud/longitud (ej. personal
