@@ -1090,7 +1090,7 @@ def get_posiciones_ocupadas_set():
         with connection.cursor() as cursor:
             cursor.execute(OCUPADAS_RAW_SQL)
             posiciones_ocupadas = set(row[0] for row in cursor.fetchall() if row[0])
-        cache.set(cache_key_ocupadas, posiciones_ocupadas, 600)
+        cache.set(cache_key_ocupadas, posiciones_ocupadas, None)
     return posiciones_ocupadas
 
 
@@ -1128,7 +1128,7 @@ def obtener_posiciones_activas():
         """)
         result = [row[0] for row in cursor.fetchall() if row[0]]
 
-    cache.set(cache_key, result, 1200)
+    cache.set(cache_key, result, None)
     return result
 
 
@@ -1331,7 +1331,7 @@ def _get_posiciones_ocupadas_set():
         with connection.cursor() as cursor:
             cursor.execute(OCUPADAS_RAW_SQL)
             posiciones_ocupadas = set(row[0] for row in cursor.fetchall() if row[0])
-        cache.set("mov_pos_ocupadas_set", posiciones_ocupadas, 600)
+        cache.set("mov_pos_ocupadas_set", posiciones_ocupadas, None)
     return posiciones_ocupadas
 
 
@@ -1352,14 +1352,14 @@ def _get_fecha_anuencia_bulk_map(posiciones):
         with connection.cursor() as cursor:
             cursor.execute(LATEST_MOVPOS_RAW_SQL)
             sub_ids = [row[0] for row in cursor.fetchall() if row[0]]
-        cache.set("latest_movpos_sub_ids", sub_ids, 600)
+        cache.set("latest_movpos_sub_ids", sub_ids, None)
 
     posiciones_ocupadas = cache.get("mov_pos_ocupadas_set")
     if posiciones_ocupadas is None:
         with connection.cursor() as cursor:
             cursor.execute(OCUPADAS_RAW_SQL)
             posiciones_ocupadas = set(row[0] for row in cursor.fetchall() if row[0])
-        cache.set("mov_pos_ocupadas_set", posiciones_ocupadas, 600)
+        cache.set("mov_pos_ocupadas_set", posiciones_ocupadas, None)
 
     qs = MovPos.objects.filter(id__in=sub_ids, no_pos_actual__in=list(posiciones))
     qs = annotate_fecha_anuencia(
@@ -1426,14 +1426,14 @@ def _get_fecha_vacancia_bulk_map(posiciones):
         with connection.cursor() as cursor:
             cursor.execute(LATEST_MOVPOS_RAW_SQL)
             sub_ids = [row[0] for row in cursor.fetchall() if row[0]]
-        cache.set("latest_movpos_sub_ids", sub_ids, 600)
+        cache.set("latest_movpos_sub_ids", sub_ids, None)
 
     posiciones_ocupadas = cache.get("mov_pos_ocupadas_set")
     if posiciones_ocupadas is None:
         with connection.cursor() as cursor:
             cursor.execute(OCUPADAS_RAW_SQL)
             posiciones_ocupadas = set(row[0] for row in cursor.fetchall() if row[0])
-        cache.set("mov_pos_ocupadas_set", posiciones_ocupadas, 600)
+        cache.set("mov_pos_ocupadas_set", posiciones_ocupadas, None)
 
     qs = MovPos.objects.filter(id__in=sub_ids, no_pos_actual__in=list(posiciones))
 
@@ -1466,7 +1466,7 @@ def _get_mov_pos_id_bulk_map(posiciones):
         with connection.cursor() as cursor:
             cursor.execute(LATEST_MOVPOS_RAW_SQL)
             sub_ids = [row[0] for row in cursor.fetchall() if row[0]]
-        cache.set("latest_movpos_sub_ids", sub_ids, 600)
+        cache.set("latest_movpos_sub_ids", sub_ids, None)
 
     qs = MovPos.objects.filter(id__in=sub_ids, no_pos_actual__in=list(posiciones))
     return dict(qs.values_list("no_pos_actual", "id"))
@@ -1839,7 +1839,7 @@ class PlantillaVacantesPorNivelView(APIView):
             )
             .order_by("nivel")
         )
-        cache.set(cache_key, resultados, 1200)
+        cache.set(cache_key, resultados, None)
         return Response(resultados, status=status.HTTP_200_OK)
 
 
@@ -1884,7 +1884,7 @@ class PlantillaVacantesPorNivelResumenView(APIView):
 
         # 4. Ejecutamos la consulta pasándole el diccionario desempaquetado (**agregaciones)
         resultado = base_qs.aggregate(**agregaciones)
-        cache.set(cache_key, resultado, 1200)
+        cache.set(cache_key, resultado, None)
 
         return resultado
 
@@ -2058,7 +2058,7 @@ def _obtener_detalle_activos_cacheado():
     active_position_codes = obtener_posiciones_activas()
     queryset = EmpleadosCompletosSig.objects.filter(posicion__in=active_position_codes)
     resultados = _enriquecer_empleados_completos_rows(list(queryset.values()))
-    cache.set(cache_key, resultados, 1200)
+    cache.set(cache_key, resultados, None)
     return resultados
 
 
@@ -2125,7 +2125,7 @@ class EmpleadosCompletosActivosDetalleView(APIView):
                 )
                 resultados = _enriquecer_empleados_completos_rows(list(queryset.values()))
 
-                cache.set(cache_key, resultados, 300)
+                cache.set(cache_key, resultados, None)
                 return _paginated_or_full_response(request, resultados)
             except Exception:
                 logger.exception("Error inesperado en {}".format(request.path))
@@ -3563,7 +3563,7 @@ class Plantilla1800PlazasListView(APIView):
                 Plantilla1800Plazas.objects.all().order_by("id").values()
             )
             payload = orjson_dumps(resultados)
-            cache.set(self.CACHE_KEY, payload, 3600)
+            cache.set(self.CACHE_KEY, payload, None)
         return orjson_response(payload)
 
     def patch(self, request):
@@ -3683,7 +3683,7 @@ class EmpleadosEstatusPorNivelUaView(APIView):
                 por_ua[ua_name][nv][est] = count
 
             res_data = {"por_nivel": por_nivel, "por_ua": por_ua}
-            cache.set(cache_key, res_data, 1200)
+            cache.set(cache_key, res_data, None)
             return Response(res_data, status=status.HTTP_200_OK)
         except Exception:
             logger.exception("Error inesperado en {}".format(request.path))
@@ -3779,7 +3779,7 @@ class EmpleadosDistribucionGeograficaView(APIView):
                     }
                 )
 
-            cache.set(cache_key, resultados, 1200)
+            cache.set(cache_key, resultados, None)
             return Response(resultados, status=status.HTTP_200_OK)
         except Exception:
             logger.exception("Error inesperado en {}".format(request.path))
@@ -3829,7 +3829,7 @@ def get_mov_pos_stats():
                 "posiciones_activas": 0,
                 "posiciones_inactivas": 0,
             }
-        cache.set(cache_key, stats, 600)  # Cache for 10 minutes
+        cache.set(cache_key, stats, None)  # Cache for 10 minutes
     return stats
 
 
@@ -3921,7 +3921,7 @@ class MovPosDetalleView(APIView):
                 with connection.cursor() as cursor:
                     cursor.execute(LATEST_MOVPOS_RAW_SQL)
                     sub_ids = [row[0] for row in cursor.fetchall() if row[0]]
-                cache.set(cache_key_latest, sub_ids, 600)  # Cache for 10 minutes
+                cache.set(cache_key_latest, sub_ids, None)  # Cache for 10 minutes
             queryset = queryset.filter(id__in=sub_ids)
 
         # Search query
@@ -4052,7 +4052,7 @@ class MovPosDetalleView(APIView):
                     posiciones_ocupadas = set(
                         [row[0] for row in cursor.fetchall() if row[0]]
                     )
-                cache.set(cache_key_ocupadas, posiciones_ocupadas, 600)
+                cache.set(cache_key_ocupadas, posiciones_ocupadas, None)
 
             ocupacion_raw = request.query_params.get(ocupacion_param_key, "")
             is_exclude = ocupacion_param_key.startswith("exclude__")
@@ -4147,7 +4147,7 @@ class MovPosDetalleView(APIView):
                         posiciones_ocupadas = set(
                             [row[0] for row in cursor.fetchall() if row[0]]
                         )
-                    cache.set(cache_key_ocupadas, posiciones_ocupadas, 600)
+                    cache.set(cache_key_ocupadas, posiciones_ocupadas, None)
                 return posiciones_ocupadas
 
             def text_condition_matches(haystack, condition, needle):
@@ -4267,7 +4267,7 @@ class MovPosDetalleView(APIView):
                     posiciones_ocupadas = set(
                         [row[0] for row in cursor.fetchall() if row[0]]
                     )
-                cache.set(cache_key_ocupadas, posiciones_ocupadas, 600)
+                cache.set(cache_key_ocupadas, posiciones_ocupadas, None)
             all_pos = list(queryset.values_list("no_pos_actual", flat=True))
             ocupadas = sum(1 for p in all_pos if p in posiciones_ocupadas)
             vacantes = len(all_pos) - ocupadas
@@ -4486,7 +4486,7 @@ class MovPosDetalleView(APIView):
                     posiciones_ocupadas = set(
                         [row[0] for row in cursor.fetchall() if row[0]]
                     )
-                cache.set("mov_pos_ocupadas_set", posiciones_ocupadas, 600)
+                cache.set("mov_pos_ocupadas_set", posiciones_ocupadas, None)
 
             populate_movpos_occupant_details(resultados, posiciones_ocupadas)
             mapa_codigos = _get_mapa_codigos()
@@ -4643,7 +4643,7 @@ def _recalcular_fecha_anuencia_actual(no_pos_actual):
         with connection.cursor() as cursor:
             cursor.execute(OCUPADAS_RAW_SQL)
             posiciones_ocupadas = set(r[0] for r in cursor.fetchall() if r[0])
-        cache.set("mov_pos_ocupadas_set", posiciones_ocupadas, 600)
+        cache.set("mov_pos_ocupadas_set", posiciones_ocupadas, None)
 
     corregir_fecha_anuencia_row(
         row, no_pos_actual, posiciones_ocupadas,
@@ -5107,7 +5107,7 @@ ALINEACION_CAMPOS = [
 
 ALINEACION_DATASET_CACHE_KEY = "mov_pos_alineacion_dataset"
 ALINEACION_STATS_CACHE_KEY = "mov_pos_alineacion_stats"
-ALINEACION_CACHE_TTL = 600  # 10 minutos, igual que el resto de caches de Mov Pos
+ALINEACION_CACHE_TTL = None  # sin expiración natural: solo /invalidar-cache/ la borra, igual que el resto de caches de Mov Pos
 
 
 def _alineacion_normalizar(valor, prefijo2=False):
@@ -5612,7 +5612,7 @@ class MovPosExportExcelView(APIView):
                 with db_connection.cursor() as cursor:
                     cursor.execute(LATEST_MOVPOS_RAW_SQL)
                     sub_ids = [row[0] for row in cursor.fetchall() if row[0]]
-                cache.set(cache_key_latest, sub_ids, 600)
+                cache.set(cache_key_latest, sub_ids, None)
             queryset = queryset.filter(id__in=sub_ids)
 
         queryset = apply_text_search(
@@ -5658,7 +5658,7 @@ class MovPosExportExcelView(APIView):
                 with db_connection.cursor() as cursor:
                     cursor.execute(OCUPADAS_RAW_SQL)
                     pos_ocup = set(row[0] for row in cursor.fetchall() if row[0])
-                cache.set(cache_key_ocupadas, pos_ocup, 600)
+                cache.set(cache_key_ocupadas, pos_ocup, None)
             return pos_ocup
 
         is_vacantes_only = False
@@ -6707,7 +6707,7 @@ class BajasSigListView(APIView):
                 bajas = list(
                     BajasSig.objects.filter(posicion__in=posiciones_list).values()
                 )
-                cache.set(cache_key, bajas, 300)
+                cache.set(cache_key, bajas, None)
                 return _paginated_or_full_response(request, bajas)
             except Exception:
                 logger.exception("Error inesperado en {}".format(request.path))
@@ -6721,7 +6721,7 @@ class BajasSigListView(APIView):
             return _paginated_or_full_response(request, cached_data)
 
         bajas = list(BajasSig.objects.all().values())
-        cache.set(cache_key, bajas, 1200)
+        cache.set(cache_key, bajas, None)
         return _paginated_or_full_response(request, bajas)
 
 
@@ -6749,7 +6749,7 @@ class BajasMotivosPieView(APIView):
         result = [
             {"motivo": row["motivo_descr"], "total": row["total"]} for row in data
         ]
-        cache.set(cache_key, result, 1200)
+        cache.set(cache_key, result, None)
         return Response(result, status=status.HTTP_200_OK)
 
 
@@ -6780,7 +6780,7 @@ class BajasHistoricoView(APIView):
             {"fecha": fecha, "registros_bajas": count}
             for fecha, count in sorted(bajas_por_dia.items())
         ]
-        cache.set(cache_key, resultado, 1200)
+        cache.set(cache_key, resultado, None)
         return Response(resultado, status=status.HTTP_200_OK)
 
 
@@ -9776,7 +9776,7 @@ class DesgloseJerarquicoView(APIView):
                 columns = [col[0] for col in cursor.description]
                 results = [dict(zip(columns, row)) for row in cursor.fetchall()]
 
-            cache.set(cache_key, results, 1200)
+            cache.set(cache_key, results, None)
             return Response(results, status=status.HTTP_200_OK)
         except Exception:
             logger.exception("Error inesperado en {}".format(request.path))
@@ -9881,7 +9881,7 @@ class DesgloseJerarquicoOcupadosView(APIView):
                 columns = [col[0] for col in cursor.description]
                 results = [dict(zip(columns, row)) for row in cursor.fetchall()]
 
-            cache.set(cache_key, results, 1200)
+            cache.set(cache_key, results, None)
             return Response(results, status=status.HTTP_200_OK)
         except Exception:
             logger.exception("Error inesperado en {}".format(request.path))
@@ -10008,7 +10008,7 @@ class AduanasOcupacionVacanciaView(APIView):
                 "vacancia": build_pivot(vac_rows),
             }
 
-            cache.set(cache_key, resultado, 1200)
+            cache.set(cache_key, resultado, None)
             return Response(resultado, status=status.HTTP_200_OK)
         except Exception:
             logger.exception("Error inesperado en {}".format(request.path))
