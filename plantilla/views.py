@@ -780,6 +780,20 @@ MOV_POS_COLUMN_LABELS = {
     "nombre_puesto": "Nombre Puesto",
     "categoria_vacancia": "Categoría Vacancia",
     "tuvo_insubsistencia": "Tuvo Insubsistencia",
+    "fecha_ocupacion": "Fecha de Ocupación",
+    "dias_ocupada": "Días Ocupada",
+    "dias_vacante": "Días Vacante",
+    # Columnas calculadas en Python después de la consulta (ver
+    # CAMPOS_DERIVADOS_MOV_POS/enriquecer_mov_pos_rows) — faltaban aquí, así
+    # que el Excel exportado las mostraba con el nombre crudo del campo (o
+    # vacías, ver MovPosExportExcelView).
+    "codigo": "Código",
+    "denominacion_puesto": "Puesto",
+    "nivel_salarial": "Nivel Salarial",
+    "salario_mensual_neto": "Salario Mensual Neto",
+    "tipo_contratacion": "Tipo de Contratación",
+    "anuencia_anexo_nombre": "En Anuencia",
+    "fecha_alta_solicitada": "Fecha de alta solicitada",
 }
 
 MOV_POS_MONO_COLUMNS = {
@@ -1010,6 +1024,27 @@ def _write_vacancia_report_cover(ws, visible_keys, resultados, row_offset=0):
     _cell(o + 5, 8, total_insub, legend_total_fill, font_bold_black)
 
     # ── Fila 6 (grupos) y filas 7-8 (notas explicativas) ────────────────────
+    # `visible_keys` puede venir en CUALQUIER orden (el usuario reordena
+    # columnas libremente en la UI, ver la card "Anuencia" de
+    # MovimientosTab.jsx) — las columnas de un mismo grupo ya no están
+    # necesariamente contiguas. Fusionar de punta a punta (min..max índice)
+    # como antes invadía columnas de OTRO grupo intercaladas en medio, y
+    # escribir ahí encima de una celda ya fusionada por ese otro grupo
+    # tronaba con `AttributeError: 'MergedCell' object attribute 'value' is
+    # read-only`. Se fusiona sólo cada tramo contiguo real del grupo.
+    def _tramos_contiguos(nums):
+        nums = sorted(nums)
+        tramos = []
+        inicio = anterior = nums[0]
+        for n in nums[1:]:
+            if n == anterior + 1:
+                anterior = n
+                continue
+            tramos.append((inicio, anterior))
+            inicio = anterior = n
+        tramos.append((inicio, anterior))
+        return tramos
+
     col_index = {key: idx for idx, key in enumerate(visible_keys, start=1)}
     group_fill_by_key = {}
     for keys, group_title, color in VACANCIA_EXPORT_GROUPS:
@@ -1019,11 +1054,11 @@ def _write_vacancia_report_cover(ws, visible_keys, resultados, row_offset=0):
         group_fill = PatternFill(start_color=color, end_color=color, fill_type="solid")
         for k in keys:
             group_fill_by_key[k] = group_fill
-        start_col, end_col = cols[0], cols[-1]
         black_fill = PatternFill(start_color="FF000000", end_color="FF000000", fill_type="solid")
-        _cell(o + 6, start_col, group_title, black_fill, font_label)
-        if end_col > start_col:
-            ws.merge_cells(start_row=o + 6, start_column=start_col, end_row=o + 6, end_column=end_col)
+        for start_col, end_col in _tramos_contiguos(cols):
+            _cell(o + 6, start_col, group_title, black_fill, font_label)
+            if end_col > start_col:
+                ws.merge_cells(start_row=o + 6, start_column=start_col, end_row=o + 6, end_column=end_col)
 
     yellow_fill = PatternFill(start_color="FFFFFF38", end_color="FFFFFF38", fill_type="solid")
     for key, (line1, line2) in VACANCIA_EXPORT_COLUMN_NOTES.items():
@@ -1607,6 +1642,71 @@ CAMPOS_DERIVADOS_MOV_POS = {
     "anuencia_anexo_nombre",
     "fecha_alta_solicitada",
 }
+
+
+def _categoria_color_vacancia(dias_vacante):
+    """
+    Semáforo de "Fecha de Vacancia"/"Fecha de inicio de la vacancia" por
+    días vacante — mismos 3 umbrales que `getVacanciaColorCategoria` en
+    utils/vacancia.js (front), para que Mov. Posiciones, el Excel exportado
+    y las hojas de Anexo 2 nunca puedan mostrar colores distintos para el
+    mismo dato. `None` si `dias_vacante` no es un entero válido.
+    """
+    try:
+        dias = int(dias_vacante)
+    except (TypeError, ValueError):
+        return None
+    if dias >= 90:
+        return "rojo"
+    if dias >= 30:
+        return "verde"
+    return "amarillo"
+
+
+def _ordenar_resultados_mov_pos_por_campos_derivados(resultados, campos_derivados_sort, sort_order):
+    """
+    Ordena en memoria `resultados` (dicts de MOV_POS ya enriquecidos con
+    `enriquecer_mov_pos_rows`) por columnas calculadas en Python
+    (CAMPOS_DERIVADOS_MOV_POS) — no son campos ni anotaciones reales de
+    MovPos, así que un ORDER BY de SQL sobre ellas no tiene efecto (ver
+    MovPosDetalleView.get). Usada también por MovPosExportExcelView para que
+    el Excel exportado quede ordenado exactamente igual que la tabla en
+    pantalla, no sólo con las mismas columnas.
+
+    Numérico para "salario_mensual_neto" (viene como string: "9000" no debe
+    ordenar antes que "10000"); texto para el resto. Vacíos siempre al final,
+    sin importar asc/desc — por eso no se hornea la marca de vacío dentro de
+    la clave de ordenamiento (`reverse=True` los mandaría al frente).
+    `sort()` es estable: se ordena de la columna menos prioritaria a la más
+    prioritaria para que un `sort_by` con varias columnas quede resuelto en
+    el orden correcto.
+    """
+    if not campos_derivados_sort:
+        return resultados
+    reverse = sort_order == "desc"
+
+    def _clave_ordenable(campo):
+        es_numerico = campo == "salario_mensual_neto"
+
+        def _clave(r):
+            val = r.get(campo)
+            if val in (None, ""):
+                return 0.0 if es_numerico else ""
+            if es_numerico:
+                try:
+                    return float(val)
+                except (TypeError, ValueError):
+                    return 0.0
+            return str(val).lower()
+
+        return _clave
+
+    for campo in reversed(campos_derivados_sort):
+        resultados.sort(key=_clave_ordenable(campo), reverse=reverse)
+
+    campo_principal = campos_derivados_sort[0]
+    resultados.sort(key=lambda r: r.get(campo_principal) in (None, ""))
+    return resultados
 
 
 def _calcular_columnas_derivadas_mov_pos(queryset):
@@ -3988,6 +4088,22 @@ class MovPosDetalleView(APIView):
                 ]
                 return Q(no_pos_actual__in=match_pos) if match_pos else Q(pk__in=[])
 
+            # Semáforo de "Fecha de Vacancia" por días vacante (ver
+            # utils/vacancia.js en el front, mismos 3 umbrales) — filtro desde
+            # el propio encabezado de esa columna. `dias_vacante` es un campo
+            # real de MOV_POS, así que se resuelve con un Q directo (sin
+            # necesidad de memoizar como las columnas derivadas de abajo).
+            if base_field == "fecha_vacancia_color":
+                wanted = set(val_list)
+                q = Q(pk__in=[])
+                if "amarillo" in wanted:
+                    q |= Q(dias_vacante__lt=30)
+                if "verde" in wanted:
+                    q |= Q(dias_vacante__gte=30, dias_vacante__lt=90)
+                if "rojo" in wanted:
+                    q |= Q(dias_vacante__gte=90)
+                return q
+
             # "codigo"/"denominacion_puesto"/"nivel_salarial"/
             # "salario_mensual_neto"/"tipo_contratacion"/"anuencia_anexo_nombre"
             # no son campos reales de MOV_POS — sin este resolver, la rama
@@ -4027,7 +4143,7 @@ class MovPosDetalleView(APIView):
 
         queryset = apply_dynamic_column_filters(
             queryset, request, MovPos,
-            extra_valid_fields={"fecha_anuencia", *CAMPOS_DERIVADOS_MOV_POS},
+            extra_valid_fields={"fecha_anuencia", "fecha_vacancia_color", *CAMPOS_DERIVADOS_MOV_POS},
             computed_field_resolver=mov_pos_column_filter_resolver,
         )
 
@@ -4529,40 +4645,7 @@ class MovPosDetalleView(APIView):
             # un `sort_by` con varias columnas se resuelva en el orden
             # correcto (la primera manda, las demás desempatan).
             resultados = _enriquecer_resultados(list(queryset.values()))
-            reverse = sort_order == "desc"
-
-            def _clave_ordenable(campo):
-                # Valor "puro" (sin marca de vacío): a un vacío se le da un
-                # placeholder de un tipo comparable con el resto (0.0 para
-                # numéricas, "" para texto) — no importa dónde caiga en este
-                # paso, el segundo `sort()` de abajo lo manda al final sin
-                # importar la dirección pedida.
-                es_numerico = campo == "salario_mensual_neto"
-
-                def _clave(r):
-                    val = r.get(campo)
-                    if val in (None, ""):
-                        return 0.0 if es_numerico else ""
-                    if es_numerico:
-                        try:
-                            return float(val)
-                        except (TypeError, ValueError):
-                            return 0.0
-                    return str(val).lower()
-
-                return _clave
-
-            for campo in reversed(campos_derivados_sort):
-                resultados.sort(key=_clave_ordenable(campo), reverse=reverse)
-
-            # Los vacíos SIEMPRE al final, sin importar asc/desc (si se
-            # horneara la marca de vacío dentro de la clave de arriba,
-            # `reverse=True` los mandaría al frente en descendente — no es lo
-            # que espera el usuario al ordenar una columna). `sort()` es
-            # estable, así que esto sólo reubica los vacíos sin desordenar lo
-            # que el paso anterior ya dejó bien puesto.
-            campo_principal = campos_derivados_sort[0]
-            resultados.sort(key=lambda r: r.get(campo_principal) in (None, ""))
+            _ordenar_resultados_mov_pos_por_campos_derivados(resultados, campos_derivados_sort, sort_order)
 
             if no_pagination:
                 is_excel_mode = (
@@ -5624,6 +5707,16 @@ class MovPosExportExcelView(APIView):
 
         def fecha_anuencia_column_resolver(base_field, suffix, val_list, is_exclude):
             # Mismo fix que en MovPosDetalleView.get — ver comentario ahí.
+            if base_field == "fecha_vacancia_color":
+                wanted = set(val_list)
+                q = Q(pk__in=[])
+                if "amarillo" in wanted:
+                    q |= Q(dias_vacante__lt=30)
+                if "verde" in wanted:
+                    q |= Q(dias_vacante__gte=30, dias_vacante__lt=90)
+                if "rojo" in wanted:
+                    q |= Q(dias_vacante__gte=90)
+                return q
             if base_field != "fecha_anuencia":
                 return None
             posiciones_ocupadas = get_posiciones_ocupadas_set()
@@ -5638,7 +5731,7 @@ class MovPosExportExcelView(APIView):
             return Q(no_pos_actual__in=match_pos) if match_pos else Q(pk__in=[])
 
         queryset = apply_dynamic_column_filters(
-            queryset, request, MovPos, extra_valid_fields={"fecha_anuencia"},
+            queryset, request, MovPos, extra_valid_fields={"fecha_anuencia", "fecha_vacancia_color"},
             computed_field_resolver=fecha_anuencia_column_resolver,
         )
 
@@ -5777,8 +5870,14 @@ class MovPosExportExcelView(APIView):
         }
         sort_by_param = request.query_params.get("sort_by", "").strip()
         sort_order = request.query_params.get("sort_order", "desc").strip().lower()
-        if sort_by_param:
-            sort_fields = [f.strip() for f in sort_by_param.split(",")]
+        sort_fields = [f.strip() for f in sort_by_param.split(",")] if sort_by_param else []
+        # Igual que en MovPosDetalleView.get: columnas calculadas en Python
+        # (Puesto, Nivel Salarial, Salario Mensual Neto, Tipo de
+        # Contratación, En Anuencia, Fecha de alta solicitada) no se pueden
+        # ordenar con SQL — se ordenan aparte, en memoria, sobre el resultado
+        # ya enriquecido (ver más abajo, tras "Materializar datos").
+        campos_derivados_sort = [f for f in sort_fields if f in CAMPOS_DERIVADOS_MOV_POS]
+        if sort_fields:
             order_by_args = []
             for field in sort_fields:
                 if field in valid_fields:
@@ -5798,15 +5897,24 @@ class MovPosExportExcelView(APIView):
         resultados = list(queryset.values())
         counts = dict(MovPos.objects.values_list("no_pos_actual").annotate(c=Count("id")))
         posiciones_ocupadas = _get_posiciones_ocupadas()
+        mapa_codigos = _get_mapa_codigos()
         for r in resultados:
             pos = r.get("no_pos_actual")
             r["total_movimientos"] = counts.get(pos, 1)
             r["ocupacion"] = "Ocupada" if pos in posiciones_ocupadas else "Vacante"
             r["fecha_vacancia"] = "" if pos in posiciones_ocupadas else r.get("fecha_vacancia", "")
+            r["codigo"] = mapa_codigos.get(pos, "")
             corregir_fecha_anuencia_row(
                 r, pos, posiciones_ocupadas, fecha_anuencia_overrides,
                 fecha_anuencia_overrides_texto, fecha_anuencia_baseline_texto,
             )
+        # Puesto, Nivel Salarial, Salario Mensual Neto, Tipo de Contratación,
+        # En Anuencia, Fecha de alta solicitada — mismas columnas "resueltas"
+        # que ya autollena el Anexo 2 y que muestra la tabla en pantalla (ver
+        # enriquecer_mov_pos_rows); faltaban aquí, así que el Excel exportado
+        # las mostraba vacías aunque el usuario las tuviera visibles.
+        enriquecer_mov_pos_rows(resultados)
+        _ordenar_resultados_mov_pos_por_campos_derivados(resultados, campos_derivados_sort, sort_order)
 
         # Export de solo "Vacantes": desglosa el registro decisivo (baja o
         # traslado) y la insubsistencia de cada posición vacante en columnas
@@ -5837,6 +5945,14 @@ class MovPosExportExcelView(APIView):
 
             header_fill = PatternFill(start_color="FF2B4C7E", end_color="FF2B4C7E", fill_type="solid")
             zebra_fill = PatternFill(start_color="FFF4F7FA", end_color="FFF4F7FA", fill_type="solid")
+            # Semáforo de "Fecha de Vacancia" (ver _categoria_color_vacancia) —
+            # mismos colores que se ven en pantalla, para que el Excel no
+            # "varíe" respecto a la tabla.
+            vacancia_color_fills = {
+                "amarillo": PatternFill(start_color="FFFFF3CD", end_color="FFFFF3CD", fill_type="solid"),
+                "verde": PatternFill(start_color="FFD1E7DD", end_color="FFD1E7DD", fill_type="solid"),
+                "rojo": PatternFill(start_color="FFF8D7DA", end_color="FFF8D7DA", fill_type="solid"),
+            }
             header_font = Font(name="Segoe UI", size=10, bold=True, color="FFFFFFFF")
             data_font = Font(name="Segoe UI", size=9)
             gold_side = Side(style="thin", color="FFBC955C")
@@ -5876,7 +5992,13 @@ class MovPosExportExcelView(APIView):
                     cell.font = data_font
                     cell.border = gold_border
                     cell.alignment = align_center if key in MOV_POS_MONO_COLUMNS else align_left
-                    if is_zebra:
+                    if key == "fecha_vacancia":
+                        categoria = _categoria_color_vacancia(row_data.get("dias_vacante"))
+                        if categoria:
+                            cell.fill = vacancia_color_fills[categoria]
+                        elif is_zebra:
+                            cell.fill = zebra_fill
+                    elif is_zebra:
                         cell.fill = zebra_fill
                 ws.row_dimensions[row_idx].height = 20
 
