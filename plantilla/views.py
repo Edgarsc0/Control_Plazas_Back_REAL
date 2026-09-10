@@ -4987,6 +4987,48 @@ class MovPosOcupacionDetalleView(APIView):
         return Response(construir_detalle_ocupacion(mov_row))
 
 
+class PlantillaHistoricaVacanciaDetalleView(APIView):
+    """
+    Detalle dinámico (categoría A/B/C) de la vacancia de una plaza en una
+    FECHA PASADA — columna "Fecha de Vacancia" de la Plantilla Histórica
+    (ver PLAN_FECHA_VACANCIA_OCUPACION_PLANTILLA_HISTORICA_2026-09-10.md).
+    Análogo a `MovPosVacanciaDetalleView`, pero sin depender de
+    `categoria_vacancia`/`id_registro_desicivo` de MOV_POS (esos campos sólo
+    reflejan HOY): reconstruye el detalle llamando `sp_historia_plaza`.
+
+    GET ?posicion=<Nº Pos Actual>&fecha=YYYY-MM-DD
+    """
+
+    view_permission = "authentication.view_plantilla_historico"
+
+    def get(self, request, *args, **kwargs):
+        from .notificaciones_posicion import construir_detalle_vacancia_historica
+
+        posicion = (request.query_params.get("posicion") or "").strip()
+        fecha_str = (request.query_params.get("fecha") or "").strip()
+        if not posicion or not fecha_str:
+            return Response(
+                {"error": "Se requieren los parámetros 'posicion' y 'fecha' (YYYY-MM-DD)."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            fecha = datetime.datetime.strptime(fecha_str, "%Y-%m-%d").date()
+        except ValueError:
+            return Response(
+                {"error": "Parámetro 'fecha' inválido, se espera formato YYYY-MM-DD."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            detalle = construir_detalle_vacancia_historica(posicion, fecha)
+            return Response(_serializar_fechas(detalle))
+        except Exception:
+            logger.exception("Error inesperado en {}".format(request.path))
+            return Response(
+                {"error": "Error interno del servidor"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
 class SuscripcionesPosicionView(APIView):
     """
     Menú contextual "Notificarme cuando la posición quede vacante/se ocupe"
@@ -9463,7 +9505,7 @@ class PlantillaHistoricaView(APIView):
     Activa/Inactiva y su ocupante si aplica) a una fecha pasada arbitraria —
     botón "Consultar plantillas pasadas" en el tab Plantilla Detalle.
 
-    Combina 2 stored procedures con el mismo criterio de corte:
+    Combina 3 stored procedures con el mismo criterio de corte:
       - `sp_conteo_plazas_historico`: desglose plazas totales/activas/
         inactivas/ocupadas/vacantes (barato, sin reconstruir cada fila) — se
         usa como resumen "oficial" en las tarjetas del front.
@@ -9471,9 +9513,14 @@ class PlantillaHistoricaView(APIView):
         ~90s, joins completos sobre MOV_POS/cp_tbl_mov_completo_29_05_26) +
         su propio resumen (se toma sólo para las 2 columnas de anomalías,
         que `sp_conteo_plazas_historico` no calcula).
+      - `sp_periodo_plaza_masivo` (x2, uno por tipo 'v'/'o'): agrega
+        `fecha_vacancia`/`fecha_ocupacion` por plaza — el inicio del periodo
+        de la pila de `sp_historia_plaza` vigente en `fecha`, para las
+        plazas que `sp_plantilla_historica` marcó vacantes/ocupadas (ver
+        PLAN_FECHA_VACANCIA_OCUPACION_PLANTILLA_HISTORICA_2026-09-10.md).
 
     GET ?fecha=YYYY-MM-DD (obligatoria, entre 2022-01-01 y hoy — mismo límite
-    inferior que exigen ambos SPs: inicio de MOV_POS/ANAM).
+    inferior que exigen los SPs: inicio de MOV_POS/ANAM).
     """
 
     view_permission = "authentication.view_plantilla_historico"
@@ -9531,6 +9578,41 @@ class PlantillaHistoricaView(APIView):
                 _mapear_fila_plantilla_historica(row, filas_cols, mapa_columnas)
                 for row in filas_rows
             ]
+
+            # "Fecha de Vacancia" / "Fecha de Ocupación" por plaza: sp_periodo_plaza_masivo
+            # (PLAN_FECHA_VACANCIA_OCUPACION_PLANTILLA_HISTORICA_2026-09-10.md) reconstruye,
+            # para un LOTE de plazas, el periodo vigente en `fecha` de la pila de
+            # sp_historia_plaza -- evita CALL sp_historia_plaza por plaza (0.3-0.7s cada
+            # una; con las ~950-10,500 plazas de una fecha típica, minutos). Sólo tiene
+            # sentido para plazas ACTIVAS: una Inactiva nunca tiene ocupante ni vacancia en
+            # el mismo sentido, se deja sin estas 2 columnas (fecha_*=None).
+            posiciones_vacantes = [
+                f["posicion"] for f in filas
+                if f.get("estado_plaza") == "A" and not (f.get("estado_nomina") or "").strip()
+            ]
+            posiciones_ocupadas = [
+                f["posicion"] for f in filas
+                if f.get("estado_plaza") == "A" and (f.get("estado_nomina") or "").strip()
+            ]
+
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "CALL sp_periodo_plaza_masivo(%s, %s, %s)",
+                    [json.dumps(posiciones_vacantes), fecha, "v"],
+                )
+                fechas_vacancia = {row[0]: row[1] for row in cursor.fetchall()}
+                cursor.nextset()
+
+                cursor.execute(
+                    "CALL sp_periodo_plaza_masivo(%s, %s, %s)",
+                    [json.dumps(posiciones_ocupadas), fecha, "o"],
+                )
+                fechas_ocupacion = {row[0]: row[1] for row in cursor.fetchall()}
+                cursor.nextset()
+
+            for f in filas:
+                f["fecha_vacancia"] = fechas_vacancia.get(f["posicion"])
+                f["fecha_ocupacion"] = fechas_ocupacion.get(f["posicion"])
 
             def _entero(valor):
                 return int(valor) if valor is not None else None

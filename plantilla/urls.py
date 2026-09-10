@@ -41,6 +41,7 @@ from .views import (
     MovPosHistoriaView,
     MovPosVacanciaDetalleView,
     MovPosOcupacionDetalleView,
+    PlantillaHistoricaVacanciaDetalleView,
     SuscripcionesPosicionView,
     SuscripcionPosicionDetalleView,
     FiltrosGuardadosView,
@@ -507,6 +508,11 @@ urlpatterns = [
         "mov_pos_ocupacion_detalle/",
         MovPosOcupacionDetalleView.as_view(),
         name="mov_pos_ocupacion_detalle",
+    ),
+    path(
+        "plantilla_historica_vacancia_detalle/",
+        PlantillaHistoricaVacanciaDetalleView.as_view(),
+        name="plantilla_historica_vacancia_detalle",
     ),
     path(
         "suscripciones-posicion/",

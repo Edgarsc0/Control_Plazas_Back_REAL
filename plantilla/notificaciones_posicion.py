@@ -210,6 +210,141 @@ def construir_detalle_vacancia(mov_row):
     return {**base, "error": f"Categoría de vacancia desconocida: {categoria}"}
 
 
+def construir_detalle_vacancia_historica(posicion, fecha):
+    """
+    Igual que `construir_detalle_vacancia`, pero para una fecha PASADA
+    arbitraria (columna "Fecha de Vacancia" de la Plantilla Histórica, ver
+    PLAN_FECHA_VACANCIA_OCUPACION_PLANTILLA_HISTORICA_2026-09-10.md).
+
+    MOV_POS.categoria_vacancia/id_registro_desicivo sólo reflejan HOY: no
+    sirven para una fecha pasada. En su lugar se llama sp_historia_plaza
+    (pila completa de la plaza, un solo CALL -- barato para un clic
+    individual, a diferencia del uso masivo de sp_periodo_plaza_masivo) y se
+    ubica el periodo de vacancia vigente en `fecha` (mismo boundary
+    fecha_inicio <= fecha < fecha_fin del plan).
+
+    La categoría se deriva del tramo REAL que decidió el cierre, saltando
+    hacia atrás los nodos puntuales de insubsistencia/tránsito (0 días) --
+    igual que el sistema en vivo separa `categoria_vacancia` de
+    `tuvo_insubsistencia`: la insubsistencia es un aviso lateral, no la
+    causa real de la vacancia. tipo_cierre='baja' -> A; 'traslado' -> B; si
+    el tramo saltado hacia atrás es la propia 'creacion' de la plaza -> C
+    (nunca tuvo ocupante).
+    """
+    from django.db import connection
+    from .models import CpTblMovCompleto290526, MovPos
+
+    with connection.cursor() as cursor:
+        cursor.execute("CALL sp_historia_plaza(%s)", [posicion])
+        cols = [c[0] for c in cursor.description]
+        rows = [dict(zip(cols, r)) for r in cursor.fetchall()]
+
+    idx_vacancia = None
+    for i, r in enumerate(rows):
+        if r["tipo_periodo"] != "vacancia":
+            continue
+        ini, fin = r["fecha_inicio"], r["fecha_fin"]
+        if ini is not None and ini <= fecha and (fin is None or fecha < fin):
+            idx_vacancia = i
+            break
+
+    base = {"no_pos_actual": posicion, "fecha_vacancia": fecha}
+
+    if idx_vacancia is None:
+        return {
+            **base,
+            "error": "La posición no estaba vacante en esa fecha (o la fecha es anterior a su creación).",
+        }
+
+    insubsistencia_row = None
+    j = idx_vacancia - 1
+    while j >= 0 and rows[j]["tipo_periodo"] in ("insubsistencia", "transito"):
+        if rows[j]["tipo_periodo"] == "insubsistencia" and insubsistencia_row is None:
+            insubsistencia_row = rows[j]
+        j -= 1
+
+    tuvo_insubsistencia = "S" if insubsistencia_row else "N"
+    insubsistencia_detalle = None
+    if insubsistencia_row and insubsistencia_row.get("id_registro_fin"):
+        try:
+            reg = CpTblMovCompleto290526.objects.get(id=insubsistencia_row["id_registro_fin"])
+            insubsistencia_detalle = {
+                "empleado": {
+                    "num_empleado": reg.num_empleado,
+                    "nombre_completo": " ".join(p for p in [reg.nombre, reg.ap_pat, reg.ap_mat] if p).strip(),
+                },
+                "posicion": reg.posicion,
+                "motivo": reg.motivo,
+                "motivo_nombre": reg.motivo_nombre,
+                "accion": reg.accion,
+                "accion_nombre": reg.accion_nombre,
+                "fecha_efectiva": reg.fecha_efectiva,
+                "fecha_captura": reg.fecha_captura,
+            }
+        except CpTblMovCompleto290526.DoesNotExist:
+            insubsistencia_detalle = {
+                "error": "Registro de insubsistencia no encontrado en cp_tbl_mov_completo_29_05_26."
+            }
+
+    base = {**base, "tuvo_insubsistencia": tuvo_insubsistencia, "insubsistencia": insubsistencia_detalle}
+
+    if j < 0:
+        return {**base, "error": "No se encontró el tramo que originó esta vacancia."}
+
+    decisivo = rows[j]
+
+    if decisivo["tipo_periodo"] == "creacion":
+        try:
+            registro = MovPos.objects.get(id=decisivo["id_registro_inicio"])
+            return {
+                **base,
+                "categoria_vacancia": "C",
+                "fecha_efectiva": registro.f_efva,
+                "fecha_captura": registro.fecha_captura,
+            }
+        except MovPos.DoesNotExist:
+            return {**base, "categoria_vacancia": "C", "error": "Registro de creación no encontrado en MOV_POS."}
+
+    if decisivo.get("tipo_cierre") == "baja":
+        categoria = "A"
+    elif decisivo.get("tipo_cierre") == "traslado":
+        categoria = "B"
+    else:
+        # 'clamp' u otro caso no esperado (sp_historia_plaza ya lo marca con
+        # inconsistente=1): mejor esfuerzo con la acción de cierre real.
+        categoria = "A" if decisivo.get("accion_salida") == "Baja" else "B"
+
+    id_decisivo = decisivo.get("id_registro_fin")
+    if not id_decisivo:
+        return {**base, "categoria_vacancia": categoria, "error": "Registro decisivo no disponible."}
+
+    try:
+        registro = CpTblMovCompleto290526.objects.get(id=id_decisivo)
+    except CpTblMovCompleto290526.DoesNotExist:
+        return {
+            **base,
+            "categoria_vacancia": categoria,
+            "error": "Registro decisivo no encontrado en cp_tbl_mov_completo_29_05_26.",
+        }
+
+    empleado_nombre = " ".join(p for p in [registro.nombre, registro.ap_pat, registro.ap_mat] if p).strip()
+    detalle = {
+        **base,
+        "categoria_vacancia": categoria,
+        "empleado": {"num_empleado": registro.num_empleado, "nombre_completo": empleado_nombre},
+        "accion": registro.accion,
+        "accion_nombre": registro.accion_nombre,
+        "motivo": registro.motivo,
+        "motivo_nombre": registro.motivo_nombre,
+        "fecha_efectiva": registro.fecha_efectiva,
+        "fecha_captura": registro.fecha_captura,
+    }
+    if categoria == "B":
+        detalle["posicion_origen"] = posicion
+        detalle["posicion_destino"] = decisivo.get("posicion_destino")
+    return detalle
+
+
 def construir_detalle_ocupacion(mov_row):
     """
     Dado un renglón de MOV_POS, arma el detalle del registro decisivo
