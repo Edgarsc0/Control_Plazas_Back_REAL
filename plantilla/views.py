@@ -781,8 +781,8 @@ MOV_POS_COLUMN_LABELS = {
     "categoria_vacancia": "Categoría Vacancia",
     "tuvo_insubsistencia": "Tuvo Insubsistencia",
     "fecha_ocupacion": "Fecha de Ocupación",
-    "dias_ocupada": "Días Ocupada",
-    "dias_vacante": "Días Vacante",
+    "dias_ocupada": "Días Acumulados Ocupada",
+    "dias_vacante": "Días Acumulados Vacante",
     # Columnas calculadas en Python después de la consulta (ver
     # CAMPOS_DERIVADOS_MOV_POS/enriquecer_mov_pos_rows) — faltaban aquí, así
     # que el Excel exportado las mostraba con el nombre crudo del campo (o
@@ -1647,10 +1647,18 @@ CAMPOS_DERIVADOS_MOV_POS = {
 def _categoria_color_vacancia(dias_vacante):
     """
     Semáforo de "Fecha de Vacancia"/"Fecha de inicio de la vacancia" por
-    días vacante — mismos 3 umbrales que `getVacanciaColorCategoria` en
-    utils/vacancia.js (front), para que Mov. Posiciones, el Excel exportado
-    y las hojas de Anexo 2 nunca puedan mostrar colores distintos para el
-    mismo dato. `None` si `dias_vacante` no es un entero válido.
+    días transcurridos desde esa fecha hasta hoy — mismos 3 umbrales que
+    `getVacanciaColorCategoria` en utils/vacancia.js (front), para que Mov.
+    Posiciones, el Excel exportado y las hojas de Anexo 2 nunca puedan
+    mostrar colores distintos para el mismo dato. `None` si `dias_vacante`
+    no es un entero válido.
+
+    OJO: el parámetro es días-desde-`fecha_vacancia`-hasta-hoy (ver
+    `_dias_desde_fecha_vacancia`), NO el acumulado histórico `DIAS_VACANTE`
+    de MOV_POS — ese es el total que ha sumado la plaza en todas sus
+    vacancias pasadas, no lo que lleva vacante desde esta fecha en
+    particular (corregido a petición del usuario: el semáforo/tooltip
+    mostraba el acumulado por error).
     """
     try:
         dias = int(dias_vacante)
@@ -1661,6 +1669,40 @@ def _categoria_color_vacancia(dias_vacante):
     if dias >= 30:
         return "verde"
     return "amarillo"
+
+
+def _dias_desde_fecha_vacancia(fecha_vacancia, hoy=None):
+    """Días transcurridos entre `fecha_vacancia` (MOV_POS, varchar) y hoy."""
+    fecha = _parsear_fecha_mov_pos(fecha_vacancia)
+    if fecha is None:
+        return None
+    hoy = hoy or datetime.date.today()
+    return (hoy - fecha).days
+
+
+def _filtro_q_fecha_vacancia_color(val_list):
+    """
+    Q de MOV_POS para el filtro por color del semáforo de "Fecha de
+    Vacancia", expresado en términos de la propia `fecha_vacancia` (no de
+    `dias_vacante`, que es el acumulado histórico y no lo que corresponde
+    pintar/filtrar — ver `_categoria_color_vacancia`). Se resuelve con
+    comparación de strings porque el 100% de los valores de
+    `fecha_vacancia` en MOV_POS están en formato ISO "YYYY-MM-DD" (formato
+    de ancho fijo: comparar como texto es equivalente a comparar como
+    fecha) — confirmado por muestreo completo de la tabla.
+    """
+    hoy = datetime.date.today()
+    corte_30 = (hoy - datetime.timedelta(days=30)).isoformat()
+    corte_90 = (hoy - datetime.timedelta(days=90)).isoformat()
+    wanted = set(val_list)
+    q = Q(pk__in=[])
+    if "amarillo" in wanted:
+        q |= Q(fecha_vacancia__gt=corte_30)
+    if "verde" in wanted:
+        q |= Q(fecha_vacancia__gt=corte_90, fecha_vacancia__lte=corte_30)
+    if "rojo" in wanted:
+        q |= Q(fecha_vacancia__lte=corte_90)
+    return q
 
 
 def _ordenar_resultados_mov_pos_por_campos_derivados(resultados, campos_derivados_sort, sort_order):
@@ -4088,21 +4130,13 @@ class MovPosDetalleView(APIView):
                 ]
                 return Q(no_pos_actual__in=match_pos) if match_pos else Q(pk__in=[])
 
-            # Semáforo de "Fecha de Vacancia" por días vacante (ver
-            # utils/vacancia.js en el front, mismos 3 umbrales) — filtro desde
-            # el propio encabezado de esa columna. `dias_vacante` es un campo
-            # real de MOV_POS, así que se resuelve con un Q directo (sin
-            # necesidad de memoizar como las columnas derivadas de abajo).
+            # Semáforo de "Fecha de Vacancia" por días transcurridos desde esa
+            # fecha (ver utils/vacancia.js en el front, mismos 3 umbrales) —
+            # filtro desde el propio encabezado de esa columna. Se resuelve
+            # sobre `fecha_vacancia` (no `dias_vacante`, que es el acumulado
+            # histórico) con un Q directo — ver `_filtro_q_fecha_vacancia_color`.
             if base_field == "fecha_vacancia_color":
-                wanted = set(val_list)
-                q = Q(pk__in=[])
-                if "amarillo" in wanted:
-                    q |= Q(dias_vacante__lt=30)
-                if "verde" in wanted:
-                    q |= Q(dias_vacante__gte=30, dias_vacante__lt=90)
-                if "rojo" in wanted:
-                    q |= Q(dias_vacante__gte=90)
-                return q
+                return _filtro_q_fecha_vacancia_color(val_list)
 
             # "codigo"/"denominacion_puesto"/"nivel_salarial"/
             # "salario_mensual_neto"/"tipo_contratacion"/"anuencia_anexo_nombre"
@@ -5750,15 +5784,7 @@ class MovPosExportExcelView(APIView):
         def fecha_anuencia_column_resolver(base_field, suffix, val_list, is_exclude):
             # Mismo fix que en MovPosDetalleView.get — ver comentario ahí.
             if base_field == "fecha_vacancia_color":
-                wanted = set(val_list)
-                q = Q(pk__in=[])
-                if "amarillo" in wanted:
-                    q |= Q(dias_vacante__lt=30)
-                if "verde" in wanted:
-                    q |= Q(dias_vacante__gte=30, dias_vacante__lt=90)
-                if "rojo" in wanted:
-                    q |= Q(dias_vacante__gte=90)
-                return q
+                return _filtro_q_fecha_vacancia_color(val_list)
             if base_field != "fecha_anuencia":
                 return None
             posiciones_ocupadas = get_posiciones_ocupadas_set()
@@ -6035,7 +6061,9 @@ class MovPosExportExcelView(APIView):
                     cell.border = gold_border
                     cell.alignment = align_center if key in MOV_POS_MONO_COLUMNS else align_left
                     if key == "fecha_vacancia":
-                        categoria = _categoria_color_vacancia(row_data.get("dias_vacante"))
+                        categoria = _categoria_color_vacancia(
+                            _dias_desde_fecha_vacancia(row_data.get("fecha_vacancia"))
+                        )
                         if categoria:
                             cell.fill = vacancia_color_fills[categoria]
                         elif is_zebra:
