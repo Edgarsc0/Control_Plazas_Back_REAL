@@ -162,7 +162,7 @@ def _clave_orden(mov):
 
 
 def _nombre_completo(mov):
-    partes = [mov.get("ap_pat"), mov.get("ap_mat"), mov.get("nombre")]
+    partes = [mov.get("nombre"), mov.get("ap_pat"), mov.get("ap_mat")]
     return " ".join(p for p in partes if p).strip()
 
 

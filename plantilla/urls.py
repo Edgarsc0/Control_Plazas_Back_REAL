@@ -96,6 +96,7 @@ from .views import (
     AduanasOcupacionVacanciaView,
     ColumnasQuincenalView,
     RotacionTitularesAduanasView,
+    HistoriaDireccionGeneralView,
     PlazaSugerenciasView,
     HistoriaPlazaView,
     HistoriaEmpleadoView,
@@ -126,6 +127,11 @@ urlpatterns = [
         "rotacion-titulares-aduanas/",
         RotacionTitularesAduanasView.as_view(),
         name="rotacion-titulares-aduanas",
+    ),
+    path(
+        "rotacion-direccion-general/<str:cd_puesto>/",
+        HistoriaDireccionGeneralView.as_view(),
+        name="rotacion-direccion-general",
     ),
     # Rotación de plazas: la tabla de métricas (vista de entrada) y los
     # periodos de las plazas elegidas (swimlane). Ambas leen las tablas

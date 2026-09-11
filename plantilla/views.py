@@ -10851,6 +10851,138 @@ class RotacionTitularesAduanasView(APIView):
         return adscripcion
 
 
+class HistoriaDireccionGeneralView(APIView):
+    """
+    Línea de tiempo de titularidad de UNA dirección general.
+
+    Recibe `cd_puesto` y devuelve las gestiones de cada titular (entrada,
+    salida, motivo, movimientos ocurridos durante su gestión), los periodos
+    en que el puesto quedó vacante, y las insubsistencias detectadas.
+
+    El algoritmo vive en plantilla/rotacion_direccion_general.py — ahí está
+    documentado por qué, a diferencia de la titularidad de aduanas
+    (RotacionTitularesAduanasView), tener el `cd_puesto` no basta para ser
+    titular: hace falta además el `nv_jerarquico` mínimo observado para ese
+    puesto, porque el mismo código de puesto funcional puede tener filas de
+    personal que no son el director (subordinados, o el propio titular antes
+    de su nombramiento).
+
+    GET /plantilla/rotacion-direccion-general/<cd_puesto>/
+    ?refrescar=1 salta el caché.
+    """
+
+    view_permission = (
+        "authentication.view_plantilla_mov_posiciones",
+        "authentication.view_plantilla_movimientos",
+    )
+
+    def get(self, request, cd_puesto, *args, **kwargs):
+        from django.core.cache import cache
+        from django.db import connection
+
+        from .rotacion_direccion_general import construir_historia_direccion_general
+
+        cd_puesto = (cd_puesto or "").strip()
+        if not cd_puesto:
+            return Response(
+                {"detail": "El cd_puesto es obligatorio."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        cache_key = f"rotacion_direccion_general_{cd_puesto}"
+        if request.query_params.get("refrescar") not in ("1", "true", "True"):
+            cacheado = cache.get(cache_key)
+            if cacheado is not None:
+                return Response(cacheado, status=status.HTTP_200_OK)
+
+        try:
+            catalogo_puestos = {
+                (cd or "").strip(): nombre
+                for cd, nombre in CatPtoFunc.objects.exclude(
+                    cd_pto_funcional__isnull=True
+                ).values_list("cd_pto_funcional", "nombre_puesto_funcional")
+            }
+            movimientos = self._trayectorias_de_ocupantes(cd_puesto)
+            if not movimientos:
+                return Response(
+                    {"detail": f"El cd_puesto {cd_puesto} no tiene movimientos registrados."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            resultado = construir_historia_direccion_general(
+                movimientos, cd_puesto, hoy=datetime.date.today(), catalogo_puestos=catalogo_puestos
+            )
+            if resultado is None:
+                return Response(
+                    {"detail": f"El cd_puesto {cd_puesto} no tiene nv_jerarquico registrado; no se puede determinar el nivel de titularidad."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+            resultado = _serializar_fechas(resultado)
+
+            cache.set(cache_key, resultado, timeout=None)
+            return Response(resultado, status=status.HTTP_200_OK)
+        except Exception:
+            logger.exception("Error inesperado en {}".format(request.path))
+            return Response(
+                {"error": "Error interno del servidor"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+    def _trayectorias_de_ocupantes(self, cd_puesto):
+        """Trayectoria completa de todo empleado que alguna vez tuvo este
+        cd_puesto (en cualquier nv_jerarquico — el filtro por nivel de
+        titularidad se aplica después, en construir_historia_direccion_general).
+
+        Mismo patrón de dos pasos que RotacionTitularesAduanasView
+        ._trayectorias_de_titulares: primero los num_empleado distintos de
+        este cd_puesto, después TODOS sus movimientos — traer solo las filas
+        de este puesto dejaría sin fecha de salida real a quien se trasladó
+        a otro puesto.
+        """
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT DISTINCT num_empleado FROM cp_tbl_mov_completo_29_05_26 "
+                "WHERE cd_puesto = %s AND num_empleado IS NOT NULL",
+                [cd_puesto],
+            )
+            empleados = [row[0] for row in cursor.fetchall()]
+
+            if not empleados:
+                return []
+
+            marcadores = ", ".join(["%s"] * len(empleados))
+            cursor.execute(
+                f"""
+                SELECT
+                    id, posicion, num_empleado,
+                    nombre, ap_pat, ap_mat,
+                    accion, accion_nombre,
+                    motivo, motivo_nombre,
+                    fecha_efectiva, sec, fecha_captura,
+                    est_hr, estado_pago, partida_presup,
+                    un, un_admin,
+                    id_depto, depen_direc,
+                    plan_sal, grado, escala,
+                    puesto_ptal, nivel_tabular,
+                    gp_pago, prog_benef, sal_base,
+                    cd_puesto, ubicacion, id_estbl,
+                    salida_prevista, fecha_ult_actz, por,
+                    ult_inicio, fecha_inicial, gp_trabajo,
+                    grupo_cd_sal, antiguo_empr,
+                    rfc, curp, id_persona,
+                    desc_larga_p, nv_jerarquico, desc_larga_un,
+                    sexo, fecha_entrada, fecha_posicion
+                FROM cp_tbl_mov_completo_29_05_26
+                WHERE num_empleado IN ({marcadores})
+                  AND fecha_efectiva IS NOT NULL
+                ORDER BY num_empleado ASC, fecha_efectiva ASC, sec ASC, id ASC
+                """,
+                empleados,
+            )
+            columnas = [d[0] for d in cursor.description]
+            return [dict(zip(columnas, fila)) for fila in cursor.fetchall()]
+
+
 def _parsear_fecha_mov_pos(valor):
     """MOV_POS guarda las fechas como varchar; conviven dos formatos."""
     if isinstance(valor, datetime.date):
