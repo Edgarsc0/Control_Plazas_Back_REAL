@@ -7133,7 +7133,7 @@ class TorreCaballito3DView(APIView):
         from django.db import connection
 
         query = """
-            SELECT 
+            SELECT
                 e.`Descripción ubicación`,
                 e.`Unidad Administrativa`,
                 COUNT(*) as Total
@@ -7145,6 +7145,7 @@ class TorreCaballito3DView(APIView):
                   e.`Descripción ubicación` LIKE '%Caballito Reforma 10 P%'
                   OR e.`Descripción ubicación` LIKE '%Torre Caballito Reforma 10 P%'
               )
+              AND UPPER(TRIM(e.`Numempleado`)) <> 'VACANTE'
             GROUP BY e.`Descripción ubicación`, e.`Unidad Administrativa`
             ORDER BY e.`Descripción ubicación`, Total DESC;
         """
@@ -7179,44 +7180,42 @@ class TorreCaballitoEmpleadosView(APIView):
         piso = request.query_params.get("piso", None)
         ua = request.query_params.get("ua", None)
 
-        if not piso:
-            return Response({"error": "Falta el parametro piso"}, status=400)
-
         from django.db import connection
 
-        if ua and ua.strip():
-            query = """
-                SELECT 
-                    e.`Posición`,
-                    e.`Numempleado`,
-                    e.`Nombres`,
-                    e.`Unidad Administrativa`,
-                    e.`Descripción ubicación`,
-                    e.`Estado Nómina`
-                FROM EMPLEADOS_COMPLETOS_SIG e
-                INNER JOIN MOV_POS_LATEST activas
-                    ON e.`Posición` = activas.`Nº Pos Actual` AND activas.`Estado Psn` = 'A'
-                WHERE e.`Descripción ubicación` = %s 
-                  AND e.`Unidad Administrativa` = %s
-                ORDER BY e.`Nombres`;
-            """
-            params = [piso, ua]
-        else:
-            query = """
-                SELECT 
-                    e.`Posición`,
-                    e.`Numempleado`,
-                    e.`Nombres`,
-                    e.`Unidad Administrativa`,
-                    e.`Descripción ubicación`,
-                    e.`Estado Nómina`
-                FROM EMPLEADOS_COMPLETOS_SIG e
-                INNER JOIN MOV_POS_LATEST activas
-                    ON e.`Posición` = activas.`Nº Pos Actual` AND activas.`Estado Psn` = 'A'
-                WHERE e.`Descripción ubicación` = %s 
-                ORDER BY e.`Nombres`;
-            """
+        # Sin `piso`: se listan los empleados de TODA la torre (usado por el
+        # contador global). Con `piso`: comportamiento original, exacto a ese piso.
+        if piso and piso.strip():
+            where_clause = "e.`Descripción ubicación` = %s"
             params = [piso]
+        else:
+            where_clause = """(
+                e.`Descripción ubicación` LIKE %s
+                OR e.`Descripción ubicación` LIKE %s
+            )"""
+            params = ["%Caballito Reforma 10 P%", "%Torre Caballito Reforma 10 P%"]
+
+        if ua and ua.strip():
+            where_clause += " AND e.`Unidad Administrativa` = %s"
+            params.append(ua)
+
+        # El componente completo (contadores y listados) muestra únicamente
+        # personal activo: se excluyen las posiciones vacantes.
+        where_clause += " AND UPPER(TRIM(e.`Numempleado`)) <> 'VACANTE'"
+
+        query = f"""
+            SELECT
+                e.`Posición`,
+                e.`Numempleado`,
+                e.`Nombres`,
+                e.`Unidad Administrativa`,
+                e.`Descripción ubicación`,
+                e.`Estado Nómina`
+            FROM EMPLEADOS_COMPLETOS_SIG e
+            INNER JOIN MOV_POS_LATEST activas
+                ON e.`Posición` = activas.`Nº Pos Actual` AND activas.`Estado Psn` = 'A'
+            WHERE {where_clause}
+            ORDER BY e.`Descripción ubicación`, e.`Nombres`;
+        """
 
         with connection.cursor() as cursor:
             cursor.execute(query, params)
@@ -7282,6 +7281,7 @@ class TorreCaballitoSearchView(APIView):
                   e.`Descripción ubicación` LIKE '%%Caballito Reforma 10 P%%'
                   OR e.`Descripción ubicación` LIKE '%%Torre Caballito Reforma 10 P%%'
               )
+              AND UPPER(TRIM(e.`Numempleado`)) <> 'VACANTE'
               AND (e.`Nombres` LIKE %s OR e.`Numempleado` LIKE %s)
             LIMIT 20;
         """
