@@ -1,3 +1,5 @@
+from django.conf import settings
+from django.core.serializers.json import DjangoJSONEncoder
 from django.db import models
 from django.contrib.auth.models import Group, User
 from ua.models import UnidadAdministrativa
@@ -10,6 +12,7 @@ from ua.models import UnidadAdministrativa
 # el front, que lo lee y renderiza el tablero en vez del dashboard normal).
 TABLERO_CHOICES = [
     ("rh", "Tablero RH"),
+    ("personalizable", "Tablero Personalizable"),
 ]
 
 
@@ -146,3 +149,24 @@ class PresenceLog(models.Model):
 
     class Meta:
         indexes = [models.Index(fields=["email", "created_at"])]
+
+
+class TableroLayout(models.Model):
+    """Layout guardado del tablero personalizable (ver Whitelist.tablero ==
+    'personalizable' y TableroLayoutView). A diferencia de FiltroGuardado
+    (plantilla/models.py, N filtros por usuario), aquí solo existe "el" layout
+    actual de cada quien, de ahí OneToOne en vez de ForeignKey.
+
+    `widgets` guarda la misma forma que espera react-grid-layout
+    (i/x/y/w/h) más un campo propio `type` que identifica qué widget montar:
+    [{"i": "...", "type": "vacantes_por_nivel", "x": 0, "y": 0, "w": 4, "h": 4}, ...]
+    """
+
+    usuario = models.OneToOneField(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="tablero_layout"
+    )
+    widgets = models.JSONField(default=list, encoder=DjangoJSONEncoder)
+    actualizado_en = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.usuario} - {len(self.widgets)} widgets"

@@ -8,6 +8,7 @@ from .views import (
     PresenceHeartbeatView,
     PresenceListView,
     RoleViewSet,
+    TableroLayoutView,
     UserVisitsView,
     WhitelistViewSet,
 )
@@ -25,4 +26,5 @@ urlpatterns = [
     path('presence/heartbeat/', PresenceHeartbeatView.as_view(), name='presence-heartbeat'),
     path('presence/active/', PresenceListView.as_view(), name='presence-active'),
     path('visits/', UserVisitsView.as_view(), name='user-visits'),
+    path('tablero-layout/', TableroLayoutView.as_view(), name='tablero-layout'),
 ]

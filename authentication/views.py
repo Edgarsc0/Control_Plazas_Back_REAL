@@ -16,6 +16,7 @@ from django.utils import timezone
 from .models import (
     ModulePermission,
     PresenceLog,
+    TableroLayout,
     Whitelist,
     sincronizar_usuario_django,
 )
@@ -412,3 +413,31 @@ class ChangePasswordView(views.APIView):
             {"message": "Contraseña actualizada", "token": token.key},
             status=status.HTTP_200_OK,
         )
+
+
+class TableroLayoutView(views.APIView):
+    """
+    Layout del tablero personalizable (ver Whitelist.tablero ==
+    'personalizable') del usuario autenticado. Autoescopado a `request.user`
+    (un usuario nunca puede leer/escribir el layout de otro), por eso no
+    declara view_permission/edit_permission — mismo criterio que
+    FiltrosGuardadosView (plantilla/views.py).
+
+    GET -> {"widgets": [...]} (lista vacía si el usuario aún no personaliza nada).
+    PUT {"widgets": [...]} -> reemplaza el layout completo.
+    """
+
+    def get(self, request):
+        layout = TableroLayout.objects.filter(usuario=request.user).first()
+        return Response({"widgets": layout.widgets if layout else []})
+
+    def put(self, request):
+        widgets = request.data.get("widgets")
+        if not isinstance(widgets, list):
+            return Response(
+                {"error": "'widgets' debe ser una lista."}, status=status.HTTP_400_BAD_REQUEST
+            )
+        layout, _ = TableroLayout.objects.update_or_create(
+            usuario=request.user, defaults={"widgets": widgets}
+        )
+        return Response({"widgets": layout.widgets})
