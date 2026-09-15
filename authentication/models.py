@@ -111,6 +111,9 @@ class ModulePermission(models.Model):
             ("view_ocupacion_tabla", "Ocupación de Plazas: ver tab Tabla"),
             ("view_ocupacion_estadisticas", "Ocupación de Plazas: ver tab Estadísticas"),
             ("edit_ocupacion_plazas", "Ocupación de Plazas: editar asignación de plazas"),
+            # Rediseño 2026-09: reemplaza sankey/tabla/estadisticas (vista pasó
+            # a listar solicitudes de nueva creación con Resolución/Notificación).
+            ("view_ocupacion_solicitudes", "Ocupación de Plazas: ver tabla de Solicitudes de Nueva Creación"),
             # Valuación Presupuestaria
             ("view_valuacion_presupuestaria", "Valuación Presupuestaria: ver Simulador y Asuntos"),
             ("edit_valuacion_parametros", "Valuación Presupuestaria: editar Parámetros (catálogo/conceptos/constantes)"),
