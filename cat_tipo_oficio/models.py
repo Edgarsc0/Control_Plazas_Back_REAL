@@ -52,6 +52,16 @@ class AsuntoValuacion(models.Model):
         verbose_name="Oficio de Resolución (PDF)",
     )
 
+    # Sólo aplica a asuntos dictaminados como Procedente: el oficio con el que
+    # se notifica la ocupación de la plaza. Solo se aceptarán archivos PDF.
+    oficio_notificacion_ocupacion = models.FileField(
+        upload_to="oficios/notificacion_ocupacion/%Y/%m/",
+        null=True,
+        blank=True,
+        validators=[FileExtensionValidator(allowed_extensions=["pdf"])],
+        verbose_name="Oficio de Notificación de Ocupación (PDF)",
+    )
+
     def __str__(self):
         return f"AsuntoSCG: {self.idAsuntoSCG} - Valoracion: {self.valuacion}"
 
