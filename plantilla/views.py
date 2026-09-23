@@ -33,6 +33,9 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from authentication.columnas_detalle_catalog import COLUMNAS_DETALLE_SIEMPRE_INCLUIDAS
+from authentication.scoping import get_columnas_scope_for_request, get_un_scope_for_request
+
 from .models import (
     AlineacionOrganizacionalHistorico,
     AnuenciaAnexo,
@@ -2055,8 +2058,11 @@ class EmpleadosCompletosEstatusNominaResumenView(APIView):
             # tabla (p. ej. justo después de una sincronización de nómina).
             # Al derivarse del mismo dataset ya cacheado, tarjeta y tabla
             # quedan sincronizadas por construcción, sin depender de acordarse
-            # de invalidar dos cachés en paralelo.
-            filas = _obtener_detalle_activos_cacheado()
+            # de invalidar dos cachés en paralelo. Recortado por scope de UN
+            # igual que la tabla, para que el resumen nunca la contradiga.
+            filas = _scope_un_filas(
+                _obtener_detalle_activos_cacheado(), get_un_scope_for_request(request)
+            )
 
             resumen = {
                 "total_registros": len(filas),
@@ -2183,6 +2189,114 @@ def _paginated_or_full_response(request, data):
     return Response(data, status=status.HTTP_200_OK)
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# Alcance de datos por Unidad de Negocio (UN) — ver RolUnScope y
+# authentication.scoping.get_un_scope_for_request. Alcance por COLUMNAS de
+# Plantilla Detalle — ver RolColumnScope y get_columnas_scope_for_request
+# (recorta campos DENTRO de cada fila, no filas completas).
+#
+# COBERTURA ACTUAL (2026-09): solo los caminos alcanzables con
+# view_plantilla_detalle / view_plantilla_detalle_foto —
+# EmpleadosCompletosActivosDetalleView (sus 3 ramas, UN + columnas),
+# EmpleadosCompletosEstatusNominaResumenView (solo UN — no devuelve columnas
+# crudas, es un agregado), ExportarPlantillaDetalleConFotosView (UN +
+# columnas), ExportarPlantillaHistoricaConFotosView (solo columnas — el UN
+# scope no aplica ahí, ver su propio docstring), EmpleadoFotoView,
+# DatosPersonalesEmpleadoView, DatosPersonalesBulkView (estos 3 solo UN).
+#
+# NO CUBIERTO todavía (no otorgar a un rol con scope hasta hacer esa pasada):
+# view_plantilla_estatus_nomina / view_plantilla_mov_posiciones /
+# view_plantilla_historico / view_plantilla_movimientos / view_plantilla_bajas /
+# view_plantilla_geografia y sus exports (EmpleadosPorNivelYEstatusView,
+# MovPosDetalleView, MovimientosPersonalListView, PlantillaHistoricaView,
+# ExportarEmpleadosPorPosicionConFotosView, ExportarPlantillaHistoricaConFotosView,
+# ExportarMovimientosPersonalConFotosView, ExportarBajasConFotosView, el listado
+# de Bajas, CeldaUpdatesSSEView, y los endpoints de historial por posición/
+# empleado). Tampoco los endpoints de edición (edit_plantilla_detalle y
+# similares) — no otorgar permisos edit_* a un rol con scope todavía.
+def _scope_un_queryset(queryset, un_codes, field="cd_un"):
+    """None -> queryset intacto (sin restricción). Lista -> solo filas cuyo
+    Trim(field) esté en la lista (NULL/'' nunca pasa). Lista vacía -> .none()
+    (fail-closed, ver RolUnScope)."""
+    if un_codes is None:
+        return queryset
+    if not un_codes:
+        return queryset.none()
+    alias = f"_scope_{field}"
+    return queryset.annotate(**{alias: Trim(field)}).filter(**{f"{alias}__in": un_codes})
+
+
+def _scope_un_filas(filas, un_codes, key="cd_un"):
+    """Misma semántica que _scope_un_queryset pero sobre una lista de dicts
+    ya materializados (filas que salieron de una caché, por ejemplo)."""
+    if un_codes is None:
+        return filas
+    if not un_codes:
+        return []
+    permitidos = set(un_codes)
+    return [f for f in filas if str(f.get(key) or "").strip() in permitidos]
+
+
+def _numempleado_en_scope(numempleado, un_codes):
+    """Punto-lookup: ¿el cd_un del empleado `numempleado` está en el scope?
+    None de scope -> siempre True (sin restricción). Usa las mismas variantes
+    de zero-padding que excel_fotos._variantes_numempleado para no negar un
+    acceso legítimo por una diferencia de padding contra lo guardado en BD."""
+    if un_codes is None:
+        return True
+    if not un_codes:
+        return False
+    from .excel_fotos import _variantes_numempleado
+
+    variantes = list(_variantes_numempleado(numempleado))
+    return _scope_un_queryset(
+        EmpleadosCompletosSig.objects.filter(numempleado__in=variantes), un_codes
+    ).exists()
+
+
+def _filtrar_numempleados_por_scope(numempleados, un_codes):
+    """Igual que _numempleado_en_scope pero para una lista completa, en una
+    sola consulta — devuelve solo los `numempleados` (strings originales,
+    sin normalizar) cuyo cd_un está en el scope."""
+    if un_codes is None:
+        return numempleados
+    if not un_codes:
+        return []
+    from .excel_fotos import _variantes_numempleado
+
+    limpios = [str(n).strip() for n in numempleados if str(n or "").strip()]
+    todas_variantes = {v for n in limpios for v in _variantes_numempleado(n)}
+    en_scope = set(
+        _scope_un_queryset(
+            EmpleadosCompletosSig.objects.filter(numempleado__in=todas_variantes), un_codes
+        ).values_list("numempleado", flat=True)
+    )
+    variantes_en_scope = {v for n in en_scope for v in _variantes_numempleado(n)}
+    return [n for n in limpios if n in variantes_en_scope]
+
+
+def _strip_columnas_filas(filas, columnas_permitidas):
+    """None -> filas intactas (sin restricción). Lista -> cada fila se
+    recorta a columnas_permitidas ∪ COLUMNAS_DETALLE_SIEMPRE_INCLUIDAS — las
+    demás claves ni siquiera viajan en la respuesta (no es un ocultamiento
+    solo de interfaz: verificable en las herramientas de red del navegador).
+    Ver RolColumnScope para el contrato completo."""
+    if columnas_permitidas is None:
+        return filas
+    permitidas = set(columnas_permitidas) | COLUMNAS_DETALLE_SIEMPRE_INCLUIDAS
+    return [{k: v for k, v in fila.items() if k in permitidas} for fila in filas]
+
+
+def _responder_detalle_scoped(request, filas, un_scope):
+    """Único punto de salida de EmpleadosCompletosActivosDetalleView: recorta
+    por UN (filas) y luego por columnas (campos dentro de cada fila) ANTES
+    de paginar (para que ?page_size grande no sirva de nada), y responde con
+    el mismo envelope de siempre."""
+    filas = _scope_un_filas(filas, un_scope)
+    filas = _strip_columnas_filas(filas, get_columnas_scope_for_request(request))
+    return _paginated_or_full_response(request, filas)
+
+
 def _obtener_detalle_activos_cacheado():
     """
     Filas enriquecidas de EmpleadosCompletosSig acotadas a posiciones activas
@@ -2217,6 +2331,10 @@ class EmpleadosCompletosActivosDetalleView(APIView):
         oficio = request.query_params.get("oficio")
         nivel = request.query_params.get("nivel")
         search = (request.query_params.get("search") or "").strip()
+        # Se aplica sin importar cuál de los 3 permisos OR de arriba destrabó
+        # el acceso — los 3 tabs comparten este dataset, así que el scope debe
+        # cubrirlos a la vez (ver bloque de comentario junto a _scope_un_filas).
+        un_scope = get_un_scope_for_request(request)
 
         if search:
             # Búsqueda libre sobre el universo de posiciones activas (mismo
@@ -2226,14 +2344,17 @@ class EmpleadosCompletosActivosDetalleView(APIView):
             # que MovimientosPersonalListView, que tampoco cachea `search`.
             # La usa TableroRH para no tener que traer el dataset completo
             # (~11 mil filas) al cliente en cada carga solo para filtrarlo ahí.
+            # Al ser la única rama sin caché, el recorte por UN se hace a
+            # nivel SQL (antes de enriquecer) en vez de en Python al final.
             try:
                 active_position_codes = obtener_posiciones_activas()
                 queryset = EmpleadosCompletosSig.objects.filter(
                     posicion__in=active_position_codes
                 )
+                queryset = _scope_un_queryset(queryset, un_scope)
                 queryset = apply_text_search(queryset, search, CAMPOS_BUSQUEDA_EMPLEADOS_DETALLE)
                 resultados = _enriquecer_empleados_completos_rows(list(queryset.values()))
-                return _paginated_or_full_response(request, resultados)
+                return _responder_detalle_scoped(request, resultados, un_scope)
             except Exception:
                 logger.exception("Error inesperado en {}".format(request.path))
                 return Response(
@@ -2241,10 +2362,15 @@ class EmpleadosCompletosActivosDetalleView(APIView):
                 )
 
         if oficio or nivel:
+            # La clave de caché NO lleva el scope a propósito: en Redis solo
+            # vive el dataset SIN filtrar, compartido por todos los usuarios
+            # (igual que siempre); el recorte por UN se aplica siempre al
+            # salir, así que una respuesta ya recortada nunca queda cacheada
+            # ni puede terminar sirviéndose a un usuario de otro rol.
             cache_key = f"empleados_completos_activos_detalle_{oficio}_{nivel}"
             cached_data = cache.get(cache_key)
             if cached_data is not None:
-                return _paginated_or_full_response(request, cached_data)
+                return _responder_detalle_scoped(request, cached_data, un_scope)
 
             try:
                 # Obtener posiciones de Plantilla1800Plazas que cumplan los filtros
@@ -2268,7 +2394,7 @@ class EmpleadosCompletosActivosDetalleView(APIView):
                 resultados = _enriquecer_empleados_completos_rows(list(queryset.values()))
 
                 cache.set(cache_key, resultados, None)
-                return _paginated_or_full_response(request, resultados)
+                return _responder_detalle_scoped(request, resultados, un_scope)
             except Exception:
                 logger.exception("Error inesperado en {}".format(request.path))
                 return Response(
@@ -2277,7 +2403,7 @@ class EmpleadosCompletosActivosDetalleView(APIView):
 
         try:
             resultados = _obtener_detalle_activos_cacheado()
-            return _paginated_or_full_response(request, resultados)
+            return _responder_detalle_scoped(request, resultados, un_scope)
         except Exception:
             logger.exception("Error inesperado en {}".format(request.path))
             return Response(
@@ -2457,6 +2583,14 @@ class EmpleadoFotoView(APIView):
         if not numempleado:
             return HttpResponseNotFound()
 
+        # Mismo código 404 tanto si el empleado está fuera del scope de UN
+        # del usuario como si simplemente no tiene foto — no distinguirlos
+        # evita que este endpoint sirva para adivinar a qué UN pertenece un
+        # numempleado (ver _numempleado_en_scope).
+        un_scope = get_un_scope_for_request(request)
+        if not _numempleado_en_scope(numempleado, un_scope):
+            return HttpResponseNotFound()
+
         ruta = resolver_foto_empleado(numempleado)
         if ruta is None:
             return HttpResponseNotFound()
@@ -2501,6 +2635,15 @@ class DatosPersonalesEmpleadoView(APIView):
         if not no_empleado:
             return Response(
                 {"detail": "no_empleado es requerido."}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Mismo 404 genérico tanto si está fuera del scope de UN como si de
+        # plano no hay datos personales — ver EmpleadoFotoView.
+        un_scope = get_un_scope_for_request(request)
+        if not _numempleado_en_scope(no_empleado, un_scope):
+            return Response(
+                {"detail": "No se encontraron datos personales para este empleado."},
+                status=status.HTTP_404_NOT_FOUND,
             )
 
         registro = DatosPersonales.objects.filter(no_empleado=no_empleado).first()
@@ -2625,6 +2768,15 @@ class DatosPersonalesBulkView(APIView):
                 {"detail": "no_empleados (lista) es requerido."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        # Lista viene del cliente sin validar — se filtra contra el scope de
+        # UN en una sola consulta (no un point-lookup por elemento) antes de
+        # resolver los datos personales. Los que quedan fuera de scope
+        # simplemente no aparecen en `results` (el front ya tolera claves
+        # ausentes, ver mapa_dp.get(..., {}) en PlantillaDetalleTab.jsx).
+        un_scope = get_un_scope_for_request(request)
+        if un_scope is not None:
+            no_empleados = _filtrar_numempleados_por_scope(no_empleados, un_scope)
 
         mapa = _get_datos_personales_bulk_map(no_empleados)
         return Response({"results": mapa}, status=status.HTTP_200_OK)
@@ -2810,13 +2962,38 @@ class ExportarPlantillaDetalleConFotosView(APIView):
         if not posiciones or not columnas:
             return Response({"error": "Faltan 'posiciones' o 'columnas'."}, status=status.HTTP_400_BAD_REQUEST)
 
+        # `posiciones` viene del cliente sin validar (ver docstring de la
+        # clase) — se intersecta con el scope de UN del usuario antes de
+        # construir el Excel. Las posiciones fuera de scope desaparecen en
+        # silencio del resultado (el filtro de abajo, `if str(p) in
+        # rows_by_posicion`, ya las excluye solo) en vez de responder un
+        # error: un error específico para "fuera de scope" convertiría este
+        # endpoint en un oráculo para adivinar a qué UN pertenece cada
+        # posición.
+        un_scope = get_un_scope_for_request(request)
         rows_by_posicion = {
             str(r["posicion"]): r
-            for r in EmpleadosCompletosSig.objects.filter(posicion__in=posiciones).values()
+            for r in _scope_un_queryset(
+                EmpleadosCompletosSig.objects.filter(posicion__in=posiciones), un_scope
+            ).values()
         }
         rows = _aplicar_mapeos_detalle_excel(
             [rows_by_posicion[str(p)] for p in posiciones if str(p) in rows_by_posicion]
         )
+
+        # `columnas` también viene del cliente sin validar — mismo criterio
+        # que `posiciones` arriba: si el rol tiene un scope de columnas
+        # (RolColumnScope), cualquier clave fuera de lo permitido se
+        # descarta en silencio antes de generar el archivo (no solo se
+        # oculta en la interfaz — nunca llega a escribirse en el Excel).
+        # "Incluir datos personales" se desactiva por completo para un rol
+        # con este scope: es un catálogo aparte (DATOS_PERSONALES_EXPORT_FIELDS)
+        # que este mecanismo no cubre todavía.
+        columnas_scope = get_columnas_scope_for_request(request)
+        if columnas_scope is not None:
+            permitidas = set(columnas_scope) | COLUMNAS_DETALLE_SIEMPRE_INCLUIDAS
+            columnas = [c for c in columnas if isinstance(c, dict) and c.get("key") in permitidas]
+            incluir_datos_personales = False
 
         # Tope de seguridad: la plantilla activa completa son ~13,300 filas
         # hoy (medido) — con margen. Sin este tope, "sin querer" no hay
@@ -2883,6 +3060,15 @@ class ExportarPlantillaHistoricaConFotosView(APIView):
 
         if not fecha or not rows or not columnas:
             return Response({"error": "Faltan 'fecha', 'rows' o 'columnas'."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Mismo criterio que ExportarPlantillaDetalleConFotosView: si el rol
+        # tiene un scope de columnas, se descarta cualquier clave fuera de lo
+        # permitido antes de generar el archivo.
+        columnas_scope = get_columnas_scope_for_request(request)
+        if columnas_scope is not None:
+            permitidas = set(columnas_scope) | COLUMNAS_DETALLE_SIEMPRE_INCLUIDAS
+            columnas = [c for c in columnas if isinstance(c, dict) and c.get("key") in permitidas]
+            incluir_datos_personales = False
 
         # Mismo tope que el export en vivo (ver ExportarPlantillaDetalleConFotosView).
         if incluir_fotos and len(rows) > 15000:

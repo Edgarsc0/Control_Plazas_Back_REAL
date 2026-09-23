@@ -204,10 +204,12 @@ CORS_ALLOWED_ORIGINS = [
     "http://127.0.0.1:3000",
     "http://192.168.1.76:3000",
     "http://89.116.51.124:3030",
+    "https://scp-anam.theworkpc.com",
 ]
 
 CSRF_TRUSTED_ORIGINS = [
     "http://89.116.51.124:3030",
+    "https://scp-anam.theworkpc.com",
 ]
 
 # Django REST Framework configuration

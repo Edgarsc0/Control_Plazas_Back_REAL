@@ -38,6 +38,68 @@ class Whitelist(models.Model):
         return f"{self.email} - {self.rol.name}"
 
 
+class RolUnScope(models.Model):
+    """Restringe un rol a ver solo registros de ciertas Unidades de Negocio
+    (columna `Cd UN` en las tablas de plantilla, ver `plantilla/models.py`).
+
+    Contrato de seguridad (no cambiar esta semántica sin revisar todos los
+    puntos de enforcement en `plantilla/views.py`):
+      - Sin fila para un rol -> SIN restricción, ve todo (comportamiento de
+        todos los roles existentes antes de este modelo).
+      - Fila con `cd_un_codes` no vacío -> ve solo filas cuyo `cd_un` (con
+        Trim()) esté en la lista.
+      - Fila con `cd_un_codes == []` -> no ve NINGÚN registro. No se trata
+        como "sin restricción": borrar el scope requiere borrar la fila
+        (ver GroupSerializer.un_scope: null), no vaciar la lista.
+
+    Se ancla a `cd_un` (código, 5 dígitos) y nunca al nombre de la UN: el
+    nombre es texto libre de una tabla externa (ZAFIRO) con inconsistencias
+    de redacción para un mismo código (ver authentication/un_catalog.py).
+    """
+
+    rol = models.OneToOneField(Group, on_delete=models.CASCADE, related_name="un_scope_config")
+    cd_un_codes = models.JSONField(default=list, encoder=DjangoJSONEncoder)
+    actualizado_en = models.DateTimeField(auto_now=True)
+    actualizado_por = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+
+    def __str__(self):
+        return f"{self.rol.name}: {self.cd_un_codes}"
+
+
+class RolColumnScope(models.Model):
+    """Restringe un rol a ver solo ciertas columnas de la tabla Plantilla
+    Detalle (catálogo en `authentication/columnas_detalle_catalog.py`, mismo
+    que `plantillaDetalleColumns.js` en el frontend).
+
+    Mismo contrato que RolUnScope (no cambiar sin revisar el enforcement en
+    `plantilla/views.py` — `_strip_columnas_filas`):
+      - Sin fila para un rol -> SIN restricción, ve todas las columnas.
+      - Fila con `columnas_permitidas` no vacío -> solo esas columnas MÁS el
+        set fijo `COLUMNAS_DETALLE_SIEMPRE_INCLUIDAS` (identificadores/status
+        que varias funciones de la UI necesitan para operar — no son
+        configurables, se agregan siempre).
+      - Fila con `columnas_permitidas == []` -> solo ve las columnas del set
+        fijo de arriba, ninguna más.
+
+    A diferencia del scope de UN (que filtra FILAS), esto recorta CAMPOS
+    dentro de cada fila que el usuario sí puede ver — las columnas no
+    permitidas ni siquiera viajan en la respuesta del servidor (no es un
+    ocultamiento solo de interfaz).
+    """
+
+    rol = models.OneToOneField(Group, on_delete=models.CASCADE, related_name="columnas_scope_config")
+    columnas_permitidas = models.JSONField(default=list, encoder=DjangoJSONEncoder)
+    actualizado_en = models.DateTimeField(auto_now=True)
+    actualizado_por = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+
+    def __str__(self):
+        return f"{self.rol.name}: {self.columnas_permitidas}"
+
+
 def sincronizar_usuario_django(entry):
     """Crea o vincula el ``User`` de Django de una entrada de whitelist y deja
     su grupo y flags de superusuario alineados con el rol asignado.

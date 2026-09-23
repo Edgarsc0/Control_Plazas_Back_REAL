@@ -1,3 +1,4 @@
+import hashlib
 from collections import Counter
 from datetime import datetime, time as dt_time, timedelta, timezone as dt_timezone
 
@@ -21,6 +22,7 @@ from .models import (
     sincronizar_usuario_django,
 )
 from .presence import get_active_sessions, set_presence
+from .scoping import get_columnas_scope_for_user, get_un_scope_for_user
 from .serializers import GroupSerializer, PermissionSerializer, WhitelistSerializer
 
 
@@ -38,7 +40,12 @@ class WhitelistViewSet(viewsets.ModelViewSet):
 class RoleViewSet(viewsets.ModelViewSet):
     """CRUD de roles (Group) editable desde UI, con asignación de permisos."""
 
-    queryset = Group.objects.all().prefetch_related("permissions__content_type").order_by("name")
+    queryset = (
+        Group.objects.all()
+        .prefetch_related("permissions__content_type")
+        .select_related("un_scope_config", "columnas_scope_config")
+        .order_by("name")
+    )
     serializer_class = GroupSerializer
     view_permission = "authentication.manage_roles"
     edit_permission = "authentication.manage_roles"
@@ -79,6 +86,22 @@ class MePermissionsView(views.APIView):
         else:
             permissions = sorted(user.get_all_permissions())
 
+        # Alcance de datos por Unidad de Negocio — puramente informativo para
+        # el front (mostrarle al usuario por qué ve menos registros, y como
+        # parte de la llave de caché del navegador). La restricción real se
+        # aplica siempre del lado servidor en cada endpoint, sin depender de
+        # que el front lea/respete este campo.
+        un_scope = get_un_scope_for_user(user)
+        if un_scope is None:
+            un_scope_fingerprint = "all"
+        else:
+            un_scope_fingerprint = hashlib.sha256(",".join(un_scope).encode()).hexdigest()[:12]
+
+        # Alcance por columnas de Plantilla Detalle — mismo criterio que
+        # un_scope arriba: informativo para el front (qué columnas ofrecer
+        # en "Configurar Columnas"), la aplicación real es 100% del backend.
+        columnas_detalle = get_columnas_scope_for_user(user)
+
         return Response(
             {
                 "email": user.email,
@@ -87,6 +110,9 @@ class MePermissionsView(views.APIView):
                 "is_superuser": user.is_superuser,
                 "permissions": permissions,
                 "tablero": whitelist_entry.tablero if whitelist_entry else None,
+                "un_scope": un_scope,
+                "un_scope_fingerprint": un_scope_fingerprint,
+                "columnas_detalle_permitidas": columnas_detalle,
             }
         )
 

@@ -127,13 +127,25 @@ def redimensionar_foto_para_excel(ruta):
     """Abre la foto en ``ruta``, la redimensiona a
     ``FOTO_MAX_W_PX x FOTO_MAX_H_PX`` (conservando proporción) y la
     recomprime a JPEG — devuelve un ``BytesIO`` listo para insertar, o
-    ``None`` si el archivo no se pudo leer/decodificar."""
+    ``None`` si el archivo no se pudo leer/decodificar.
+
+    ``dpi=(96, 96)`` es a propósito: las fotos de origen vienen de distintos
+    escáneres/cámaras a través de los años y traen metadato de DPI muy
+    dispar (o ninguno). xlsxwriter calcula el tamaño de despliegue de cada
+    imagen como píxeles/DPI (ver xlsxwriter.image.DEFAULT_DPI = 96) — sin
+    forzar aquí el mismo valor, dos fotos con idénticas dimensiones en
+    píxeles se ven en Excel a tamaños muy distintos según el DPI que traía
+    el archivo original, y una que sale "grande" se desborda sobre las
+    celdas vecinas (con object_position=1 nada la recorta al tamaño de la
+    celda). Normalizar el DPI al guardar hace que el tamaño en píxeles que
+    ya controlamos arriba sea también el tamaño real de despliegue.
+    """
     try:
         with PILImage.open(ruta) as img:
             img = img.convert("RGB")
             img.thumbnail((FOTO_MAX_W_PX, FOTO_MAX_H_PX), PILImage.LANCZOS)
             buf = BytesIO()
-            img.save(buf, format="JPEG", quality=FOTO_JPEG_QUALITY)
+            img.save(buf, format="JPEG", quality=FOTO_JPEG_QUALITY, dpi=(96, 96))
             buf.seek(0)
             return buf
     except Exception:
