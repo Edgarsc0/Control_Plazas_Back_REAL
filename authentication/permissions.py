@@ -1,6 +1,29 @@
+from rest_framework.exceptions import APIException
 from rest_framework.permissions import BasePermission
 
+from .mantenimiento import usuario_bloqueado
+
 SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
+
+
+class MantenimientoActivo(APIException):
+    status_code = 503
+    default_detail = "Sistema en mantenimiento."
+    default_code = "maintenance"
+
+
+class SinMantenimiento(BasePermission):
+    """Niega (503) a los usuarios no exentos mientras el modo mantenimiento
+    está activo. Las vistas que el front necesita para mostrar la pantalla de
+    mantenimiento (perfil, heartbeat, cambio de contraseña) declaran
+    ``maintenance_exempt = True``."""
+
+    def has_permission(self, request, view):
+        if getattr(view, "maintenance_exempt", False):
+            return True
+        if usuario_bloqueado(request.user):
+            raise MantenimientoActivo()
+        return True
 
 
 class HasModulePermission(BasePermission):

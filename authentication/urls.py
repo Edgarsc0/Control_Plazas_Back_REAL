@@ -3,6 +3,7 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     ChangePasswordView,
     LoginView,
+    MantenimientoView,
     MePermissionsView,
     PermissionListView,
     PresenceHeartbeatView,
@@ -26,5 +27,6 @@ urlpatterns = [
     path('presence/heartbeat/', PresenceHeartbeatView.as_view(), name='presence-heartbeat'),
     path('presence/active/', PresenceListView.as_view(), name='presence-active'),
     path('visits/', UserVisitsView.as_view(), name='user-visits'),
+    path('maintenance/', MantenimientoView.as_view(), name='maintenance'),
     path('tablero-layout/', TableroLayoutView.as_view(), name='tablero-layout'),
 ]

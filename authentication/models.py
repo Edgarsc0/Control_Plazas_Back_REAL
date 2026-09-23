@@ -100,6 +100,29 @@ class RolColumnScope(models.Model):
         return f"{self.rol.name}: {self.columnas_permitidas}"
 
 
+class ModoMantenimiento(models.Model):
+    """Interruptor global de "modo mantenimiento" (singleton, pk=1).
+
+    Con ``activo`` encendido, todo usuario de la whitelist que NO esté en
+    ``exentos`` recibe 503 en la API (ver
+    ``authentication.mantenimiento`` y ``permissions.SinMantenimiento``) y el
+    front le muestra la pantalla de mantenimiento en cualquier ruta salvo la
+    landing ``/``. Los superadmins también se bloquean si no se marcan; quien lo activa
+    queda siempre exento para poder apagarlo.
+    """
+
+    activo = models.BooleanField(default=False)
+    mensaje = models.CharField(max_length=300, blank=True, default="")
+    exentos = models.ManyToManyField(Whitelist, blank=True, related_name="+")
+    actualizado_en = models.DateTimeField(auto_now=True)
+    actualizado_por = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+
+    def __str__(self):
+        return f"Mantenimiento {'ACTIVO' if self.activo else 'apagado'}"
+
+
 def sincronizar_usuario_django(entry):
     """Crea o vincula el ``User`` de Django de una entrada de whitelist y deja
     su grupo y flags de superusuario alineados con el rol asignado.

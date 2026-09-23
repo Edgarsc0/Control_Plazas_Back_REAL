@@ -14,7 +14,9 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db.models import Count
 from django.db.models.functions import ExtractHour, TruncDate
 from django.utils import timezone
+from . import mantenimiento
 from .models import (
+    ModoMantenimiento,
     ModulePermission,
     PresenceLog,
     TableroLayout,
@@ -68,6 +70,8 @@ class PermissionListView(generics.ListAPIView):
 
 class MePermissionsView(views.APIView):
     """Rol y permisos efectivos del usuario autenticado (para hidratar el front)."""
+
+    maintenance_exempt = True
 
     def get(self, request):
         user = request.user
@@ -124,6 +128,8 @@ class PresenceHeartbeatView(views.APIView):
     y en qué página está, distinguiendo pestañas/dispositivos por `tab_id`
     (generado y persistido en sessionStorage del lado del front).
     """
+
+    maintenance_exempt = True
 
     def post(self, request):
         tab_id = request.data.get("tab_id")
@@ -389,6 +395,8 @@ class ChangePasswordView(views.APIView):
     titular la cambia aquí y con eso se apaga su `debe_cambiar_password`.
     """
 
+    maintenance_exempt = True
+
     def post(self, request):
         password_actual = request.data.get("password_actual") or ""
         password_nueva = request.data.get("password_nueva") or ""
@@ -467,3 +475,58 @@ class TableroLayoutView(views.APIView):
             usuario=request.user, defaults={"widgets": widgets}
         )
         return Response({"widgets": layout.widgets})
+
+
+class MantenimientoView(views.APIView):
+    """Modo mantenimiento del sistema.
+
+    GET (público, con o sin token): estado para que el front decida si muestra
+    la pantalla de mantenimiento. ``bloqueado`` ya viene resuelto para quien
+    pregunta (los exentos nunca lo están; los superadmins solo si no se marcan). Solo un superadmin recibe
+    además la lista de exentos.
+    PUT (superadmin): enciende/apaga, cambia el mensaje y define los exentos
+    (ids de Whitelist — los desarrolladores a quienes no se les niega el servicio).
+    """
+
+    permission_classes = [AllowAny]
+    maintenance_exempt = True
+
+    def _payload(self, request):
+        estado = mantenimiento.obtener_estado()
+        user = request.user
+        data = {
+            "activo": estado["activo"],
+            "mensaje": estado["mensaje"],
+            "bloqueado": mantenimiento.usuario_bloqueado(user, estado),
+        }
+        if user.is_authenticated and user.is_superuser:
+            config = ModoMantenimiento.objects.filter(pk=1).first()
+            data["exentos"] = list(config.exentos.values_list("id", flat=True)) if config else []
+        return data
+
+    def get(self, request):
+        return Response(self._payload(request))
+
+    def put(self, request):
+        user = request.user
+        if not (user.is_authenticated and user.is_superuser):
+            return Response({"detail": "Solo un superadmin puede cambiar el modo mantenimiento."}, status=status.HTTP_403_FORBIDDEN)
+
+        activo = request.data.get("activo")
+        if not isinstance(activo, bool):
+            raise ValidationError({"activo": "Debe ser true o false."})
+        mensaje = str(request.data.get("mensaje") or "").strip()[:300]
+        exentos = request.data.get("exentos", [])
+        if not isinstance(exentos, list) or not all(isinstance(i, int) for i in exentos):
+            raise ValidationError({"exentos": "Debe ser una lista de ids de usuario."})
+
+        config, _ = ModoMantenimiento.objects.get_or_create(pk=1)
+        config.activo = activo
+        config.mensaje = mensaje
+        config.actualizado_por = user
+        config.save()
+        # Quien lo activa nunca se auto-bloquea: si no, no podría apagarlo.
+        propio = Whitelist.objects.filter(user=user).values_list("id", flat=True)
+        config.exentos.set(Whitelist.objects.filter(id__in=set(exentos) | set(propio)))
+        mantenimiento.invalidar_cache()
+        return Response(self._payload(request))

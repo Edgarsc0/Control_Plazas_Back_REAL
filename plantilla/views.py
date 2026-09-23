@@ -33,6 +33,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from authentication.permissions import SinMantenimiento
 from authentication.columnas_detalle_catalog import COLUMNAS_DETALLE_SIEMPRE_INCLUIDAS
 from authentication.scoping import get_columnas_scope_for_request, get_un_scope_for_request
 
@@ -1826,7 +1827,7 @@ class ExportExcelView(APIView):
     Vista genérica para exportar datos JSON a un archivo Excel (.xlsx) real con estilos institucionales.
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, SinMantenimiento]
 
     def post(self, request):
         data = request.data
@@ -1959,7 +1960,7 @@ class ExportExcelView(APIView):
 
 
 class PlantillaVacantesPorNivelView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, SinMantenimiento]
 
     # Devuelve el resumen de las posiciones ocupadas y vacantes por nivel
     def get(self, request):
@@ -1989,7 +1990,7 @@ class PlantillaVacantesPorNivelView(APIView):
 
 
 class PlantillaVacantesPorNivelResumenView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, SinMantenimiento]
 
     @staticmethod
     def obtener_resumen_dinamico():
@@ -6707,7 +6708,7 @@ class InvalidarCacheZafiroView(APIView):
     from rest_framework.authentication import TokenAuthentication
 
     authentication_classes = [TokenAuthentication]
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, SinMantenimiento]
 
     def post(self, request):
         from datetime import timedelta
