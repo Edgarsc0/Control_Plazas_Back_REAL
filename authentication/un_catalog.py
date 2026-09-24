@@ -36,3 +36,38 @@ def normalizar_cd_un(raw):
         return None
     codigo = str(raw).strip().zfill(5)
     return codigo if codigo in UN_CATALOG else None
+
+
+# Códigos que aparecen en los datos pero NO son unidades de negocio propias:
+# son variantes históricas de una del catálogo. Las unidades generales son y
+# seguirán siendo 13, así que estos no se agregan a UN_CATALOG (no se pueden
+# elegir al configurar un rol) — solo se suman al conjunto contra el que se
+# compara al filtrar, para que las filas viejas no se queden huérfanas.
+#
+#   "00005" -> "00004" (DGPEDA). Confirmado con el usuario sobre las 18 bajas
+#   que lo traen (todas de 2022-2023). No existe ni una sola fila con este
+#   código en la plantilla activa: solo sobrevive en BAJAS_SIG (18) y en
+#   MOV_POS (1,144).
+#
+# "00011" (17 filas en MOV_POS) queda sin mapear a propósito: no hay evidencia
+# de a qué unidad corresponde, y sin mapeo simplemente no lo ve ningún rol
+# restringido (falla cerrado). Si aparece a quién pertenece, va aquí.
+UN_ALIAS = {
+    "00005": "00004",
+}
+
+
+def expandir_alias_un(codigos):
+    """Añade a un scope los códigos variantes que equivalen a sus unidades.
+
+    Se usa SOLO al comparar contra los datos, nunca al guardar: RolUnScope
+    sigue almacenando únicamente códigos del catálogo, así que la
+    configuración de un rol se lee tal cual se eligió.
+    """
+    if codigos is None:
+        return None
+    permitidos = set(codigos)
+    permitidos.update(
+        variante for variante, canonico in UN_ALIAS.items() if canonico in permitidos
+    )
+    return sorted(permitidos)

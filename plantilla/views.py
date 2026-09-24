@@ -33,9 +33,18 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from authentication.permissions import SinMantenimiento
+from authentication.permissions import (
+    SinMantenimiento,
+    UN_SCOPE_APLICADO,
+    UN_SCOPE_EXENTO,
+    UN_SCOPE_NO_APLICA,
+)
 from authentication.columnas_detalle_catalog import COLUMNAS_DETALLE_SIEMPRE_INCLUIDAS
-from authentication.scoping import get_columnas_scope_for_request, get_un_scope_for_request
+from authentication.scoping import (
+    get_columnas_scope_for_request,
+    get_un_scope_for_request,
+    huella_scope,
+)
 
 from .models import (
     AlineacionOrganizacionalHistorico,
@@ -2046,6 +2055,8 @@ class PlantillaVacantesPorNivelResumenView(APIView):
 
 
 class EmpleadosCompletosEstatusNominaResumenView(APIView):
+    # Filtra por Unidad de Negocio (ver el bloque de helpers _scope_un_*).
+    un_scope = UN_SCOPE_APLICADO
     view_permission = "authentication.view_plantilla_detalle"
 
     def get(self, request, *args, **kwargs):
@@ -2205,16 +2216,71 @@ def _paginated_or_full_response(request, data):
 # scope no aplica ahí, ver su propio docstring), EmpleadoFotoView,
 # DatosPersonalesEmpleadoView, DatosPersonalesBulkView (estos 3 solo UN).
 #
-# NO CUBIERTO todavía (no otorgar a un rol con scope hasta hacer esa pasada):
-# view_plantilla_estatus_nomina / view_plantilla_mov_posiciones /
-# view_plantilla_historico / view_plantilla_movimientos / view_plantilla_bajas /
-# view_plantilla_geografia y sus exports (EmpleadosPorNivelYEstatusView,
-# MovPosDetalleView, MovimientosPersonalListView, PlantillaHistoricaView,
-# ExportarEmpleadosPorPosicionConFotosView, ExportarPlantillaHistoricaConFotosView,
-# ExportarMovimientosPersonalConFotosView, ExportarBajasConFotosView, el listado
-# de Bajas, CeldaUpdatesSSEView, y los endpoints de historial por posición/
-# empleado). Tampoco los endpoints de edición (edit_plantilla_detalle y
-# similares) — no otorgar permisos edit_* a un rol con scope todavía.
+# LO QUE NO ESTÁ CUBIERTO YA NO DEPENDE DE ESTA LISTA (2026-09)
+# ------------------------------------------------------------
+# Antes esto era un inventario que había que mantener a mano, y olvidarse de
+# una vista significaba una fuga silenciosa. Ahora el default es NEGAR: una
+# vista con permiso de módulo que no declare `un_scope` responde 403 a los
+# roles con alcance por UN (ver HasModulePermission en
+# authentication/permissions.py). Para habilitar una vista hay que declarar
+# explícitamente una de estas dos:
+#
+#   un_scope = UN_SCOPE_APLICADO    # ya filtra sus datos por UN
+#   un_scope = UN_SCOPE_NO_APLICA   # no expone datos de empleados/plazas
+#
+# Cubiertas hoy (UN_SCOPE_APLICADO):
+#   Plantilla Detalle — EmpleadosCompletosActivosDetalleView (sus 3 ramas,
+#     UN + columnas), EmpleadosCompletosEstatusNominaResumenView,
+#     ExportarPlantillaDetalleConFotosView (UN + columnas), EmpleadoFotoView,
+#     DatosPersonalesEmpleadoView, DatosPersonalesBulkView,
+#     PlazaSugerenciasView y PlantillaHistoricaView.
+#   Estatus Nómina — EmpleadosEstatusPorNivelUaView (el agregado; su caché
+#     guarda los grupos crudos con cd_un y agrega por petición),
+#     EmpleadosPorNivelYEstatusView (drill-down, UN + columnas),
+#     ExportarEstatusExcelView (UN + columnas; el .xlsx se cachea por
+#     alcance, ver huella_scope) y ExportarEmpleadosPorPosicionConFotosView
+#     (el export del modal drill-down, UN + columnas).
+#   Movimientos — MovimientosPersonalListView (su recorte va sobre el queryset
+#     base, así que lo heredan búsqueda, filtros, dropdowns y paginación),
+#     MovimientosPersonalStatsView y ExportarMovimientosPersonalConFotosView
+#     (que delega en la primera). Ojo: la columna `un` de
+#     cp_tbl_mov_completo_29_05_26 no está normalizada — ver
+#     _scope_un_movimientos, NO usar _scope_un_queryset ahí.
+#   Empleados Bajas — BajasSigListView (sus 2 ramas), BajasMotivosPieView (el
+#     pastel; su caché guarda los grupos crudos con unidad_general) y
+#     ExportarBajasConFotosView. Ojo: en BAJAS_SIG la UN es `unidad_general`,
+#     no `cd_un` — ver CAMPO_UN_BAJAS.
+#
+# EXENTOS por decisión de negocio (UN_SCOPE_EXENTO): los tres historiales del
+# expediente — MovimientosPersonalHistorialView, MovimientosPosicionHistorialView
+# y MovPosHistoriaView. Muestran a propósito la trayectoria completa del
+# empleado/plaza por toda la ANAM, incluidas las unidades por las que pasó:
+# recortarla los vaciaría de sentido. El acceso se controla con el permiso de
+# cada pestaña ("Expediente del personal"), no con el alcance por UN.
+#
+# NEGADO A PROPÓSITO, no pendiente: EmpleadosCompletosCeldaHistorialView (el
+# modal "Historial de Cambios" de Detalle). Un rol con alcance por UN nunca
+# recibe permisos de edición sobre la plantilla, así que no tiene cambios
+# propios que consultar y el historial completo es justamente la actividad de
+# otras unidades. Queda cerrado por decisión, no por falta de filtrado — no
+# hay que "hacerle su pasada". El frontend además le oculta el botón (ver
+# `sinRestriccionUN` en PlantillaDetalleTab.jsx).
+#
+# NO SE PUEDE RECORTAR, negado de forma permanente: BajasHistoricoView. Su
+# serie sale del contador `registros_bajas` de la bitácora del ETL (cuántas
+# filas cargó cada corrida en toda la ANAM), no de BAJAS_SIG — es un número
+# global por construcción, sin dimensión de UN. Ver su docstring.
+#
+# Sigue NEGADO dentro de Movimientos: el subtab "Rotación de personal"
+# (RotacionTitularesAduanasView, HistoriaDireccionGeneralView, HistoriaPlazaView
+# y HistoriaEmpleadoView). Analiza quién ha encabezado cada aduana/dirección a
+# lo largo del tiempo, que es por definición un recorrido entre unidades; para
+# un rol restringido a una sola UN el análisis no tiene contenido propio. El
+# frontend le oculta el subtab.
+#
+# Todo lo demás (Mov. Posiciones, Distribución Geográfica, los exports de esos
+# tabs y los endpoints de edición) queda negado para esos roles hasta que se
+# le haga su pasada. Se cubren de a uno: filtrar, verificar y marcar.
 def _scope_un_queryset(queryset, un_codes, field="cd_un"):
     """None -> queryset intacto (sin restricción). Lista -> solo filas cuyo
     Trim(field) esté en la lista (NULL/'' nunca pasa). Lista vacía -> .none()
@@ -2276,6 +2342,39 @@ def _filtrar_numempleados_por_scope(numempleados, un_codes):
     return [n for n in limpios if n in variantes_en_scope]
 
 
+def _variantes_padding_un(codigos):
+    """Todas las escrituras con y sin ceros a la izquierda de cada código.
+
+    `00004` -> {"4", "04", "004", "0004", "00004"}.
+    """
+    variantes = set()
+    for codigo in codigos:
+        limpio = str(codigo).strip().lstrip("0") or "0"
+        for ancho in range(len(limpio), 6):
+            variantes.add(limpio.zfill(ancho))
+    return sorted(variantes)
+
+
+def _scope_un_movimientos(queryset, un_codes, field="un"):
+    """Recorte por UN para cp_tbl_mov_completo_29_05_26, cuya columna `un`
+    NO está normalizada: guarda el mismo código con y sin ceros a la
+    izquierda. Comprobado sobre las 157,643 filas — 29 valores distintos que
+    colapsan a 15 códigos reales; "100" (99,042 filas) y "00100" (24,953) son
+    la misma unidad, igual que "4" (3,388) y "00004" (2,453).
+
+    Un `un__in=["00004"]` ingenuo devolvería 2,453 de las 5,841 filas de
+    DGPEDA: no sería una fuga, pero sí un recorte silencioso que haría
+    desconfiar del tab entero. En vez de normalizar la columna con LPAD (que
+    impediría usar cualquier índice) se expande el scope a todas las
+    escrituras posibles, que son pocas y fijas.
+    """
+    if un_codes is None:
+        return queryset
+    if not un_codes:
+        return queryset.none()
+    return queryset.filter(**{f"{field}__in": _variantes_padding_un(un_codes)})
+
+
 def _strip_columnas_filas(filas, columnas_permitidas):
     """None -> filas intactas (sin restricción). Lista -> cada fila se
     recorta a columnas_permitidas ∪ COLUMNAS_DETALLE_SIEMPRE_INCLUIDAS — las
@@ -2296,6 +2395,19 @@ def _responder_detalle_scoped(request, filas, un_scope):
     filas = _scope_un_filas(filas, un_scope)
     filas = _strip_columnas_filas(filas, get_columnas_scope_for_request(request))
     return _paginated_or_full_response(request, filas)
+
+
+# Columna donde BAJAS_SIG guarda la Unidad de Negocio (en EMPLEADOS_COMPLETOS_SIG
+# es `cd_un`). Constante para que los tres puntos que la usan no se desalineen.
+CAMPO_UN_BAJAS = "unidad_general"
+
+
+def _responder_bajas_scoped(request, filas, un_scope):
+    """Único punto de salida de BajasSigListView: recorta por UN y responde
+    con el mismo envelope paginado de siempre."""
+    return _paginated_or_full_response(
+        request, _scope_un_filas(filas, un_scope, key=CAMPO_UN_BAJAS)
+    )
 
 
 def _obtener_detalle_activos_cacheado():
@@ -2322,6 +2434,8 @@ def _obtener_detalle_activos_cacheado():
 class EmpleadosCompletosActivosDetalleView(APIView):
     # Dataset base compartido por 3 tabs (Detalle/Estatus/Mov. Posiciones cruzan
     # contra `detalle`) — cualquiera de los 3 permisos basta, no solo Detalle.
+    # Filtra por Unidad de Negocio (ver los helpers _scope_un_* / _responder_detalle_scoped).
+    un_scope = UN_SCOPE_APLICADO
     view_permission = (
         "authentication.view_plantilla_detalle",
         "authentication.view_plantilla_estatus_nomina",
@@ -2567,6 +2681,8 @@ class EmpleadoFotoView(APIView):
     # fotografía" independiente del permiso de ver el tab en sí, así que
     # aquí basta con tener CUALQUIERA de ellos (OR, ya soportado por
     # HasModulePermission cuando view_permission es una tupla).
+    # Filtra por Unidad de Negocio (ver los helpers _scope_un_* / _responder_detalle_scoped).
+    un_scope = UN_SCOPE_APLICADO
     view_permission = (
         "authentication.view_plantilla_detalle_foto",
         "authentication.view_plantilla_estatus_nomina_foto",
@@ -2619,9 +2735,16 @@ class DatosPersonalesEmpleadoView(APIView):
     CSV de ZAFIRO) de un solo empleado — consumida por el tab "Datos
     personales" del expediente (EmployeeRecordModal), cargados bajo demanda
     igual que la fotografía. Comparte permisos con el expediente en general:
-    basta con poder ver cualquiera de los tabs que lo abren.
+    basta con poder ver cualquiera de los tabs que lo abren, y además tener
+    habilitada esa pestaña del expediente para el rol.
     """
 
+    # Filtra por Unidad de Negocio (ver los helpers _scope_un_* / _responder_detalle_scoped).
+    un_scope = UN_SCOPE_APLICADO
+    # Único consumidor: la pestaña "Datos personales" del expediente. Al no
+    # compartirse con ningún módulo, el permiso de pestaña se puede exigir
+    # sin matices (ver `extra_permission` en HasModulePermission).
+    extra_permission = "authentication.view_expediente_datos_personales"
     view_permission = (
         "authentication.view_plantilla_detalle",
         "authentication.view_plantilla_estatus_nomina",
@@ -2753,6 +2876,8 @@ class DatosPersonalesBulkView(APIView):
     individual del expediente).
     """
 
+    # Filtra por Unidad de Negocio (ver los helpers _scope_un_* / _responder_detalle_scoped).
+    un_scope = UN_SCOPE_APLICADO
     view_permission = (
         "authentication.view_plantilla_detalle",
         "authentication.view_plantilla_estatus_nomina",
@@ -2948,6 +3073,8 @@ class ExportarPlantillaDetalleConFotosView(APIView):
     la lista de columnas visibles ({key,label}) tal como las tiene el usuario.
     """
 
+    # Filtra por Unidad de Negocio (ver los helpers _scope_un_* / _responder_detalle_scoped).
+    un_scope = UN_SCOPE_APLICADO
     view_permission = "authentication.view_plantilla_detalle"
 
     def post(self, request):
@@ -3115,6 +3242,10 @@ class ExportarMovimientosPersonalConFotosView(APIView):
     reimplementar los filtros (evita que ambas implementaciones diverjan).
     """
 
+    # Hereda el recorte por UN de MovimientosPersonalListView, a la que delega
+    # (ver _scope_un_movimientos): no lo reimplementa, por la misma razón por
+    # la que no reimplementa los filtros.
+    un_scope = UN_SCOPE_APLICADO
     view_permission = "authentication.view_plantilla_movimientos"
 
     def get(self, request):
@@ -3168,6 +3299,8 @@ class ExportarBajasConFotosView(APIView):
     de las filas visibles tras su filtro/orden actual.
     """
 
+    # Filtra por Unidad de Negocio (ver BajasSigListView).
+    un_scope = UN_SCOPE_APLICADO
     view_permission = "authentication.view_plantilla_bajas"
 
     def post(self, request):
@@ -3182,7 +3315,19 @@ class ExportarBajasConFotosView(APIView):
         if not ids or not columnas:
             return Response({"error": "Faltan 'ids' o 'columnas'."}, status=status.HTTP_400_BAD_REQUEST)
 
-        rows_by_id = {r["id"]: r for r in BajasSig.objects.filter(id__in=ids).values()}
+        # `ids` viene del cliente sin validar — se intersecta con el alcance
+        # del rol antes de armar el libro. Lo que queda fuera desaparece en
+        # silencio (el `if i in rows_by_id` de abajo ya lo excluye solo), no
+        # con un error: distinguir "fuera de alcance" de "no existe"
+        # convertiría el endpoint en un oráculo de a qué UN pertenece cada id.
+        rows_by_id = {
+            r["id"]: r
+            for r in _scope_un_queryset(
+                BajasSig.objects.filter(id__in=ids),
+                get_un_scope_for_request(request),
+                field=CAMPO_UN_BAJAS,
+            ).values()
+        }
         rows = [rows_by_id[i] for i in ids if i in rows_by_id]
 
         # Tope de seguridad — histórico de bajas medido en ~5,710 filas hoy;
@@ -3237,6 +3382,9 @@ class ExportarEmpleadosPorPosicionConFotosView(APIView):
     foto, sin necesitar lógica extra de "ocupada vs vacante".
     """
 
+    # Filtra por Unidad de Negocio y por columnas, sin importar cuál de los
+    # dos permisos OR de abajo destrabó el acceso (ver los helpers _scope_un_*).
+    un_scope = UN_SCOPE_APLICADO
     view_permission = (
         "authentication.view_plantilla_estatus_nomina",
         "authentication.view_plantilla_mov_posiciones",
@@ -3258,13 +3406,26 @@ class ExportarEmpleadosPorPosicionConFotosView(APIView):
         if not posiciones or not columnas:
             return Response({"error": "Faltan 'posiciones' o 'columnas'."}, status=status.HTTP_400_BAD_REQUEST)
 
+        # `posiciones` y `columnas` vienen del cliente sin validar: se
+        # intersectan con el alcance del rol antes de armar el libro, con el
+        # mismo criterio que ExportarPlantillaDetalleConFotosView (lo que
+        # queda fuera desaparece en silencio, para no convertir el endpoint
+        # en un oráculo de a qué UN pertenece cada posición).
+        un_scope = get_un_scope_for_request(request)
         rows_by_posicion = {
             str(r["posicion"]): r
-            for r in EmpleadosCompletosSig.objects.filter(posicion__in=posiciones).values()
+            for r in _scope_un_queryset(
+                EmpleadosCompletosSig.objects.filter(posicion__in=posiciones), un_scope
+            ).values()
         }
         rows = _aplicar_mapeos_detalle_excel(
             [rows_by_posicion[str(p)] for p in posiciones if str(p) in rows_by_posicion]
         )
+
+        columnas_scope = get_columnas_scope_for_request(request)
+        if columnas_scope is not None:
+            permitidas = set(columnas_scope) | COLUMNAS_DETALLE_SIEMPRE_INCLUIDAS
+            columnas = [c for c in columnas if isinstance(c, dict) and c.get("key") in permitidas]
 
         if incluir_fotos and len(rows) > 15000:
             return Response(
@@ -3469,6 +3630,8 @@ class EmpleadosPorNivelYEstatusView(APIView):
     Ejemplo: /api/empleados/?nivel=C1&estado_nomina=Activo
     """
 
+    # Filtra por Unidad de Negocio (ver el bloque de helpers _scope_un_*).
+    un_scope = UN_SCOPE_APLICADO
     view_permission = "authentication.view_plantilla_estatus_nomina"
 
     def get(self, request):
@@ -3566,10 +3729,23 @@ class EmpleadosPorNivelYEstatusView(APIView):
             else:
                 queryset = base_qs.filter(estado_nomina__iexact=db_estado_nomina)
 
+            # Recorte por Unidad de Negocio en SQL (esta rama no tiene caché),
+            # antes de contar: `total` debe describir lo que el rol realmente
+            # puede ver, no el universo completo — si no, el modal delataría
+            # cuántos registros hay fuera de su unidad.
+            queryset = _scope_un_queryset(queryset, get_un_scope_for_request(request))
+            # Estas filas son las mismas de EMPLEADOS_COMPLETOS_SIG que sirve
+            # Plantilla Detalle (aquí sin enriquecer), así que se les aplica
+            # también el scope de columnas — de lo contrario el drill-down del
+            # tab Estatus sería una vía para leer columnas restringidas ahí.
+            resultados = _strip_columnas_filas(
+                list(queryset.values()), get_columnas_scope_for_request(request)
+            )
+
             return Response(
                 {
-                    "total": queryset.count(),
-                    "resultados": list(queryset.values()),
+                    "total": len(resultados),
+                    "resultados": resultados,
                 },
                 status=status.HTTP_200_OK,
             )
@@ -3972,53 +4148,73 @@ class EmpleadosEstatusPorNivelUaView(APIView):
     de los empleados correspondientes a las posiciones activas.
     """
 
+    # Filtra por Unidad de Negocio (ver el bloque de helpers _scope_un_*).
+    un_scope = UN_SCOPE_APLICADO
     view_permission = "authentication.view_plantilla_estatus_nomina"
 
+    # Lo que se cachea ya NO es la respuesta, sino los grupos crudos que la
+    # componen — con `cd_un` como una dimensión más. Esto es lo que permite
+    # sostener aquí la misma regla que en Detalle: en Redis solo vive el
+    # dataset SIN recortar, compartido por todos los roles, y el recorte por
+    # UN ocurre siempre al construir la respuesta. Agregar primero y recortar
+    # después sería imposible (los conteos ya vendrían mezclados entre
+    # unidades), y cachear por rol abriría la puerta a servirle a un usuario
+    # la respuesta de otro.
+    # La clave lleva sufijo porque la forma del valor cambió: la vieja
+    # (`empleados_estatus_por_nivel_ua`, la respuesta ya agregada) quedaría
+    # ilegible para este código.
+    CACHE_KEY = "empleados_estatus_por_nivel_ua_grupos"
+
+    @staticmethod
+    def _agregar(grupos, un_scope):
+        """Colapsa los grupos crudos (cd_un × UA × nivel × estatus) al payload
+        que espera el frontend, tras descartar las unidades fuera de alcance.
+        `por_nivel` se deriva sumando sobre las UA, no con un segundo scan.
+        `cd_ua` es 1:1 con el nombre de la UA: no cambia los grupos y permite
+        a los gráficos mostrar el código en vez del nombre largo."""
+        por_nivel = {}
+        por_ua = {}
+        ua_codigos = {}
+        for item in _scope_un_filas(grupos, un_scope):
+            ua_name = item["unidad_administrativa"] or "SIN UA"
+            if item["cd_ua"]:
+                ua_codigos.setdefault(ua_name, item["cd_ua"])
+            nv = item["nivel"] or "SIN NIVEL"
+            est = item["estado_nomina"] or "SIN ESTATUS"
+            count = item["count"]
+
+            por_nivel.setdefault(nv, {})
+            por_nivel[nv][est] = por_nivel[nv].get(est, 0) + count
+
+            # Suma (y no asignación) porque un mismo (UA, nivel, estatus)
+            # puede llegar repartido en varias filas, una por cd_un.
+            celda = por_ua.setdefault(ua_name, {}).setdefault(nv, {})
+            celda[est] = celda.get(est, 0) + count
+
+        return {"por_nivel": por_nivel, "por_ua": por_ua, "ua_codigos": ua_codigos}
+
     def get(self, request, *args, **kwargs):
-        cache_key = "empleados_estatus_por_nivel_ua"
-        cached_data = cache.get(cache_key)
-        if cached_data is not None:
-            return Response(cached_data, status=status.HTTP_200_OK)
+        un_scope = get_un_scope_for_request(request)
+
+        grupos = cache.get(self.CACHE_KEY)
+        if grupos is not None:
+            return Response(self._agregar(grupos, un_scope), status=status.HTTP_200_OK)
 
         try:
             # 1. Obtener posiciones actualmente activas
             active_position_codes = obtener_posiciones_activas()
 
-            # 2. Obtener todos los registros de EMPLEADOS_COMPLETOS_SIG en esas posiciones
-            active_employees = EmpleadosCompletosSig.objects.filter(
-                posicion__in=active_position_codes
+            # 2. Agrupar los registros de EMPLEADOS_COMPLETOS_SIG en esas
+            # posiciones. `cd_un` entra al GROUP BY solo como dimensión de
+            # recorte; se normaliza al filtrar (_scope_un_filas hace strip).
+            grupos = list(
+                EmpleadosCompletosSig.objects.filter(posicion__in=active_position_codes)
+                .values("cd_un", "unidad_administrativa", "cd_ua", "nivel", "estado_nomina")
+                .annotate(count=Count("id"))
             )
 
-            # 3. Agrupación por Unidad Administrativa, Nivel y Estado de Nómina
-            # — una sola query sobre active_employees; por_nivel se deriva
-            # sumando sobre las UA en vez de repetir el mismo scan con un
-            # segundo GROUP BY (nivel, estado_nomina) equivalente.
-            # `cd_ua` es 1:1 con el nombre de la UA: no cambia los grupos y
-            # permite a los gráficos mostrar el código en vez del nombre largo.
-            ua_data = active_employees.values(
-                "unidad_administrativa", "cd_ua", "nivel", "estado_nomina"
-            ).annotate(count=Count("id"))
-
-            por_nivel = {}
-            por_ua = {}
-            ua_codigos = {}
-            for item in ua_data:
-                ua_name = item["unidad_administrativa"] or "SIN UA"
-                if item["cd_ua"]:
-                    ua_codigos.setdefault(ua_name, item["cd_ua"])
-                nv = item["nivel"] or "SIN NIVEL"
-                est = item["estado_nomina"] or "SIN ESTATUS"
-                count = item["count"]
-
-                por_nivel.setdefault(nv, {})
-                por_nivel[nv][est] = por_nivel[nv].get(est, 0) + count
-
-                por_ua.setdefault(ua_name, {}).setdefault(nv, {})
-                por_ua[ua_name][nv][est] = count
-
-            res_data = {"por_nivel": por_nivel, "por_ua": por_ua, "ua_codigos": ua_codigos}
-            cache.set(cache_key, res_data, None)
-            return Response(res_data, status=status.HTTP_200_OK)
+            cache.set(self.CACHE_KEY, grupos, None)
+            return Response(self._agregar(grupos, un_scope), status=status.HTTP_200_OK)
         except Exception:
             logger.exception("Error inesperado en {}".format(request.path))
             return Response(
@@ -5112,6 +5308,17 @@ class MovPosFechaAltaSolicitadaOverrideView(APIView):
 
 
 class MovPosHistoriaView(APIView):
+    """Historia completa de MOV_POS para una posición. Alimenta el modal de
+    historia que se abre desde el tab Empleados Bajas (BajasTab.jsx).
+
+    EXENTO del alcance por UN, igual que los otros dos historiales del
+    expediente: una misma plaza pasa por varias unidades a lo largo del tiempo
+    (la 20235034, por ejemplo, tiene bajas de 00400, 00004 y 00005 y hoy
+    pertenece a 00400) y ver esa trayectoria completa es el propósito del
+    modal. El acceso lo controla el permiso del tab, no el alcance por UN.
+    """
+
+    un_scope = UN_SCOPE_EXENTO
     view_permission = "authentication.view_plantilla_mov_posiciones"
 
     def get(self, request, *args, **kwargs):
@@ -7061,17 +7268,27 @@ class BajasSigListView(APIView):
     Endpoint para obtener todos los registros de bajas sin paginación.
     """
 
+    # Filtra por Unidad de Negocio (ver el bloque de helpers _scope_un_*). En
+    # BAJAS_SIG la UN vive en `unidad_general`, no en `cd_un`: son códigos de
+    # 5 dígitos limpios, verificados contra los 14 valores distintos que hay
+    # hoy en la tabla (13 del catálogo + "00005", que al no estar en el
+    # catálogo no puede asignarse a ningún rol y por tanto nunca se muestra).
+    un_scope = UN_SCOPE_APLICADO
     view_permission = "authentication.view_plantilla_bajas"
 
     def get(self, request):
         oficio = request.query_params.get("oficio")
         nivel = request.query_params.get("nivel")
+        # Igual que en Detalle: en Redis solo vive el dataset SIN recortar y
+        # el filtro se aplica al salir, así que una respuesta ya recortada
+        # nunca queda cacheada ni puede servirse a un usuario de otro rol.
+        un_scope = get_un_scope_for_request(request)
 
         if oficio or nivel:
             cache_key = f"bajas_sig_list_{oficio}_{nivel}"
             cached_data = cache.get(cache_key)
             if cached_data is not None:
-                return _paginated_or_full_response(request, cached_data)
+                return _responder_bajas_scoped(request, cached_data, un_scope)
 
             try:
                 # Obtener posiciones de Plantilla1800Plazas que cumplan los filtros
@@ -7092,7 +7309,7 @@ class BajasSigListView(APIView):
                     BajasSig.objects.filter(posicion__in=posiciones_list).values()
                 )
                 cache.set(cache_key, bajas, None)
-                return _paginated_or_full_response(request, bajas)
+                return _responder_bajas_scoped(request, bajas, un_scope)
             except Exception:
                 logger.exception("Error inesperado en {}".format(request.path))
                 return Response(
@@ -7102,11 +7319,11 @@ class BajasSigListView(APIView):
         cache_key = "bajas_sig_list"
         cached_data = cache.get(cache_key)
         if cached_data is not None:
-            return _paginated_or_full_response(request, cached_data)
+            return _responder_bajas_scoped(request, cached_data, un_scope)
 
         bajas = list(BajasSig.objects.all().values())
         cache.set(cache_key, bajas, None)
-        return _paginated_or_full_response(request, bajas)
+        return _responder_bajas_scoped(request, bajas, un_scope)
 
 
 class BajasMotivosPieView(APIView):
@@ -7115,32 +7332,58 @@ class BajasMotivosPieView(APIView):
     Respuesta: [{"motivo": "...", "total": N}, ...] ordenado por total descendente.
     """
 
+    # Filtra por Unidad de Negocio (ver BajasSigListView).
+    un_scope = UN_SCOPE_APLICADO
     view_permission = "authentication.view_plantilla_bajas"
 
-    def get(self, request):
-        cache_key = "bajas_motivos_pie"
-        cached_data = cache.get(cache_key)
-        if cached_data is not None:
-            return Response(cached_data, status=status.HTTP_200_OK)
+    # Lo cacheado son los grupos crudos (unidad_general × motivo), no la
+    # respuesta ya sumada: un agregado no se puede recortar después (los
+    # conteos ya vendrían mezclados entre unidades) y cachear por rol abriría
+    # la puerta a servirle a un usuario la respuesta de otro. Mismo criterio
+    # que EmpleadosEstatusPorNivelUaView.
+    CACHE_KEY = "bajas_motivos_pie_grupos"
 
-        data = (
-            BajasSig.objects.exclude(motivo_descr__isnull=True)
-            .exclude(motivo_descr__exact="")
-            .values("motivo_descr")
-            .annotate(total=Count("id"))
-            .order_by("-total")
-        )
-        result = [
-            {"motivo": row["motivo_descr"], "total": row["total"]} for row in data
+    @staticmethod
+    def _agregar(grupos, un_scope):
+        totales = {}
+        for row in _scope_un_filas(grupos, un_scope, key=CAMPO_UN_BAJAS):
+            motivo = row["motivo_descr"]
+            totales[motivo] = totales.get(motivo, 0) + row["total"]
+        return [
+            {"motivo": m, "total": t}
+            for m, t in sorted(totales.items(), key=lambda kv: -kv[1])
         ]
-        cache.set(cache_key, result, None)
-        return Response(result, status=status.HTTP_200_OK)
+
+    def get(self, request):
+        un_scope = get_un_scope_for_request(request)
+
+        grupos = cache.get(self.CACHE_KEY)
+        if grupos is None:
+            grupos = list(
+                BajasSig.objects.exclude(motivo_descr__isnull=True)
+                .exclude(motivo_descr__exact="")
+                .values(CAMPO_UN_BAJAS, "motivo_descr")
+                .annotate(total=Count("id"))
+            )
+            cache.set(self.CACHE_KEY, grupos, None)
+
+        return Response(self._agregar(grupos, un_scope), status=status.HTTP_200_OK)
 
 
 class BajasHistoricoView(APIView):
     """
     Devuelve la evolución histórica de bajas_sig obtenida de ZAFIRO_BITACORA.
     Agrupado por día (el registro más reciente de cada día donde registros_bajas > 0).
+
+    NO admite alcance por Unidad de Negocio, y no es algo que falte hacer: la
+    serie no sale de BAJAS_SIG (que se trunca y recarga en cada importación,
+    así que no guarda historia) sino del contador `registros_bajas` de la
+    bitácora del ETL — cuántas filas cargó cada corrida en toda la ANAM. Es un
+    número global por construcción: no tiene dimensión de UN que recortar, y
+    mostrarlo sería justamente revelar el volumen de bajas de otras unidades.
+    Al no declarar `un_scope` queda negado (403) para los roles restringidos;
+    el frontend además les oculta la gráfica. Solo cambiaría si la bitácora
+    empezara a desglosar el conteo por unidad.
     """
 
     view_permission = "authentication.view_plantilla_bajas"
@@ -7175,24 +7418,31 @@ class ExportarEstatusExcelView(APIView):
     Si no, lo genera de forma síncrona en el hilo de la petición y lo retorna.
     """
 
+    # Filtra por Unidad de Negocio (ver el bloque de helpers _scope_un_*).
+    un_scope = UN_SCOPE_APLICADO
     view_permission = "authentication.view_plantilla_estatus_nomina"
 
     def get(self, request):
         from django.core.cache import cache
         from django.utils import timezone
 
-        from plantilla.tasks import generar_excel_estatus_task
+        from plantilla.tasks import (
+            cache_key_excel_estatus,
+            generar_excel_estatus_task,
+        )
 
         uas_param = request.query_params.get("uas", "")
         levels_param = request.query_params.get("levels", "")
         group_by = request.query_params.get("group_by", "ua")
 
-        # Consultar si ya existe el archivo Excel final generado en caché para esta consulta exacta
-        import hashlib
-
-        raw_key = f"excel_estatus_file_{uas_param}_{levels_param}_{group_by}"
-        cache_key_excel = (
-            f"excel_estatus_file_{hashlib.md5(raw_key.encode('utf-8')).hexdigest()}"
+        # El .xlsx se genera ya recortado (no se puede filtrar después: son
+        # bytes opacos), así que el alcance de quien pide forma parte de la
+        # clave de caché — si no, el primero en descargar le serviría su
+        # archivo a todos los demás. Ver huella_scope.
+        un_codes = get_un_scope_for_request(request)
+        columnas = get_columnas_scope_for_request(request)
+        cache_key_excel = cache_key_excel_estatus(
+            uas_param, levels_param, group_by, huella_scope(un_codes, columnas)
         )
         cached_excel_data = cache.get(cache_key_excel)
         if cached_excel_data is not None:
@@ -7208,7 +7458,13 @@ class ExportarEstatusExcelView(APIView):
 
         try:
             # Ejecutar la generación de forma síncrona
-            generar_excel_estatus_task.__wrapped__(uas_param, levels_param, group_by)
+            generar_excel_estatus_task.__wrapped__(
+                uas_param,
+                levels_param,
+                group_by,
+                un_codes=un_codes,
+                columnas_permitidas=columnas,
+            )
         except Exception:
             logger.exception("Error generando el reporte de Excel de estatus")
             return HttpResponse("Error generando el reporte de Excel", status=500)
@@ -7585,6 +7841,9 @@ def _finalize_mov_completo_rows(rows):
 
 
 class MovimientosPersonalListView(APIView):
+    # Filtra por Unidad de Negocio (ver _scope_un_movimientos: la columna `un`
+    # de esta tabla no está normalizada y necesita trato propio).
+    un_scope = UN_SCOPE_APLICADO
     view_permission = "authentication.view_plantilla_movimientos"
     pagination_class = MovimientosPersonalPagination
 
@@ -7592,7 +7851,13 @@ class MovimientosPersonalListView(APIView):
         from .models import CpTblMovCompleto290526
         from .serializers import CP_TBL_MOV_COMPLETO_FIELDS
 
-        queryset = CpTblMovCompleto290526.objects.all()
+        # El recorte va PRIMERO, sobre el queryset base: así lo heredan por
+        # igual la búsqueda, los filtros de columna, los filtros avanzados, la
+        # rama `distinct_field` (que alimenta los dropdowns de columna: si no,
+        # sugeriría valores de otras unidades) y el conteo de la paginación.
+        queryset = _scope_un_movimientos(
+            CpTblMovCompleto290526.objects.all(), get_un_scope_for_request(request)
+        )
 
         # Check if requesting distinct values for a field
         distinct_field = request.query_params.get("distinct_field", "").strip()
@@ -9139,6 +9404,24 @@ class MovimientosPersonalHistorialView(APIView):
     que cualquiera que pueda abrir el expediente vea este tab, sin importar
     desde qué módulo de Plantilla lo abrió.
     """
+
+    # EXENTO del alcance por UN por decisión de negocio: el propósito de esta
+    # pestaña es mostrar la trayectoria COMPLETA del empleado por la ANAM
+    # —incluyendo el tiempo que estuvo en otras unidades y los movimientos que
+    # lo trajeron—, así que recortarla la vaciaría de sentido. Quién puede
+    # verla se controla con el permiso de la pestaña
+    # (view_expediente_historial_movimientos), que se otorga solo a los roles
+    # que necesitan ese historial.
+    un_scope = UN_SCOPE_EXENTO
+    # Además de la pestaña del expediente, este endpoint lo usa el tab
+    # Movimientos para calcular el detalle de adscripción de su propia tabla
+    # (MovimientosPersonalTab), no para renderizar el expediente — por eso su
+    # permiso de módulo también deja pasar: quitarle a un rol la pestaña del
+    # expediente no debe romperle esa otra funcionalidad.
+    extra_permission = (
+        "authentication.view_expediente_historial_movimientos",
+        "authentication.view_plantilla_movimientos",
+    )
     view_permission = (
         "authentication.view_plantilla_detalle",
         "authentication.view_plantilla_estatus_nomina",
@@ -9151,7 +9434,7 @@ class MovimientosPersonalHistorialView(APIView):
     def get(self, request):
         raw_param = request.query_params.get("num_empleado__in", "").strip()
         emp_ids = [e.strip() for e in raw_param.split(",") if e.strip()]
-        return self._historial(emp_ids)
+        return self._historial(request, emp_ids)
 
     def post(self, request):
         emp_ids = request.data.get("num_empleado", [])
@@ -9159,9 +9442,10 @@ class MovimientosPersonalHistorialView(APIView):
             emp_ids = [e.strip() for e in emp_ids.split(",") if e.strip()]
         else:
             emp_ids = [str(e).strip() for e in emp_ids if str(e).strip()]
-        return self._historial(emp_ids)
+        return self._historial(request, emp_ids)
 
-    def _historial(self, emp_ids):
+    def _historial(self, request, emp_ids):
+
         from django.db import connection
 
         if not emp_ids:
@@ -9232,6 +9516,13 @@ class MovimientosPosicionHistorialView(APIView):
     el nombre legible de ese mismo código), así que se exponen ambos como
     `unidad_adva` (código) y `unidad_administrativa` (nombre).
     """
+
+    # EXENTO del alcance por UN, igual que MovimientosPersonalHistorialView y
+    # por la misma razón: este carril muestra por qué unidades administrativas
+    # ha pasado la plaza, que es exactamente lo que se viene a consultar.
+    un_scope = UN_SCOPE_EXENTO
+    # Único consumidor: la pestaña "Historial de posición" del expediente.
+    extra_permission = "authentication.view_expediente_historial_posicion"
     view_permission = (
         "authentication.view_plantilla_detalle",
         "authentication.view_plantilla_estatus_nomina",
@@ -9244,7 +9535,7 @@ class MovimientosPosicionHistorialView(APIView):
     def get(self, request):
         raw_param = request.query_params.get("posicion__in", "").strip()
         posiciones = [p.strip() for p in raw_param.split(",") if p.strip()]
-        return self._historial(posiciones)
+        return self._historial(request, posiciones)
 
     def post(self, request):
         posiciones = request.data.get("posicion", [])
@@ -9252,9 +9543,10 @@ class MovimientosPosicionHistorialView(APIView):
             posiciones = [p.strip() for p in posiciones.split(",") if p.strip()]
         else:
             posiciones = [str(p).strip() for p in posiciones if str(p).strip()]
-        return self._historial(posiciones)
+        return self._historial(request, posiciones)
 
-    def _historial(self, posiciones):
+    def _historial(self, request, posiciones):
+
         from django.db import connection
 
         if not posiciones:
@@ -9343,6 +9635,8 @@ class MovimientosPersonalStatsView(APIView):
     }
     """
 
+    # Filtra por Unidad de Negocio (ver _scope_un_movimientos).
+    un_scope = UN_SCOPE_APLICADO
     view_permission = "authentication.view_plantilla_movimientos"
 
     def get(self, request):
@@ -9354,7 +9648,11 @@ class MovimientosPersonalStatsView(APIView):
 
         from .models import CpTblMovCompleto290526
 
-        queryset = CpTblMovCompleto290526.objects
+        # Antes de agrupar, para que los totales describan solo la unidad del
+        # rol y no contradigan la tabla que acompañan.
+        queryset = _scope_un_movimientos(
+            CpTblMovCompleto290526.objects.all(), get_un_scope_for_request(request)
+        )
 
         if fecha_captura__in:
             val_list = [v.strip() for v in fecha_captura__in.split(",") if v.strip()]
@@ -9743,9 +10041,45 @@ class PlantillaHistoricaView(APIView):
     inferior que exigen los SPs: inicio de MOV_POS/ANAM).
     """
 
+    # Filtra por Unidad de Negocio: las filas que reconstruye `sp_plantilla_historica`
+    # traen `cd_un` (el mapa de columnas sale de EmpleadosCompletosSig), así que se
+    # recortan igual que en Plantilla Detalle — y el resumen se recalcula sobre lo
+    # recortado para no delatar los totales de toda la ANAM. Ver `_recortar_por_un`.
+    un_scope = UN_SCOPE_APLICADO
     view_permission = "authentication.view_plantilla_historico"
 
     _FECHA_MINIMA = datetime.date(2022, 1, 1)
+
+    @staticmethod
+    def _recortar_por_un(payload, un_scope):
+        """Recorta el payload ya construido (o leído de caché) al alcance por UN.
+
+        El resumen NO se puede reusar: viene de `sp_conteo_plazas_historico`,
+        que cuenta sobre toda la ANAM. Se recalcula contando las filas que
+        quedan, con las mismas reglas que usa el SP (una plaza es Ocupada si
+        está Activa y tiene `estado_nomina`). Las dos columnas de anomalías sí
+        se pierden (las calcula el SP internamente, no son derivables de las
+        filas): van en None, que el front ya sabe mostrar como "sin dato".
+        """
+        if un_scope is None:
+            return payload
+
+        filas = _scope_un_filas(payload.get("filas") or [], un_scope)
+        activas = [f for f in filas if f.get("estado_plaza") == "A"]
+        ocupadas = [f for f in activas if (f.get("estado_nomina") or "").strip()]
+        return {
+            **payload,
+            "filas": filas,
+            "resumen": {
+                "plazas_totales": len(filas),
+                "plazas_activas": len(activas),
+                "plazas_inactivas": len(filas) - len(activas),
+                "ocupadas": len(ocupadas),
+                "vacantes": len(activas) - len(ocupadas),
+                "anomalia_ocupante_en_plaza_inactiva": None,
+                "anomalia_ocupante_sin_plaza": None,
+            },
+        }
 
     def get(self, request, *args, **kwargs):
         from django.db import connection
@@ -9770,10 +10104,15 @@ class PlantillaHistoricaView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # El recorte por UN se aplica SIEMPRE después de leer/escribir la
+        # caché, nunca antes: así lo cacheado sigue siendo el dataset completo
+        # y una respuesta ya recortada no puede servirse por error a otro rol.
+        un_scope = get_un_scope_for_request(request)
+
         cache_key = f"plantilla_historica_{fecha.isoformat()}"
         cached_data = cache.get(cache_key)
         if cached_data is not None:
-            return Response(cached_data, status=status.HTTP_200_OK)
+            return Response(self._recortar_por_un(cached_data, un_scope), status=status.HTTP_200_OK)
 
         try:
             with connection.cursor() as cursor:
@@ -9858,7 +10197,7 @@ class PlantillaHistoricaView(APIView):
             # 24h de margen es aceptable frente al costo (~90s) de repetir el
             # cálculo en cada consulta.
             cache.set(cache_key, payload, 60 * 60 * 24)
-            return Response(payload, status=status.HTTP_200_OK)
+            return Response(self._recortar_por_un(payload, un_scope), status=status.HTTP_200_OK)
         except Exception:
             logger.exception("Error inesperado en {}".format(request.path))
             return Response(
@@ -11261,6 +11600,10 @@ class PlazaSugerenciasView(APIView):
     se pueda distinguir sin tener que abrir el árbol, y "activa" (bool: la
     plaza está activa o inactiva). Respeta el scope por Unidad de Negocio.
     """
+
+    # Filtra por Unidad de Negocio (ver el bloque de helpers _scope_un_*).
+
+    un_scope = UN_SCOPE_APLICADO
 
     view_permission = (
         "authentication.view_plantilla_mov_posiciones",

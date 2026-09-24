@@ -1762,7 +1762,8 @@ def importar_zafiro(self):
                 "plantilla_vacantes_por_nivel_resumen",
                 "empleados_completos_estatus_resumen",
                 "empleados_completos_activos_detalle",
-                "empleados_estatus_por_nivel_ua",
+                "empleados_estatus_por_nivel_ua",  # forma vieja, ya sin uso
+                "empleados_estatus_por_nivel_ua_grupos",
                 "empleados_distribucion_geografica",
                 "mov_pos_detalle",
                 "mov_pos_card_stats",
@@ -1770,7 +1771,8 @@ def importar_zafiro(self):
                 "desglose_jerarquico",
                 "desglose_jerarquico_ocupados",
                 "bajas_sig_list",
-                "bajas_motivos_pie",
+                "bajas_motivos_pie",  # forma vieja, ya sin uso
+                "bajas_motivos_pie_grupos",
                 "bajas_historico",
                 "mov_pos_alineacion_dataset",
                 "mov_pos_alineacion_stats",
@@ -1876,8 +1878,29 @@ def importar_zafiro(self):
         r.delete(LOCK_KEY)
 
 
+def cache_key_excel_estatus(uas_param, levels_param, group_by, huella_scope="all"):
+    """Clave del .xlsx ya generado. La comparten la vista (que consulta el
+    caché antes de generar) y la tarea (que lo guarda): tiene que calcularse
+    en un solo lugar o un cambio en una mitad deja huérfana a la otra.
+
+    `huella_scope` distingue el alcance de datos de quien pide — ver
+    _huella_scope en views.py. "all" = sin restricción, que es la forma que
+    tenía la clave antes de existir los alcances por rol."""
+    import hashlib
+
+    raw_key = f"excel_estatus_file_{uas_param}_{levels_param}_{group_by}_{huella_scope}"
+    return f"excel_estatus_file_{hashlib.md5(raw_key.encode('utf-8')).hexdigest()}"
+
+
 @shared_task(bind=True, name="plantilla.tasks.generar_excel_estatus_task")
-def generar_excel_estatus_task(self, uas_param, levels_param, group_by):
+def generar_excel_estatus_task(
+    self, uas_param, levels_param, group_by, un_codes=None, columnas_permitidas=None
+):
+    """`un_codes` / `columnas_permitidas` son el alcance de datos del rol que
+    pide el reporte (None = sin restricción, ver RolUnScope/RolColumnScope).
+    Se recorta aquí, al construir el libro, porque un .xlsx terminado ya no
+    se puede filtrar: cada alcance produce su propio archivo y su propia
+    entrada de caché (ver cache_key_excel_estatus)."""
     is_sync = not getattr(self, "request", None) or not getattr(
         self.request, "id", None
     )
@@ -1914,6 +1937,18 @@ def generar_excel_estatus_task(self, uas_param, levels_param, group_by):
             emp for emp in all_employees if emp["posicion"] in active_position_codes
         ]
         cache.set(cache_key, employees_qs, 1200)
+
+    # Recorte por Unidad de Negocio DESPUÉS de leer el caché: en
+    # `active_employees_filtered` (compartido con otros reportes) solo vive el
+    # dataset completo; nunca se persiste ahí una lista ya recortada que
+    # pudiera servirse luego a un rol distinto.
+    if un_codes is not None:
+        permitidos = set(un_codes)
+        employees_qs = [
+            emp
+            for emp in employees_qs
+            if str(emp.get("cd_un") or "").strip() in permitidos
+        ]
 
     self.update_state(
         state="PROGRESS",
@@ -1993,6 +2028,16 @@ def generar_excel_estatus_task(self, uas_param, levels_param, group_by):
     status_list = ["Activo", "Vacante", "Suspendido", "Licencia", "Licencia Médica"]
 
     model_fields = EmpleadosCompletosSig._meta.fields
+    # Las hojas de detalle vuelcan TODOS los campos del modelo, así que el
+    # alcance por columnas del rol tiene que recortarlas aquí igual que
+    # recorta las filas de Plantilla Detalle (_strip_columnas_filas).
+    if columnas_permitidas is not None:
+        from authentication.columnas_detalle_catalog import (
+            COLUMNAS_DETALLE_SIEMPRE_INCLUIDAS,
+        )
+
+        visibles = set(columnas_permitidas) | COLUMNAS_DETALLE_SIEMPRE_INCLUIDAS
+        model_fields = [f for f in model_fields if f.name in visibles]
     field_names = [f.name for f in model_fields]
     detail_headers = [
         (f.db_column or f.name) if f.name != "id" else "ID" for f in model_fields
@@ -2430,11 +2475,10 @@ def generar_excel_estatus_task(self, uas_param, levels_param, group_by):
     file_data = output.read()
 
     # Guardar en caché permanente del reporte
-    import hashlib
+    from authentication.scoping import huella_scope
 
-    raw_key = f"excel_estatus_file_{uas_param}_{levels_param}_{group_by}"
-    cache_key_excel = (
-        f"excel_estatus_file_{hashlib.md5(raw_key.encode('utf-8')).hexdigest()}"
+    cache_key_excel = cache_key_excel_estatus(
+        uas_param, levels_param, group_by, huella_scope(un_codes, columnas_permitidas)
     )
     cache.set(cache_key_excel, file_data, 1200)
 

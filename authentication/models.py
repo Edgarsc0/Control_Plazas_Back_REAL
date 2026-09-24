@@ -191,6 +191,15 @@ class ModulePermission(models.Model):
             ("view_plantilla_movimientos_foto", "Plantilla de Empleados: ver fotografía en tab Movimientos"),
             ("view_plantilla_bajas_foto", "Plantilla de Empleados: ver fotografía en tab Empleados Bajas"),
             ("view_plantilla_geografia_foto", "Plantilla de Empleados: ver fotografía en tab Distribución Geográfica"),
+            # Expediente del personal — el modal de expediente (EmployeesModal)
+            # se reutiliza en TODO el sistema: lo abre cualquier fila de
+            # empleado, sin importar desde qué módulo. Un permiso por pestaña
+            # permite recortar qué ve cada rol al abrirlo, en vez de que el
+            # contenido dependa del módulo por el que entró.
+            ("view_expediente_plaza", "Expediente del personal: ver pestaña Expediente"),
+            ("view_expediente_datos_personales", "Expediente del personal: ver pestaña Datos Personales"),
+            ("view_expediente_historial_movimientos", "Expediente del personal: ver pestaña Historial de Movimientos"),
+            ("view_expediente_historial_posicion", "Expediente del personal: ver pestaña Historial de Posición"),
             # Ocupación de Plazas por Oficio
             ("view_ocupacion_sankey", "Ocupación de Plazas: ver tab Sankey"),
             ("view_ocupacion_tabla", "Ocupación de Plazas: ver tab Tabla"),
