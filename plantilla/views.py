@@ -3993,14 +3993,19 @@ class EmpleadosEstatusPorNivelUaView(APIView):
             # — una sola query sobre active_employees; por_nivel se deriva
             # sumando sobre las UA en vez de repetir el mismo scan con un
             # segundo GROUP BY (nivel, estado_nomina) equivalente.
+            # `cd_ua` es 1:1 con el nombre de la UA: no cambia los grupos y
+            # permite a los gráficos mostrar el código en vez del nombre largo.
             ua_data = active_employees.values(
-                "unidad_administrativa", "nivel", "estado_nomina"
+                "unidad_administrativa", "cd_ua", "nivel", "estado_nomina"
             ).annotate(count=Count("id"))
 
             por_nivel = {}
             por_ua = {}
+            ua_codigos = {}
             for item in ua_data:
                 ua_name = item["unidad_administrativa"] or "SIN UA"
+                if item["cd_ua"]:
+                    ua_codigos.setdefault(ua_name, item["cd_ua"])
                 nv = item["nivel"] or "SIN NIVEL"
                 est = item["estado_nomina"] or "SIN ESTATUS"
                 count = item["count"]
@@ -4011,7 +4016,7 @@ class EmpleadosEstatusPorNivelUaView(APIView):
                 por_ua.setdefault(ua_name, {}).setdefault(nv, {})
                 por_ua[ua_name][nv][est] = count
 
-            res_data = {"por_nivel": por_nivel, "por_ua": por_ua}
+            res_data = {"por_nivel": por_nivel, "por_ua": por_ua, "ua_codigos": ua_codigos}
             cache.set(cache_key, res_data, None)
             return Response(res_data, status=status.HTTP_200_OK)
         except Exception:
@@ -11253,7 +11258,8 @@ class PlazaSugerenciasView(APIView):
     GET /plantilla/plazas/sugerencias/?q=<prefijo>
 
     Si la plaza está ocupada, incluye "ocupante" (nombre completo) para que
-    se pueda distinguir sin tener que abrir el árbol.
+    se pueda distinguir sin tener que abrir el árbol, y "activa" (bool: la
+    plaza está activa o inactiva). Respeta el scope por Unidad de Negocio.
     """
 
     view_permission = (
@@ -11273,20 +11279,28 @@ class PlazaSugerenciasView(APIView):
         except (TypeError, ValueError):
             limite = self.LIMITE_DEFAULT
 
-        filas = (
-            EmpleadosCompletosSig.objects.filter(posicion__istartswith=termino)
-            .exclude(posicion__isnull=True)
+        queryset = _scope_un_queryset(
+            EmpleadosCompletosSig.objects.filter(posicion__istartswith=termino),
+            get_un_scope_for_request(request),
+        )
+        filas = list(
+            queryset.exclude(posicion__isnull=True)
             .exclude(posicion="")
             .values("posicion", "nombre_puesto_funcional", "nombres")
             .order_by("posicion")
             .distinct()[:limite]
         )
+        # Estado de la plaza (Activa/Inactiva): `Estado Psn` = 'A' en
+        # MOV_POS_LATEST, el mismo criterio que `obtener_posiciones_activas`
+        # (lista cacheada) usa el resto de la app.
+        activas = set(obtener_posiciones_activas())
         resultados = [
             {
                 "posicion": f["posicion"],
                 "puesto": f["nombre_puesto_funcional"],
                 "ocupada": bool((f["nombres"] or "").strip()),
                 "ocupante": (f["nombres"] or "").strip() or None,
+                "activa": f["posicion"] in activas,
             }
             for f in filas
         ]

@@ -254,6 +254,11 @@ class TableroLayout(models.Model):
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="tablero_layout"
     )
     widgets = models.JSONField(default=list, encoder=DjangoJSONEncoder)
+    # Nombre de cada escritorio, por índice (el `page` de cada widget):
+    # ["Vacancia", "", "Plantilla"]. "" = sin nombre propio (el front muestra
+    # "Escritorio N"). Su longitud también conserva los escritorios vacíos
+    # creados a mano, que no se pueden deducir de `widgets`.
+    escritorios = models.JSONField(default=list)
     actualizado_en = models.DateTimeField(auto_now=True)
 
     def __str__(self):

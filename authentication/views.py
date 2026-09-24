@@ -457,13 +457,21 @@ class TableroLayoutView(views.APIView):
     declara view_permission/edit_permission — mismo criterio que
     FiltrosGuardadosView (plantilla/views.py).
 
-    GET -> {"widgets": [...]} (lista vacía si el usuario aún no personaliza nada).
-    PUT {"widgets": [...]} -> reemplaza el layout completo.
+    GET -> {"widgets": [...], "escritorios": ["nombre", ...]} (listas vacías si el
+    usuario aún no personaliza nada).
+    PUT {"widgets": [...], "escritorios": [...]} -> reemplaza el layout completo.
+    `escritorios` es opcional: si no viene, se conserva el guardado.
     """
+
+    MAX_ESCRITORIOS = 50
+    MAX_NOMBRE = 60
 
     def get(self, request):
         layout = TableroLayout.objects.filter(usuario=request.user).first()
-        return Response({"widgets": layout.widgets if layout else []})
+        return Response({
+            "widgets": layout.widgets if layout else [],
+            "escritorios": layout.escritorios if layout else [],
+        })
 
     def put(self, request):
         widgets = request.data.get("widgets")
@@ -471,10 +479,23 @@ class TableroLayoutView(views.APIView):
             return Response(
                 {"error": "'widgets' debe ser una lista."}, status=status.HTTP_400_BAD_REQUEST
             )
+        defaults = {"widgets": widgets}
+        if "escritorios" in request.data:
+            escritorios = request.data.get("escritorios")
+            if (
+                not isinstance(escritorios, list)
+                or len(escritorios) > self.MAX_ESCRITORIOS
+                or not all(isinstance(n, str) for n in escritorios)
+            ):
+                return Response(
+                    {"error": "'escritorios' debe ser una lista de textos."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            defaults["escritorios"] = [n.strip()[: self.MAX_NOMBRE] for n in escritorios]
         layout, _ = TableroLayout.objects.update_or_create(
-            usuario=request.user, defaults={"widgets": widgets}
+            usuario=request.user, defaults=defaults
         )
-        return Response({"widgets": layout.widgets})
+        return Response({"widgets": layout.widgets, "escritorios": layout.escritorios})
 
 
 class MantenimientoView(views.APIView):
