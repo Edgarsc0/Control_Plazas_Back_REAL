@@ -20,7 +20,7 @@ from io import BytesIO
 from pathlib import Path
 
 from django.conf import settings
-from PIL import Image as PILImage
+from PIL import Image as PILImage, ImageOps as PILImageOps
 
 FOTOS_EMPLEADOS_DIR = Path(settings.MEDIA_ROOT) / "empleados_fotos"
 FOTOS_EMPLEADOS_EXTENSIONES = ("jpg", "jpeg", "png", "JPG", "JPEG", "PNG")
@@ -124,10 +124,23 @@ def resolver_foto_empleado(numempleado):
 
 
 def redimensionar_foto_para_excel(ruta):
-    """Abre la foto en ``ruta``, la redimensiona a
-    ``FOTO_MAX_W_PX x FOTO_MAX_H_PX`` (conservando proporción) y la
-    recomprime a JPEG — devuelve un ``BytesIO`` listo para insertar, o
-    ``None`` si el archivo no se pudo leer/decodificar.
+    """Abre la foto en ``ruta`` y devuelve un ``BytesIO`` JPEG de EXACTAMENTE
+    ``FOTO_MAX_W_PX x FOTO_MAX_H_PX`` píxeles, o ``None`` si el archivo no se
+    pudo leer/decodificar.
+
+    TODAS las fotos salen con el mismo alto y ancho, sin excepción. Antes se
+    usaba ``thumbnail()``, que conserva la proporción y por lo tanto devuelve
+    un tamaño distinto por foto: medido sobre 400 fotos reales del directorio,
+    la mayoría salía 54x72 pero también había 53x72, 55x72, 58x72, 61x72 y
+    hasta 90x51 (una apaisada). Como ``insert_image`` ancla la imagen en la
+    celda con su tamaño natural, ese ancho variable descuadraba la columna y
+    las fotos más anchas se desbordaban sobre las celdas vecinas, apareciendo
+    encimadas y fuera de la fila del empleado.
+
+    La foto se escala para CABER dentro del recuadro (sin recortar: nunca se
+    corta una cara) y se centra sobre un lienzo blanco del tamaño exacto. Una
+    foto más chica que el recuadro también se centra, en vez de quedar
+    pegada a la esquina.
 
     ``dpi=(96, 96)`` es a propósito: las fotos de origen vienen de distintos
     escáneres/cámaras a través de los años y traen metadato de DPI muy
@@ -135,17 +148,28 @@ def redimensionar_foto_para_excel(ruta):
     imagen como píxeles/DPI (ver xlsxwriter.image.DEFAULT_DPI = 96) — sin
     forzar aquí el mismo valor, dos fotos con idénticas dimensiones en
     píxeles se ven en Excel a tamaños muy distintos según el DPI que traía
-    el archivo original, y una que sale "grande" se desborda sobre las
-    celdas vecinas (con object_position=1 nada la recorta al tamaño de la
-    celda). Normalizar el DPI al guardar hace que el tamaño en píxeles que
-    ya controlamos arriba sea también el tamaño real de despliegue.
+    el archivo original. Normalizar el DPI al guardar hace que el tamaño en
+    píxeles que ya controlamos arriba sea también el tamaño real de
+    despliegue.
     """
     try:
         with PILImage.open(ruta) as img:
+            # Respeta la orientación EXIF antes de medir: una foto vertical
+            # guardada como horizontal + rotación se escalaría al revés.
+            img = PILImageOps.exif_transpose(img)
             img = img.convert("RGB")
+            # `thumbnail` solo reduce: una foto más chica que el recuadro se
+            # deja como está en vez de ampliarla (saldría borrosa). Hoy no hay
+            # ninguna así —revisadas 3,000 del directorio, todas son 600x750 o
+            # mayores— pero el pegado de abajo la centraría igual.
             img.thumbnail((FOTO_MAX_W_PX, FOTO_MAX_H_PX), PILImage.LANCZOS)
+            lienzo = PILImage.new("RGB", (FOTO_MAX_W_PX, FOTO_MAX_H_PX), (255, 255, 255))
+            lienzo.paste(
+                img,
+                ((FOTO_MAX_W_PX - img.width) // 2, (FOTO_MAX_H_PX - img.height) // 2),
+            )
             buf = BytesIO()
-            img.save(buf, format="JPEG", quality=FOTO_JPEG_QUALITY, dpi=(96, 96))
+            lienzo.save(buf, format="JPEG", quality=FOTO_JPEG_QUALITY, dpi=(96, 96))
             buf.seek(0)
             return buf
     except Exception:

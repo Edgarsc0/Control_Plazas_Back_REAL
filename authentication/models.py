@@ -178,6 +178,12 @@ class ModulePermission(models.Model):
             ("view_plantilla_movimientos", "Plantilla de Empleados: ver tab Movimientos"),
             ("view_plantilla_bajas", "Plantilla de Empleados: ver tab Empleados Bajas"),
             ("view_plantilla_geografia", "Plantilla de Empleados: ver tab Distribución Geográfica"),
+            # Sub-pestañas de Distribución Geográfica. El permiso de arriba
+            # abre el tab; estos dos deciden cuál de sus dos vistas se ve, y
+            # se exigen ADEMÁS del anterior (ver `extra_permission` en
+            # HasModulePermission). Un rol puede tener una, la otra o ambas.
+            ("view_plantilla_geografia_mapa", "Plantilla de Empleados: ver sub-tab Mapa Nacional (Distribución Geográfica)"),
+            ("view_plantilla_geografia_torre", "Plantilla de Empleados: ver sub-tab Torre Caballito (Distribución Geográfica)"),
             ("view_plantilla_catalogos", "Plantilla de Empleados: ver tab Catálogos"),
             ("edit_plantilla_detalle", "Plantilla de Empleados: editar celdas en tab Detalle"),
             ("edit_datos_personales", "Plantilla de Empleados: editar Escolaridad/Contacto/Domicilio en Datos Personales"),

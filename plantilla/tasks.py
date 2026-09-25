@@ -1382,7 +1382,8 @@ def _invalidar_cache_ocupacion_vacancia(bitacora=None):
             "active_position_codes",
             "latest_movpos_sub_ids",
             "mov_pos_detalle",
-            "mov_pos_card_stats",
+            "mov_pos_card_stats",  # forma vieja, ya sin uso
+            "mov_pos_card_stats_grupos",
             "empleados_completos_activos_detalle",
         ])
         import redis as redis_lib
@@ -1764,12 +1765,16 @@ def importar_zafiro(self):
                 "empleados_completos_activos_detalle",
                 "empleados_estatus_por_nivel_ua",  # forma vieja, ya sin uso
                 "empleados_estatus_por_nivel_ua_grupos",
-                "empleados_distribucion_geografica",
+                "empleados_distribucion_geografica",  # forma vieja, ya sin uso
+                "empleados_distribucion_geografica_grupos",
                 "mov_pos_detalle",
-                "mov_pos_card_stats",
+                "mov_pos_card_stats",  # forma vieja, ya sin uso
+                "mov_pos_card_stats_grupos",
                 "mov_pos_ocupadas_set",
                 "desglose_jerarquico",
                 "desglose_jerarquico_ocupados",
+                "aduanas_ocupacion_vacancia",  # forma vieja, ya sin uso
+                "aduanas_ocupacion_vacancia_grupos",
                 "bajas_sig_list",
                 "bajas_motivos_pie",  # forma vieja, ya sin uso
                 "bajas_motivos_pie_grupos",

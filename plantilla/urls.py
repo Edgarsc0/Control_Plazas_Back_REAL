@@ -9,6 +9,7 @@ from .views import (
     EmpleadosBusquedaView,
     TorreCaballitoSearchView,
     EmpleadosGeografiaSearchView,
+    EmpleadosPorUbicacionView,
     EmpleadosPorNivelYEstatusView,
     ExportExcelView,
     OcupacionPorOficiosResumenView,
@@ -469,6 +470,11 @@ urlpatterns = [
         "empleados_distribucion_geografica/",
         EmpleadosDistribucionGeograficaView.as_view(),
         name="empleados_distribucion_geografica",
+    ),
+    path(
+        "empleados_por_ubicacion/",
+        EmpleadosPorUbicacionView.as_view(),
+        name="empleados_por_ubicacion",
     ),
     path(
         "empleados_geografia_search/",

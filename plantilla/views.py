@@ -1783,20 +1783,41 @@ def _calcular_columnas_derivadas_mov_pos(queryset):
     return {f["no_pos_actual"]: f for f in filas}
 
 
-def populate_movpos_occupant_details(resultados, posiciones_ocupadas):
+def populate_movpos_occupant_details(resultados, posiciones_ocupadas, un_codes=None):
+    """Agrega ocupante_id/ocupante_nombre a filas de MOV_POS.
+
+    `un_codes` recorta el OCUPANTE, no la fila: quien llama ya filtró las
+    plazas por la unidad de la plaza (`MOV_POS.Cd UN`). Las dos tablas no
+    siempre coinciden — 8 plazas activas al 2026-09 tienen la plaza en una
+    unidad y a su ocupante en otra según EMPLEADOS_COMPLETOS_SIG — así que
+    una plaza legítimamente visible podría traer colgado el nombre de alguien
+    de otra unidad. En esos casos la plaza se sigue mostrando (es suya) pero
+    sin ocupante, en vez de exponer a una persona fuera del alcance.
+    """
     if not resultados:
         return
     pos_list = [r.get("no_pos_actual") for r in resultados if r.get("no_pos_actual")]
     occupants = {}
+    if pos_list:
+        params = list(pos_list)
+        filtro_un = ""
+        if un_codes is not None:
+            if not un_codes:
+                pos_list, params = [], []
+            else:
+                filtro_un = (
+                    " AND TRIM(`Cd UN`) IN (%s)" % ",".join(["%s"] * len(un_codes))
+                )
+                params = params + list(un_codes)
     if pos_list:
         with connection.cursor() as cursor:
             format_strings = ','.join(['%s'] * len(pos_list))
             query = f"""
                 SELECT `Posición`, `Id Empleado`, `Nombres`
                 FROM EMPLEADOS_COMPLETOS_SIG
-                WHERE `Posición` IN ({format_strings})
+                WHERE `Posición` IN ({format_strings}){filtro_un}
             """
-            cursor.execute(query, pos_list)
+            cursor.execute(query, params)
             for row in cursor.fetchall():
                 pos_code = row[0]
                 id_emp = row[1]
@@ -2250,6 +2271,30 @@ def _paginated_or_full_response(request, data):
 #     pastel; su caché guarda los grupos crudos con unidad_general) y
 #     ExportarBajasConFotosView. Ojo: en BAJAS_SIG la UN es `unidad_general`,
 #     no `cd_un` — ver CAMPO_UN_BAJAS.
+#   Mov. Posiciones — MovPosDetalleView (el recorte va sobre el queryset base,
+#     así que lo heredan búsqueda, filtros, dropdowns, orden y paginación),
+#     sus tarjetas (get_mov_pos_stats, que suma grupos crudos por UN),
+#     MovPosExportExcelView, MovPosVacanciaDetalleView y
+#     MovPosOcupacionDetalleView (gate por `id`, ver _mov_pos_en_scope),
+#     MovPosAlineacionView (dataset cacheado completo + recorte y porcentajes
+#     por alcance), PlazasMovimientoMesView, DesgloseJerarquicoView,
+#     DesgloseJerarquicoOcupadosView y AduanasOcupacionVacanciaView (caché de
+#     grupos crudos con cd_un, pivote por petición).
+#     Ojo con la unidad que manda en este tab: en MOV_POS es la de la PLAZA
+#     (`Cd UN` de MOV_POS); en los desgloses y en Aduanas es la de la PERSONA
+#     (`Cd UN` de EMPLEADOS_COMPLETOS_SIG), porque esas filas son empleados
+#     con nombre y CURP. No coinciden en 8 plazas activas (medido 2026-09) —
+#     de ahí que populate_movpos_occupant_details oculte al ocupante que cae
+#     fuera del alcance aunque su plaza sí esté dentro.
+#   Distribución Geográfica — EmpleadosDistribucionGeograficaView (el mapa
+#     nacional; su caché guarda los grupos crudos por coordenada × cd_un y
+#     arma los puntos por petición), EmpleadosGeografiaSearchView y las tres
+#     vistas de Torre Caballito (TorreCaballito3DView,
+#     TorreCaballitoEmpleadosView, TorreCaballitoSearchView). En los cuatro
+#     endpoints de SQL crudo el recorte va DENTRO del WHERE, no sobre el
+#     resultado: los dos buscadores traen `LIMIT 20`, así que filtrar a la
+#     salida dejaría un oráculo — el tamaño de la lista delataría cuánta
+#     gente con ese nombre existe fuera del alcance. Ver _clausula_un_sql.
 #
 # EXENTOS por decisión de negocio (UN_SCOPE_EXENTO): los tres historiales del
 # expediente — MovimientosPersonalHistorialView, MovimientosPosicionHistorialView
@@ -2258,18 +2303,36 @@ def _paginated_or_full_response(request, data):
 # recortarla los vaciaría de sentido. El acceso se controla con el permiso de
 # cada pestaña ("Expediente del personal"), no con el alcance por UN.
 #
-# NEGADO A PROPÓSITO, no pendiente: EmpleadosCompletosCeldaHistorialView (el
-# modal "Historial de Cambios" de Detalle). Un rol con alcance por UN nunca
-# recibe permisos de edición sobre la plantilla, así que no tiene cambios
-# propios que consultar y el historial completo es justamente la actividad de
-# otras unidades. Queda cerrado por decisión, no por falta de filtrado — no
-# hay que "hacerle su pasada". El frontend además le oculta el botón (ver
-# `sinRestriccionUN` en PlantillaDetalleTab.jsx).
+# NEGADO A PROPÓSITO, no pendiente: los dos modales "Historial de Cambios"
+# (EmpleadosCompletosCeldaHistorialView en Detalle, MovPosCeldaHistorialView en
+# Mov. Posiciones). Un rol con alcance por UN nunca recibe permisos de edición,
+# así que no tiene cambios propios que consultar y el historial completo es
+# justamente la actividad de otras unidades. Queda cerrado por decisión, no por
+# falta de filtrado — no hay que "hacerle su pasada". El frontend además le
+# oculta el botón (ver `sinRestriccionUN` en PlantillaDetalleTab.jsx).
 #
-# NO SE PUEDE RECORTAR, negado de forma permanente: BajasHistoricoView. Su
-# serie sale del contador `registros_bajas` de la bitácora del ETL (cuántas
-# filas cargó cada corrida en toda la ANAM), no de BAJAS_SIG — es un número
-# global por construcción, sin dimensión de UN. Ver su docstring.
+# NEGADO A PROPÓSITO, sub-tab completo: Anuencia (AnuenciaAnexoViewSet,
+# AnuenciaAnexo3VersionViewSet, AnuenciaJustificacionCatalogoViewSet,
+# AnuenciaSugerenciasView, AnuenciaLookupView, AnuenciaLookupBulkView y
+# AnuenciaAnexo3View). Un Anexo 2 puede mezclar plazas de varias unidades en
+# una misma hoja, así que no existe "el Anexo 2 de una unidad" por donde
+# recortar el listado; y los lookups resuelven CUALQUIER código federal de
+# puesto a los datos de su plaza, lo que los vuelve un oráculo sobre toda la
+# ANAM. Encima el ViewSet escribe sin permiso de edición aparte. El frontend
+# le oculta el sub-tab.
+#
+# NO SE PUEDE RECORTAR, negado de forma permanente: BajasHistoricoView (su
+# serie sale del contador `registros_bajas` de la bitácora del ETL, un número
+# global por construcción), CuadroVacanciaView (foto diaria ya agregada en
+# `cuadro_vacancia`, sin columna de unidad) y MovPosAlineacionHistoricoView
+# (un porcentaje por día para toda la ANAM en
+# ALINEACION_ORGANIZACIONAL_HISTORICO, sin datos crudos para reconstruirlo por
+# unidad). Ver el docstring de cada una.
+#
+# RECUPERABLE PERO NO HECHO: ConteoPlazasHistoricoSerieView. Sus datos crudos
+# sí existen (el SP los recorre en vivo sobre MOV_POS), pero agrupar por UN
+# significa reescribir `sp_conteo_plazas_historico_serie` y volver a medir sus
+# ~25s. Queda negado mientras tanto, anotado como trabajo aparte.
 #
 # Sigue NEGADO dentro de Movimientos: el subtab "Rotación de personal"
 # (RotacionTitularesAduanasView, HistoriaDireccionGeneralView, HistoriaPlazaView
@@ -2278,9 +2341,13 @@ def _paginated_or_full_response(request, data):
 # un rol restringido a una sola UN el análisis no tiene contenido propio. El
 # frontend le oculta el subtab.
 #
-# Todo lo demás (Mov. Posiciones, Distribución Geográfica, los exports de esos
-# tabs y los endpoints de edición) queda negado para esos roles hasta que se
-# le haga su pasada. Se cubren de a uno: filtrar, verificar y marcar.
+# Todo lo demás (los endpoints de edición, y los módulos fuera de Plantilla de
+# Empleados: Organigrama, Ocupación de Plazas por Oficio, Valuación
+# Presupuestaria, Oficios Turnados, Monitoreo ZAFIRO…) queda negado para esos
+# roles hasta que se le haga su pasada. Se cubren de a uno: filtrar, verificar
+# y marcar. Recordatorio: no otorgar permisos `edit_*` a un rol con alcance —
+# ninguna vista de escritura está recortada, y el default-deny las bloquea
+# justamente por eso.
 def _scope_un_queryset(queryset, un_codes, field="cd_un"):
     """None -> queryset intacto (sin restricción). Lista -> solo filas cuyo
     Trim(field) esté en la lista (NULL/'' nunca pasa). Lista vacía -> .none()
@@ -2340,6 +2407,102 @@ def _filtrar_numempleados_por_scope(numempleados, un_codes):
     )
     variantes_en_scope = {v for n in en_scope for v in _variantes_numempleado(n)}
     return [n for n in limpios if n in variantes_en_scope]
+
+
+def _numempleados_alcanzables(numempleados, un_codes):
+    """De una lista de números de empleado, los que el rol puede ALCANZAR:
+    los que aparecen en su unidad, ya sea en la plantilla activa o entre sus
+    bajas. `None` de scope -> todos (sin restricción).
+
+    Es la puerta de entrada de los historiales del expediente: esos
+    endpoints devuelven la trayectoria COMPLETA de la persona (incluidas las
+    unidades por las que pasó, ver UN_SCOPE_EXENTO), así que lo que hay que
+    controlar no es el contenido sino a quién se puede pedir — si no,
+    cualquiera con la pestaña habilitada podría consultar por API el
+    historial de una persona de otra unidad que en pantalla nunca ve.
+
+    Se mira también BAJAS_SIG porque una plaza cambia de unidad con el
+    tiempo: quien ve la baja de alguien en su unidad debe poder abrir su
+    expediente aunque esa posición hoy pertenezca a otra.
+    """
+    if un_codes is None:
+        return numempleados
+    if not un_codes:
+        return []
+    from .excel_fotos import _variantes_numempleado
+
+    limpios = [str(n).strip() for n in numempleados if str(n or "").strip()]
+    if not limpios:
+        return []
+    todas_variantes = {v for n in limpios for v in _variantes_numempleado(n)}
+
+    encontrados = set(
+        _scope_un_queryset(
+            EmpleadosCompletosSig.objects.filter(numempleado__in=todas_variantes), un_codes
+        ).values_list("numempleado", flat=True)
+    )
+    encontrados.update(
+        _scope_un_queryset(
+            BajasSig.objects.filter(no_empleado__in=todas_variantes),
+            un_codes,
+            field=CAMPO_UN_BAJAS,
+        ).values_list("no_empleado", flat=True)
+    )
+    variantes_ok = {v for n in encontrados for v in _variantes_numempleado(str(n).strip())}
+    return [n for n in limpios if n in variantes_ok]
+
+
+def _posiciones_alcanzables(posiciones, un_codes):
+    """Equivalente de _numempleados_alcanzables para posiciones: las que el
+    rol ve hoy en su plantilla o entre sus bajas."""
+    if un_codes is None:
+        return posiciones
+    if not un_codes:
+        return []
+    limpias = [str(p).strip() for p in posiciones if str(p or "").strip()]
+    if not limpias:
+        return []
+
+    encontradas = set(
+        _scope_un_queryset(
+            EmpleadosCompletosSig.objects.filter(posicion__in=limpias), un_codes
+        ).values_list("posicion", flat=True)
+    )
+    encontradas.update(
+        _scope_un_queryset(
+            BajasSig.objects.filter(posicion__in=limpias), un_codes, field=CAMPO_UN_BAJAS
+        ).values_list("posicion", flat=True)
+    )
+    encontradas = {str(p).strip() for p in encontradas}
+    return [p for p in limpias if p in encontradas]
+
+
+def _mov_pos_en_scope(mov_id, un_codes):
+    """El renglón de MOV_POS con ese `id`, o `None` si no existe o cae fuera
+    del alcance. Para los endpoints de Mov. Posiciones que reciben un `id`
+    directo del cliente (detalle de vacancia/ocupación): sin este gate,
+    cualquiera con la pestaña podría recorrer ids y leer plazas de otras
+    unidades que en pantalla nunca ve."""
+    try:
+        return _scope_un_queryset(MovPos.objects.filter(id=mov_id), un_codes).get()
+    except (MovPos.DoesNotExist, ValueError, TypeError):
+        return None
+
+
+def _clausula_un_sql(un_codes, alias="e"):
+    """Fragmento `AND TRIM(alias.\`Cd UN\`) IN (...)` + sus parámetros, para
+    las vistas que arman SQL crudo y no pueden usar _scope_un_queryset.
+
+    Devuelve `("", [])` cuando no hay restricción. El caso de lista vacía
+    (fail-closed) NO se resuelve aquí: quien llama debe cortar antes y
+    responder vacío, porque un `IN ()` no es SQL válido.
+    """
+    if not un_codes:
+        return "", []
+    return (
+        " AND TRIM(%s.`Cd UN`) IN (%s)" % (alias, ",".join(["%s"] * len(un_codes))),
+        list(un_codes),
+    )
 
 
 def _variantes_padding_un(codigos):
@@ -3616,6 +3779,12 @@ class MovPosCeldaHistorialView(_CeldaHistorialBaseView):
     Historial de ediciones manuales sobre MOV_POS (tab Mov. Posiciones): hoy
     solo `fecha_anuencia`, ver MovPosFechaAnuenciaOverrideView. La clave de
     negocio es `no_pos_actual`, no `posicion`.
+
+    NEGADO A PROPÓSITO a los roles con alcance por UN, por la misma razón que
+    EmpleadosCompletosCeldaHistorialView: un rol restringido nunca recibe
+    permisos de edición, así que no tiene ediciones propias que consultar y
+    lo único que vería aquí sería la actividad de otras unidades. No es una
+    pasada pendiente.
     """
 
     view_permission = "authentication.view_plantilla_mov_posiciones"
@@ -4225,15 +4394,114 @@ class EmpleadosEstatusPorNivelUaView(APIView):
 class EmpleadosDistribucionGeograficaView(APIView):
     """
     Retorna la distribución geográfica agrupada por coordenadas para los empleados activos.
+
+    ALCANCE POR UN: un punto del mapa es un conteo de personas, y una vez
+    sumado ya no se sabe de quién era cada uno — no se puede recortar después.
+    Por eso la caché guarda los GRUPOS CRUDOS con su `cd_un` (una fila por
+    coordenada × unidad, sin recortar) y cada petición agrega solo las
+    unidades que le tocan. Mismo patrón que EmpleadosEstatusPorNivelUaView y
+    AduanasOcupacionVacanciaView: una sola copia en Redis para todos, el
+    recorte siempre a la salida.
+
+    Ojo con lo que un punto revela aunque el conteo esté bien: los nombres de
+    ubicación, aduanas y unidades administrativas que viajan en cada punto se
+    arman TAMBIÉN desde los grupos ya recortados, así que un rol restringido
+    no ve el nombre de una sede donde solo hay personal de otra unidad — esa
+    coordenada simplemente no le aparece.
     """
 
+    CACHE_KEY = "empleados_distribucion_geografica_grupos"
+
+    un_scope = UN_SCOPE_APLICADO
     view_permission = "authentication.view_plantilla_geografia"
+    # Sub-tab "Mapa Nacional" — ver el comentario en TorreCaballito3DView.
+    extra_permission = "authentication.view_plantilla_geografia_mapa"
+
+    @staticmethod
+    def _split(s):
+        return [x for x in (s.split("\x1f") if s else []) if x]
+
+    @classmethod
+    def _agregar(cls, grupos, un_scope):
+        """Junta los grupos crudos (coordenada × unidad) en un punto por
+        coordenada, sumando conteos y uniendo las listas de nombres."""
+        por_coord = {}
+        for g in _scope_un_filas(grupos, un_scope):
+            lat, lng = g["lat"], g["lng"]
+            if not lat or not lng:
+                continue
+            try:
+                float(lat)
+                float(lng)
+            except (ValueError, TypeError):
+                continue
+
+            punto = por_coord.get((lat, lng))
+            if punto is None:
+                punto = {
+                    "n": 0,
+                    "descripciones": set(),
+                    "aduanas": set(),
+                    "tipos": set(),
+                    "uas": set(),
+                }
+                por_coord[(lat, lng)] = punto
+
+            punto["n"] += g["n"]
+            # Cada grupo trae sus valores ya distintos (GROUP_CONCAT DISTINCT),
+            # pero dos unidades en la misma coordenada repiten la descripción
+            # de la sede, así que hay que deduplicar otra vez al unirlas.
+            for clave in ("descripciones", "aduanas", "tipos", "uas"):
+                punto[clave].update(cls._split(g[clave]))
+
+        resultados = []
+        for (lat, lng), punto in por_coord.items():
+            # Orden alfabético explícito: el "nombre principal" del punto es el
+            # primer elemento de estas listas, y antes ese primero lo decidía
+            # el orden en que MySQL devolvía el GROUP_CONCAT — arbitrario, sin
+            # ORDER BY. Al partir el grupo por unidad ese orden cambiaba y con
+            # él la etiqueta de 2 de los 64 pines. Ordenar lo vuelve estable e
+            # independiente de cómo se agrupe; comprobado contra la salida
+            # anterior: reproduce el mismo nombre en las 50 coordenadas.
+            descripciones = sorted(punto["descripciones"])
+            aduanas = sorted(punto["aduanas"])
+            tipos = sorted(punto["tipos"])
+
+            is_aduana = any(a.strip().upper().startswith("ADUANA") for a in aduanas)
+            aduana_principal = next(
+                (a for a in aduanas if a.strip().upper().startswith("ADUANA")),
+                aduanas[0] if aduanas else "",
+            )
+            tipo_principal = tipos[0] if tipos else ""
+            desc_principal = descripciones[0] if descripciones else ""
+
+            nombre_principal = (
+                aduana_principal if (is_aduana and aduana_principal) else desc_principal
+            )
+            if not nombre_principal and descripciones:
+                nombre_principal = descripciones[0]
+
+            resultados.append(
+                {
+                    "latitud": float(lat),
+                    "longitud": float(lng),
+                    "nombre": nombre_principal or "Ubicación sin nombre",
+                    "is_aduana": is_aduana,
+                    "tipo": tipo_principal,
+                    "count": punto["n"],
+                    "descripciones": descripciones,
+                    "aduanas": aduanas,
+                    "tipos": tipos,
+                    "uas": sorted(punto["uas"]),
+                }
+            )
+        return resultados
 
     def get(self, request, *args, **kwargs):
-        cache_key = "empleados_distribucion_geografica"
-        cached_data = cache.get(cache_key)
+        un_scope = get_un_scope_for_request(request)
+        cached_data = cache.get(self.CACHE_KEY)
         if cached_data is not None:
-            return Response(cached_data, status=status.HTTP_200_OK)
+            return Response(self._agregar(cached_data, un_scope), status=status.HTTP_200_OK)
 
         try:
             active_position_codes = obtener_posiciones_activas()
@@ -4244,14 +4512,18 @@ class EmpleadosDistribucionGeograficaView(APIView):
             with connection.cursor() as cursor:
                 cursor.execute("SET SESSION group_concat_max_len = 1000000")
 
-            grupos = (
+            # `cd_un` entra al GROUP BY solo como dimensión de recorte: parte
+            # cada coordenada en una fila por unidad, que _agregar vuelve a
+            # juntar. Para un usuario sin restricción el resultado es el mismo
+            # punto de siempre, con el mismo conteo.
+            grupos = list(
                 EmpleadosCompletosSig.objects.filter(posicion__in=active_position_codes)
                 .exclude(latitud__isnull=True)
                 .exclude(latitud="")
                 .exclude(longitud__isnull=True)
                 .exclude(longitud="")
                 .annotate(lat=Trim("latitud"), lng=Trim("longitud"))
-                .values("lat", "lng")
+                .values("lat", "lng", "cd_un")
                 .annotate(
                     n=Count("id"),
                     descripciones=GroupConcat("descripcion_ubicacion"),
@@ -4261,56 +4533,8 @@ class EmpleadosDistribucionGeograficaView(APIView):
                 )
             )
 
-            def _split(s):
-                return [x for x in (s.split("\x1f") if s else []) if x]
-
-            resultados = []
-            for g in grupos:
-                lat, lng = g["lat"], g["lng"]
-                if not lat or not lng:
-                    continue
-                try:
-                    float(lat)
-                    float(lng)
-                except (ValueError, TypeError):
-                    continue
-
-                descripciones = _split(g["descripciones"])
-                aduanas = _split(g["aduanas"])
-                tipos = _split(g["tipos"])
-                uas = _split(g["uas"])
-
-                is_aduana = any(a.strip().upper().startswith("ADUANA") for a in aduanas)
-                aduana_principal = next(
-                    (a for a in aduanas if a.strip().upper().startswith("ADUANA")),
-                    aduanas[0] if aduanas else "",
-                )
-                tipo_principal = tipos[0] if tipos else ""
-                desc_principal = descripciones[0] if descripciones else ""
-
-                nombre_principal = (
-                    aduana_principal if (is_aduana and aduana_principal) else desc_principal
-                )
-                if not nombre_principal and descripciones:
-                    nombre_principal = descripciones[0]
-
-                resultados.append(
-                    {
-                        "latitud": float(lat),
-                        "longitud": float(lng),
-                        "nombre": nombre_principal or "Ubicación sin nombre",
-                        "is_aduana": is_aduana,
-                        "tipo": tipo_principal,
-                        "count": g["n"],
-                        "descripciones": descripciones,
-                        "aduanas": aduanas,
-                        "tipos": tipos,
-                        "uas": uas,
-                    }
-                )
-
-            cache.set(cache_key, resultados, None)
-            return Response(resultados, status=status.HTTP_200_OK)
+            cache.set(self.CACHE_KEY, grupos, None)
+            return Response(self._agregar(grupos, un_scope), status=status.HTTP_200_OK)
         except Exception:
             logger.exception("Error inesperado en {}".format(request.path))
             return Response(
@@ -4318,48 +4542,88 @@ class EmpleadosDistribucionGeograficaView(APIView):
             )
 
 
-def get_mov_pos_stats():
-    cache_key = "mov_pos_card_stats"
-    stats = cache.get(cache_key)
-    if stats is None:
-        from django.db import connection
+def _mov_pos_stats_grupos():
+    """Los 4 contadores de las tarjetas de Mov. Posiciones DESGLOSADOS por
+    `Cd UN`, sin agregar todavía. Es lo que se cachea.
 
-        query = """
-            SELECT
-                (SELECT COUNT(*) FROM MOV_POS) as total_movimientos,
-                COUNT(*) as todas_posiciones,
-                SUM(CASE WHEN `Estado Psn` = 'A' THEN 1 ELSE 0 END) as posiciones_activas,
-                SUM(CASE WHEN `Estado Psn` = 'I' THEN 1 ELSE 0 END) as posiciones_inactivas
-            FROM MOV_POS_LATEST;
-        """
-        try:
-            with connection.cursor() as cursor:
-                cursor.execute(query)
-                row = cursor.fetchone()
-                if row:
-                    stats = {
-                        "total_movimientos": int(row[0]) if row[0] is not None else 0,
-                        "todas_posiciones": int(row[1]) if row[1] is not None else 0,
-                        "posiciones_activas": int(row[2]) if row[2] is not None else 0,
-                        "posiciones_inactivas": int(row[3])
-                        if row[3] is not None
-                        else 0,
-                    }
-                else:
-                    stats = {
-                        "total_movimientos": 0,
-                        "todas_posiciones": 0,
-                        "posiciones_activas": 0,
-                        "posiciones_inactivas": 0,
-                    }
-        except Exception:
-            stats = {
-                "total_movimientos": 0,
-                "todas_posiciones": 0,
-                "posiciones_activas": 0,
-                "posiciones_inactivas": 0,
-            }
-        cache.set(cache_key, stats, None)  # Cache for 10 minutes
+    Mismo patrón que EmpleadosEstatusPorNivelUaView / BajasMotivosPieView: la
+    caché guarda los grupos crudos (una fila por unidad, sin recortar) y cada
+    petición suma solo las unidades que le tocan. Así una sola copia en Redis
+    sirve tanto al usuario sin restricción como a cualquier alcance, y nunca
+    queda cacheada una respuesta ya recortada que pudiera servirse a otro rol.
+    """
+    cache_key = "mov_pos_card_stats_grupos"
+    grupos = cache.get(cache_key)
+    if grupos is not None:
+        return grupos
+
+    from django.db import connection
+
+    # `total_movimientos` cuenta TODO MOV_POS (histórico de movimientos de la
+    # plaza); los otros 3 cuentan posiciones vigentes (MOV_POS_LATEST). Son dos
+    # universos distintos, así que se agrupan por separado y se juntan por UN.
+    query_movimientos = """
+        SELECT TRIM(`Cd UN`) AS cd_un, COUNT(*) AS n
+        FROM MOV_POS GROUP BY TRIM(`Cd UN`);
+    """
+    query_posiciones = """
+        SELECT
+            TRIM(m.`Cd UN`) AS cd_un,
+            COUNT(*) AS todas,
+            SUM(CASE WHEN l.`Estado Psn` = 'A' THEN 1 ELSE 0 END) AS activas,
+            SUM(CASE WHEN l.`Estado Psn` = 'I' THEN 1 ELSE 0 END) AS inactivas
+        FROM MOV_POS_LATEST l
+        JOIN MOV_POS m ON m.id = l.id
+        GROUP BY TRIM(m.`Cd UN`);
+    """
+    try:
+        por_un = {}
+
+        def _entrada(cd_un):
+            return por_un.setdefault(
+                cd_un,
+                {
+                    "cd_un": cd_un,
+                    "total_movimientos": 0,
+                    "todas_posiciones": 0,
+                    "posiciones_activas": 0,
+                    "posiciones_inactivas": 0,
+                },
+            )
+
+        with connection.cursor() as cursor:
+            cursor.execute(query_movimientos)
+            for cd_un, n in cursor.fetchall():
+                _entrada(cd_un or "")["total_movimientos"] = int(n or 0)
+            cursor.execute(query_posiciones)
+            for cd_un, todas, activas, inactivas in cursor.fetchall():
+                entrada = _entrada(cd_un or "")
+                entrada["todas_posiciones"] = int(todas or 0)
+                entrada["posiciones_activas"] = int(activas or 0)
+                entrada["posiciones_inactivas"] = int(inactivas or 0)
+
+        grupos = list(por_un.values())
+    except Exception:
+        logger.exception("No se pudieron calcular los grupos de mov_pos_card_stats")
+        return []
+
+    cache.set(cache_key, grupos, None)
+    return grupos
+
+
+def get_mov_pos_stats(un_codes=None):
+    """Tarjetas de Mov. Posiciones, sumadas sobre las unidades del alcance
+    (`None` = sin restricción: suma todas, mismo número de siempre)."""
+    grupos = _scope_un_filas(_mov_pos_stats_grupos(), un_codes)
+    stats = {
+        "total_movimientos": 0,
+        "todas_posiciones": 0,
+        "posiciones_activas": 0,
+        "posiciones_inactivas": 0,
+    }
+    for grupo in grupos:
+        for clave in stats:
+            stats[clave] += grupo.get(clave, 0)
     return stats
 
 
@@ -4369,7 +4633,11 @@ class MovPosPagination(PageNumberPagination):
     max_page_size = 10000
 
     def get_paginated_response(self, data):
-        stats = get_mov_pos_stats()
+        # `self.request` lo deja paginate_queryset — las tarjetas tienen que
+        # respetar el mismo alcance que las filas que acompañan.
+        stats = get_mov_pos_stats(
+            get_un_scope_for_request(self.request) if getattr(self, "request", None) else None
+        )
         return Response(
             {
                 "next": self.get_next_link(),
@@ -4382,6 +4650,24 @@ class MovPosPagination(PageNumberPagination):
 
 
 class MovPosDetalleView(APIView):
+    """Tabla principal del tab Mov. Posiciones.
+
+    ALCANCE POR UN: el recorte se hace una sola vez, sobre el queryset base
+    (`Cd UN` de MOV_POS), antes de cualquier filtro. Todo lo que viene
+    después lo hereda sin acordarse de hacerlo: búsqueda, filtros de columna,
+    filtros avanzados, los dropdowns de `distinct_field`, el orden, la
+    paginación y las columnas calculadas (que se resuelven sobre este mismo
+    queryset). Las tarjetas superiores se suman aparte con el mismo alcance
+    (ver get_mov_pos_stats).
+
+    La unidad que manda aquí es la de la PLAZA (`MOV_POS.Cd UN`), no la de su
+    ocupante: este tab es de plazas. Para las 8 plazas activas donde ambas
+    tablas no coinciden (medido 2026-09), el nombre del ocupante se oculta si
+    su fila de EMPLEADOS_COMPLETOS_SIG cae fuera del alcance — ver
+    populate_movpos_occupant_details.
+    """
+
+    un_scope = UN_SCOPE_APLICADO
     view_permission = "authentication.view_plantilla_mov_posiciones"
     pagination_class = MovPosPagination
 
@@ -4404,7 +4690,8 @@ class MovPosDetalleView(APIView):
         # `_reaplicar_prioridad_nivel_jerarquico` y los pasos de vacancia del
         # pipeline de ZAFIRO (error 1205 Lock wait timeout, ver ZafiroBitacora).
 
-        queryset = MovPos.objects.all()
+        un_scope = get_un_scope_for_request(request)
+        queryset = _scope_un_queryset(MovPos.objects.all(), un_scope)
         # `fecha_anuencia` = fecha_vacancia + 30 días por default, salvo que el
         # usuario haya editado manualmente esa fecha para la posición (ver
         # celda_override.get_fecha_anuencia_overrides_map) — se anota desde el
@@ -5026,7 +5313,7 @@ class MovPosDetalleView(APIView):
                     )
                 cache.set("mov_pos_ocupadas_set", posiciones_ocupadas, None)
 
-            populate_movpos_occupant_details(resultados, posiciones_ocupadas)
+            populate_movpos_occupant_details(resultados, posiciones_ocupadas, un_scope)
             mapa_codigos = _get_mapa_codigos()
             for r in resultados:
                 pos = r.get("no_pos_actual")
@@ -5075,7 +5362,7 @@ class MovPosDetalleView(APIView):
                     == "true"
                 )
                 if not is_excel_mode:
-                    stats = get_mov_pos_stats()
+                    stats = get_mov_pos_stats(un_scope)
                     return Response(
                         {
                             "next": None,
@@ -5100,7 +5387,7 @@ class MovPosDetalleView(APIView):
                 == "true"
             )
             if not is_excel_mode:
-                stats = get_mov_pos_stats()
+                stats = get_mov_pos_stats(un_scope)
                 return Response(
                     {
                         "next": None,
@@ -5329,6 +5616,11 @@ class MovPosHistoriaView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # Contenido completo, pero solo de posiciones alcanzables desde su
+        # unidad (ver _posiciones_alcanzables).
+        if not _posiciones_alcanzables([posicion], get_un_scope_for_request(request)):
+            return Response([], status=status.HTTP_200_OK)
+
         try:
             # Obtener todos los registros para la posición, ordenados del más reciente al más antiguo
             queryset = MovPos.objects.filter(no_pos_actual=posicion).order_by("-id")
@@ -5359,8 +5651,17 @@ class MovPosVacanciaDetalleView(APIView):
 
     Parámetro: ?id=<id de MOV_POS> (el id del renglón de MOV_POS sobre el
     que se muestra la fecha de vacancia, NO el idRegistroDesicivo).
+
+    ALCANCE POR UN: el `id` lo manda el cliente, así que se verifica que ese
+    renglón caiga dentro del alcance antes de resolver nada — si no, el mismo
+    404 que si no existiera (un error distinto convertiría el endpoint en un
+    oráculo para saber qué ids existen fuera de la unidad). El detalle que se
+    devuelve puede nombrar otra posición —la de destino de un cambio de
+    plaza, categoría B— porque eso es justamente lo que dejó vacante la plaza
+    que el usuario sí puede ver.
     """
 
+    un_scope = UN_SCOPE_APLICADO
     view_permission = "authentication.view_plantilla_mov_posiciones"
 
     def get(self, request, *args, **kwargs):
@@ -5373,9 +5674,8 @@ class MovPosVacanciaDetalleView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        try:
-            mov_row = MovPos.objects.get(id=mov_id)
-        except (MovPos.DoesNotExist, ValueError):
+        mov_row = _mov_pos_en_scope(mov_id, get_un_scope_for_request(request))
+        if mov_row is None:
             return Response(
                 {"error": "Registro de MOV_POS no encontrado."},
                 status=status.HTTP_404_NOT_FOUND,
@@ -5395,8 +5695,11 @@ class MovPosOcupacionDetalleView(APIView):
     Parámetro: ?id=<id de MOV_POS> (el id del renglón de MOV_POS sobre el
     que se muestra la fecha de ocupación, NO el
     id_registro_des_fecha_ocupacion).
+
+    ALCANCE POR UN: mismo gate por `id` que MovPosVacanciaDetalleView.
     """
 
+    un_scope = UN_SCOPE_APLICADO
     view_permission = "authentication.view_plantilla_mov_posiciones"
 
     def get(self, request, *args, **kwargs):
@@ -5409,9 +5712,8 @@ class MovPosOcupacionDetalleView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        try:
-            mov_row = MovPos.objects.get(id=mov_id)
-        except (MovPos.DoesNotExist, ValueError):
+        mov_row = _mov_pos_en_scope(mov_id, get_un_scope_for_request(request))
+        if mov_row is None:
             return Response(
                 {"error": "Registro de MOV_POS no encontrado."},
                 status=status.HTTP_404_NOT_FOUND,
@@ -5841,10 +6143,15 @@ def _construir_dataset_alineacion():
     return resultados
 
 
-def get_mov_pos_alineacion_stats(resultados=None):
-    stats = cache.get(ALINEACION_STATS_CACHE_KEY)
-    if stats is not None:
-        return stats
+def get_mov_pos_alineacion_stats(resultados=None, usar_cache=True):
+    """`usar_cache=False` para los roles con alcance por UN: sus porcentajes
+    salen de un subconjunto del dataset y no pueden compartir (ni pisar) la
+    copia global cacheada — se calculan en cada petición sobre las filas que
+    ya vienen recortadas."""
+    if usar_cache:
+        stats = cache.get(ALINEACION_STATS_CACHE_KEY)
+        if stats is not None:
+            return stats
     if resultados is None:
         resultados = _construir_dataset_alineacion()
 
@@ -5882,7 +6189,8 @@ def get_mov_pos_alineacion_stats(resultados=None):
         "porcentaje_alineacion_general": round((alineadas / total) * 100, 1) if total else 0.0,
         "por_campo": por_campo,
     }
-    cache.set(ALINEACION_STATS_CACHE_KEY, stats, ALINEACION_CACHE_TTL)
+    if usar_cache:
+        cache.set(ALINEACION_STATS_CACHE_KEY, stats, ALINEACION_CACHE_TTL)
     return stats
 
 
@@ -5991,14 +6299,23 @@ class MovPosAlineacionView(APIView):
     keys de ``ALINEACION_CAMPOS``, p.ej. ``id_departamento,dependencia_directa``):
     conserva solo las plazas que difieren en AL MENOS UNO de esos campos (OR),
     a diferencia de los filtros de columna normales que son AND entre columnas.
+
+    ALCANCE POR UN: el dataset se cachea COMPLETO (una sola copia, sin
+    recortar) y se recorta al salir, por el `cd_un` de MOV_POS — la misma
+    unidad que manda en MovPosDetalleView, para que ambas tablas cuadren.
+    Los porcentajes de alineación se recalculan sobre ese subconjunto: para
+    un rol restringido, "82% alineadas" significa 82% de SUS plazas, no de la
+    ANAM entera (ver get_mov_pos_alineacion_stats).
     """
 
+    un_scope = UN_SCOPE_APLICADO
     view_permission = "authentication.view_plantilla_mov_posiciones"
 
     def get(self, request, *args, **kwargs):
         try:
-            dataset = _construir_dataset_alineacion()
-            stats = get_mov_pos_alineacion_stats(dataset)
+            un_scope = get_un_scope_for_request(request)
+            dataset = _scope_un_filas(_construir_dataset_alineacion(), un_scope)
+            stats = get_mov_pos_alineacion_stats(dataset, usar_cache=un_scope is None)
 
             resultados = apply_text_search_dict(
                 dataset,
@@ -6078,7 +6395,17 @@ class MovPosAlineacionHistoricoView(APIView):
     """Histórico diario del % de Alineación General, poblado por la tarea
     Celery `importar_zafiro` (ver `_actualizar_historico_alineacion_general`
     en plantilla/tasks.py: 1 fila por día, upsert). Alimenta la gráfica de
-    tendencia en AlineacionOrganizacionalTab."""
+    tendencia en AlineacionOrganizacionalTab.
+
+    NO SE PUEDE RECORTAR POR UN, negado de forma permanente a los roles con
+    alcance: ALINEACION_ORGANIZACIONAL_HISTORICO guarda un único porcentaje
+    por día para toda la ANAM, calculado y persistido por el ETL — no tiene
+    dimensión de unidad y no se puede reconstruir hacia atrás por unidad (no
+    quedan los datos crudos de cada día). Recalcularlo por unidad exigiría
+    empezar a guardar una fila por UN por día desde cero; hasta entonces, el
+    frontend le oculta la gráfica de tendencia a esos roles y la tabla de
+    alineación (que sí está recortada) sigue funcionando.
+    """
 
     view_permission = "authentication.view_plantilla_mov_posiciones"
 
@@ -6118,8 +6445,14 @@ class MovPosAlineacionHistoricoView(APIView):
 class MovPosExportExcelView(APIView):
     """Genera y descarga directamente el Excel de Movimientos de Posiciones
     con los filtros activos en el frontend. Evita que el cliente descargue
-    todos los datos en JSON y ejecute ExcelJS localmente."""
+    todos los datos en JSON y ejecute ExcelJS localmente.
 
+    ALCANCE POR UN: mismo corte que MovPosDetalleView, sobre el queryset base
+    — el .xlsx no se cachea, se arma en cada descarga a partir de él, así que
+    no hay nada que recortar después.
+    """
+
+    un_scope = UN_SCOPE_APLICADO
     view_permission = "authentication.view_plantilla_mov_posiciones"
 
     def get(self, request, *args, **kwargs):
@@ -6136,7 +6469,8 @@ class MovPosExportExcelView(APIView):
             visible_keys = list(MOV_POS_COLUMN_LABELS.keys())
 
         # ── 2. Construir queryset con los mismos filtros que MovPosDetalleView ──
-        queryset = MovPos.objects.all()
+        un_scope = get_un_scope_for_request(request)
+        queryset = _scope_un_queryset(MovPos.objects.all(), un_scope)
         fecha_anuencia_overrides = get_fecha_anuencia_overrides_map()
         fecha_anuencia_baseline = get_fecha_anuencia_baseline_map()
         fecha_anuencia_overrides_texto = get_fecha_anuencia_overrides_texto_map()
@@ -7572,7 +7906,33 @@ class OrganigramaSearchView(APIView):
 
 
 class TorreCaballito3DView(APIView):
+    """Ocupación de la Torre Caballito piso por piso (sub-tab del tab
+    Distribución Geográfica).
+
+    ALCANCE POR UN: el conteo por piso × unidad administrativa se calcula en
+    SQL, así que el recorte va en el WHERE — no se cachea nada, se consulta
+    en cada petición. Para un rol restringido los pisos muestran solo a su
+    gente; un piso donde no tiene a nadie desaparece del edificio.
+    """
+
+    un_scope = UN_SCOPE_APLICADO
+    # `view_plantilla_geografia` va en la tupla porque Torre Caballito es un
+    # SUB-TAB de Distribución Geográfica, no un módulo aparte. Sin él, un rol
+    # con el tab de Geografía veía el sub-tab en pantalla y recibía 403 al
+    # abrirlo. Se conservan los dos permisos de Organigrama por si alguna
+    # pantalla de ese módulo vuelve a consumir estos endpoints.
     view_permission = (
+        "authentication.view_plantilla_geografia",
+        "authentication.view_organigrama_institucional",
+        "authentication.view_organigrama_alineacion",
+    )
+    # Y ADEMÁS el permiso del sub-tab: `view_plantilla_geografia` abre el tab,
+    # pero cuál de sus dos vistas se ve se decide aquí (ver `extra_permission`
+    # en HasModulePermission — dentro de la tupla basta uno). Los codenames de
+    # Organigrama se repiten para que un rol de ese módulo, que no tiene por
+    # qué conocer las sub-pestañas de Geografía, siga pasando igual que antes.
+    extra_permission = (
+        "authentication.view_plantilla_geografia_torre",
         "authentication.view_organigrama_institucional",
         "authentication.view_organigrama_alineacion",
     )
@@ -7580,7 +7940,12 @@ class TorreCaballito3DView(APIView):
     def get(self, request):
         from django.db import connection
 
-        query = """
+        un_scope = get_un_scope_for_request(request)
+        if un_scope is not None and not un_scope:
+            return Response([])  # fail-closed, ver RolUnScope
+        filtro_un, params_un = _clausula_un_sql(un_scope)
+
+        query = f"""
             SELECT
                 e.`Descripción ubicación`,
                 e.`Unidad Administrativa`,
@@ -7590,16 +7955,16 @@ class TorreCaballito3DView(APIView):
                 ON e.`Posición` = activas.`Nº Pos Actual` AND activas.`Estado Psn` = 'A'
             WHERE e.`Descripción ubicación` IS NOT NULL
               AND (
-                  e.`Descripción ubicación` LIKE '%Caballito Reforma 10 P%'
-                  OR e.`Descripción ubicación` LIKE '%Torre Caballito Reforma 10 P%'
+                  e.`Descripción ubicación` LIKE '%%Caballito Reforma 10 P%%'
+                  OR e.`Descripción ubicación` LIKE '%%Torre Caballito Reforma 10 P%%'
               )
-              AND UPPER(TRIM(e.`Numempleado`)) <> 'VACANTE'
+              AND UPPER(TRIM(e.`Numempleado`)) <> 'VACANTE'{filtro_un}
             GROUP BY e.`Descripción ubicación`, e.`Unidad Administrativa`
             ORDER BY e.`Descripción ubicación`, Total DESC;
         """
 
         with connection.cursor() as cursor:
-            cursor.execute(query)
+            cursor.execute(query, params_un)
             results = cursor.fetchall()
 
         # Aggregate by floor
@@ -7619,7 +7984,31 @@ class TorreCaballito3DView(APIView):
 
 
 class TorreCaballitoEmpleadosView(APIView):
+    """Listado nominal de quién está en un piso (o en toda la torre).
+
+    ALCANCE POR UN: `piso` y `ua` los manda el cliente, así que el recorte
+    tiene que ir en el WHERE y no sobre el resultado — si no, pedir el piso
+    de otra dirección devolvería su plantilla completa con nombre y posición.
+    """
+
+    un_scope = UN_SCOPE_APLICADO
+    # `view_plantilla_geografia` va en la tupla porque Torre Caballito es un
+    # SUB-TAB de Distribución Geográfica, no un módulo aparte. Sin él, un rol
+    # con el tab de Geografía veía el sub-tab en pantalla y recibía 403 al
+    # abrirlo. Se conservan los dos permisos de Organigrama por si alguna
+    # pantalla de ese módulo vuelve a consumir estos endpoints.
     view_permission = (
+        "authentication.view_plantilla_geografia",
+        "authentication.view_organigrama_institucional",
+        "authentication.view_organigrama_alineacion",
+    )
+    # Y ADEMÁS el permiso del sub-tab: `view_plantilla_geografia` abre el tab,
+    # pero cuál de sus dos vistas se ve se decide aquí (ver `extra_permission`
+    # en HasModulePermission — dentro de la tupla basta uno). Los codenames de
+    # Organigrama se repiten para que un rol de ese módulo, que no tiene por
+    # qué conocer las sub-pestañas de Geografía, siga pasando igual que antes.
+    extra_permission = (
+        "authentication.view_plantilla_geografia_torre",
         "authentication.view_organigrama_institucional",
         "authentication.view_organigrama_alineacion",
     )
@@ -7627,6 +8016,10 @@ class TorreCaballitoEmpleadosView(APIView):
     def get(self, request):
         piso = request.query_params.get("piso", None)
         ua = request.query_params.get("ua", None)
+
+        un_scope = get_un_scope_for_request(request)
+        if un_scope is not None and not un_scope:
+            return Response([])  # fail-closed, ver RolUnScope
 
         from django.db import connection
 
@@ -7650,6 +8043,10 @@ class TorreCaballitoEmpleadosView(APIView):
         # personal activo: se excluyen las posiciones vacantes.
         where_clause += " AND UPPER(TRIM(e.`Numempleado`)) <> 'VACANTE'"
 
+        filtro_un, params_un = _clausula_un_sql(un_scope)
+        where_clause += filtro_un
+        params += params_un
+
         query = f"""
             SELECT
                 e.`Posición`,
@@ -7671,22 +8068,7 @@ class TorreCaballitoEmpleadosView(APIView):
 
         data = []
         for row in results:
-            raw_estatus = row[5]
-            if not raw_estatus or str(raw_estatus).strip() == "":
-                estatus = "Vacante"
-            else:
-                val = str(raw_estatus).strip().upper()
-                if val == "A":
-                    estatus = "Activo"
-                elif val == "S":
-                    estatus = "Suspendido"
-                elif val == "L":
-                    estatus = "Licencia"
-                elif val == "P":
-                    estatus = "Licencia Médica"
-                else:
-                    estatus = "Vacante"
-
+            estatus = _etiqueta_estado_nomina(row[5])
             data.append(
                 {
                     "posicion": row[0],
@@ -7702,7 +8084,31 @@ class TorreCaballitoEmpleadosView(APIView):
 
 
 class TorreCaballitoSearchView(APIView):
+    """Buscador por nombre dentro de la Torre Caballito.
+
+    ALCANCE POR UN: igual que EmpleadosGeografiaSearchView, el recorte va
+    DENTRO del SQL y no después del `LIMIT 20` — filtrar a la salida dejaría
+    un oráculo por el tamaño de la lista.
+    """
+
+    un_scope = UN_SCOPE_APLICADO
+    # `view_plantilla_geografia` va en la tupla porque Torre Caballito es un
+    # SUB-TAB de Distribución Geográfica, no un módulo aparte. Sin él, un rol
+    # con el tab de Geografía veía el sub-tab en pantalla y recibía 403 al
+    # abrirlo. Se conservan los dos permisos de Organigrama por si alguna
+    # pantalla de ese módulo vuelve a consumir estos endpoints.
     view_permission = (
+        "authentication.view_plantilla_geografia",
+        "authentication.view_organigrama_institucional",
+        "authentication.view_organigrama_alineacion",
+    )
+    # Y ADEMÁS el permiso del sub-tab: `view_plantilla_geografia` abre el tab,
+    # pero cuál de sus dos vistas se ve se decide aquí (ver `extra_permission`
+    # en HasModulePermission — dentro de la tupla basta uno). Los codenames de
+    # Organigrama se repiten para que un rol de ese módulo, que no tiene por
+    # qué conocer las sub-pestañas de Geografía, siga pasando igual que antes.
+    extra_permission = (
+        "authentication.view_plantilla_geografia_torre",
         "authentication.view_organigrama_institucional",
         "authentication.view_organigrama_alineacion",
     )
@@ -7712,9 +8118,14 @@ class TorreCaballitoSearchView(APIView):
         if not q or len(q) < 3:
             return Response({"results": []})
 
+        un_scope = get_un_scope_for_request(request)
+        if un_scope is not None and not un_scope:
+            return Response({"results": []})  # fail-closed, ver RolUnScope
+        filtro_un, params_un = _clausula_un_sql(un_scope)
+
         from django.db import connection
 
-        query = """
+        query = f"""
             SELECT
                 e.`Posición`,
                 e.`Numempleado`,
@@ -7730,13 +8141,13 @@ class TorreCaballitoSearchView(APIView):
                   OR e.`Descripción ubicación` LIKE '%%Torre Caballito Reforma 10 P%%'
               )
               AND UPPER(TRIM(e.`Numempleado`)) <> 'VACANTE'
-              AND (e.`Nombres` LIKE %s OR e.`Numempleado` LIKE %s)
+              AND (e.`Nombres` LIKE %s OR e.`Numempleado` LIKE %s){filtro_un}
             LIMIT 20;
         """
 
         like_q = f"%{q}%"
         with connection.cursor() as cursor:
-            cursor.execute(query, [like_q, like_q])
+            cursor.execute(query, [like_q, like_q] + params_un)
             columns = [col[0] for col in cursor.description]
             results = [dict(zip(columns, row)) for row in cursor.fetchall()]
 
@@ -7757,22 +8168,138 @@ class TorreCaballitoSearchView(APIView):
         return Response({"results": results})
 
 
+# Estado Nómina (columna de una letra) -> etiqueta que pinta
+# EmpleadosTableModal. Se comparte entre Torre Caballito y el detalle de un
+# punto del mapa para que ambas tablas usen exactamente el mismo vocabulario
+# (getStatusStyle en el front colorea por estas cadenas).
+_ETIQUETA_ESTADO_NOMINA = {
+    "A": "Activo",
+    "S": "Suspendido",
+    "L": "Licencia",
+    "P": "Licencia Médica",
+}
+
+
+def _etiqueta_estado_nomina(raw):
+    if not raw or str(raw).strip() == "":
+        return "Vacante"
+    return _ETIQUETA_ESTADO_NOMINA.get(str(raw).strip().upper(), "Vacante")
+
+
+class EmpleadosPorUbicacionView(APIView):
+    """Quiénes son las N personas de un punto del mapa nacional.
+
+    Alimenta el modal que se abre al hacer clic en la píldora con el conteo
+    del popup (ver MapaTab.jsx): devuelve las filas en el mismo formato que
+    TorreCaballitoEmpleadosView, porque las dos pintan el mismo componente
+    (EmpleadosTableModal, con su columna de ojo para abrir el expediente).
+
+    Parámetros: ?lat=&lng= (obligatorios, tal como vienen en el punto) y
+    ?ua= opcional para acotar a una de las unidades administrativas listadas
+    en ese punto.
+
+    ALCANCE POR UN: lat/lng llegan del cliente, así que el recorte va en el
+    WHERE. El conteo del punto ya venía recortado (ver
+    EmpleadosDistribucionGeograficaView), y esta lista tiene que cuadrar con
+    él: si no, la píldora diría "3 empleados" y la tabla mostraría otra cosa.
+    """
+
+    un_scope = UN_SCOPE_APLICADO
+    view_permission = "authentication.view_plantilla_geografia"
+    extra_permission = "authentication.view_plantilla_geografia_mapa"
+
+    def get(self, request):
+        lat = (request.query_params.get("lat") or "").strip()
+        lng = (request.query_params.get("lng") or "").strip()
+        ua = (request.query_params.get("ua") or "").strip()
+        if not lat or not lng:
+            return Response(
+                {"error": "Los parámetros 'lat' y 'lng' son requeridos."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            float(lat)
+            float(lng)
+        except (TypeError, ValueError):
+            return Response(
+                {"error": "'lat' y 'lng' deben ser numéricos."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        un_scope = get_un_scope_for_request(request)
+        if un_scope is not None and not un_scope:
+            return Response([])  # fail-closed, ver RolUnScope
+
+        active_position_codes = obtener_posiciones_activas()
+        # Mismas condiciones que el agregado del mapa (posiciones activas +
+        # TRIM sobre lat/lng), para que la tabla traiga exactamente las
+        # personas que el punto contó.
+        queryset = _scope_un_queryset(
+            EmpleadosCompletosSig.objects.filter(posicion__in=active_position_codes)
+            .annotate(_lat=Trim("latitud"), _lng=Trim("longitud"))
+            .filter(_lat=lat, _lng=lng),
+            un_scope,
+        )
+        if ua:
+            queryset = queryset.filter(unidad_administrativa=ua)
+
+        filas = queryset.values(
+            "posicion", "numempleado", "id_empleado", "nombres",
+            "unidad_administrativa", "descripcion_ubicacion", "estado_nomina",
+        ).order_by("nombres")
+
+        return Response([
+            {
+                "posicion": f["posicion"],
+                # `Numempleado` es la clave que el expediente usa para resolver
+                # foto y datos personales; `Id Empleado` es el respaldo cuando
+                # viene vacío (misma precedencia que EmployeesModal).
+                "num_empleado": (f["numempleado"] or f["id_empleado"] or "").strip(),
+                "nombre": f["nombres"],
+                "ua": f["unidad_administrativa"],
+                "ubicacion": f["descripcion_ubicacion"],
+                "estado_nomina": _etiqueta_estado_nomina(f["estado_nomina"]),
+            }
+            for f in filas
+        ])
+
+
 class EmpleadosGeografiaSearchView(APIView):
     """
     Busca empleados activos por nombre o número, devolviendo su ubicación
     geográfica (lat/long) para poder centrar el mapa en el resultado.
+
+    ALCANCE POR UN: este es el buscador por nombre del mapa, así que el
+    recorte va DENTRO del SQL, no sobre el resultado. Filtrar después del
+    `LIMIT 20` dejaría un oráculo: escribiendo un apellido de otra unidad, el
+    usuario vería la lista encogerse o vaciarse según cuántos empleados con
+    ese nombre existen fuera de su alcance. Con el filtro dentro, esos
+    empleados nunca entran al conteo.
     """
 
+    un_scope = UN_SCOPE_APLICADO
     view_permission = "authentication.view_plantilla_geografia"
+    # Es el buscador del mapa: mismo sub-tab, mismo permiso extra.
+    extra_permission = "authentication.view_plantilla_geografia_mapa"
 
     def get(self, request):
         q = request.query_params.get("q", "").strip()
         if not q or len(q) < 3:
             return Response({"results": []})
 
+        un_scope = get_un_scope_for_request(request)
+        if un_scope is not None and not un_scope:
+            return Response({"results": []})  # fail-closed, ver RolUnScope
+
         from django.db import connection
 
-        query = """
+        filtro_un = ""
+        params = [f"%{q}%", f"%{q}%"]
+        if un_scope is not None:
+            filtro_un = " AND TRIM(e.`Cd UN`) IN (%s)" % ",".join(["%s"] * len(un_scope))
+            params += list(un_scope)
+
+        query = f"""
             SELECT
                 e.`Posición`,
                 e.`Numempleado`,
@@ -7788,13 +8315,12 @@ class EmpleadosGeografiaSearchView(APIView):
                 ON e.`Posición` = activas.`Nº Pos Actual` AND activas.`Estado Psn` = 'A'
             WHERE e.`latitud` IS NOT NULL AND e.`latitud` != ''
               AND e.`longitud` IS NOT NULL AND e.`longitud` != ''
-              AND (e.`Nombres` LIKE %s OR e.`Numempleado` LIKE %s)
+              AND (e.`Nombres` LIKE %s OR e.`Numempleado` LIKE %s){filtro_un}
             LIMIT 20;
         """
 
-        like_q = f"%{q}%"
         with connection.cursor() as cursor:
-            cursor.execute(query, [like_q, like_q])
+            cursor.execute(query, params)
             columns = [col[0] for col in cursor.description]
             results = [dict(zip(columns, row)) for row in cursor.fetchall()]
 
@@ -9061,6 +9587,15 @@ class AnuenciaAnexoViewSet(viewsets.ModelViewSet):
     marcó como eliminado es más sensible que el uso normal de Anuencia, así
     que no basta con el permiso general — un rol puede ver/editar Anexo 2
     corrientes sin poder husmear ni reactivar los eliminados.
+
+    NEGADO A PROPÓSITO al sub-tab completo para los roles con alcance por UN
+    (ver el bloque-guía de alcance más arriba en este archivo): un Anexo 2 es
+    un documento institucional que puede mezclar plazas de varias unidades en
+    una misma hoja, así que "el Anexo 2 de una unidad" no existe como
+    concepto — no hay por dónde recortar el listado sin inventar una regla de
+    negocio. Además este ViewSet escribe (POST/PATCH/generar/eliminar) sin un
+    permiso de edición aparte, y a un rol restringido no se le abren
+    superficies de escritura. El frontend le oculta el sub-tab.
     """
 
     queryset = AnuenciaAnexo.objects.select_related(
@@ -9445,6 +9980,10 @@ class MovimientosPersonalHistorialView(APIView):
         return self._historial(request, emp_ids)
 
     def _historial(self, request, emp_ids):
+        # La trayectoria se devuelve completa (UN_SCOPE_EXENTO), pero solo de
+        # personas que el rol puede alcanzar desde su unidad — ver
+        # _numempleados_alcanzables. Las demás salen de la lista en silencio.
+        emp_ids = _numempleados_alcanzables(emp_ids, get_un_scope_for_request(request))
 
         from django.db import connection
 
@@ -9546,6 +10085,9 @@ class MovimientosPosicionHistorialView(APIView):
         return self._historial(request, posiciones)
 
     def _historial(self, request, posiciones):
+        # Misma puerta de entrada que en el historial por empleado: contenido
+        # completo, pero solo de posiciones alcanzables desde su unidad.
+        posiciones = _posiciones_alcanzables(posiciones, get_un_scope_for_request(request))
 
         from django.db import connection
 
@@ -9715,7 +10257,16 @@ class MovimientosPersonalStatsView(APIView):
 
 
 class CuadroVacanciaView(APIView):
-    # Sub-tab "Cuadros" dentro de Mov. Posiciones (CuadrosVacanciaTab en el front).
+    """Sub-tab "Cuadros" dentro de Mov. Posiciones (CuadrosVacanciaTab en el front).
+
+    NO SE PUEDE RECORTAR POR UN, negado de forma permanente a los roles con
+    alcance: `cuadro_vacancia` es una foto diaria ya agregada (ocupadas /
+    vacantes / totales, permanente vs eventual) de TODA la ANAM, una fila por
+    día y sin ninguna columna de unidad. Igual que BajasHistoricoView, el
+    número es global por construcción: no hay nada que filtrar, habría que
+    empezar a persistir el corte por unidad.
+    """
+
     view_permission = "authentication.view_plantilla_mov_posiciones"
 
     def get(self, request, *args, **kwargs):
@@ -10206,11 +10757,21 @@ class PlantillaHistoricaView(APIView):
 
 
 class ConteoPlazasHistoricoSerieView(APIView):
-    # Serie mensual (corte a fin de cada mes desde 2022-01) de plazas
-    # totales/activas/inactivas/ocupadas/vacantes, para la gráfica histórica
-    # de CuadrosVacanciaTab. El SP recorre mes a mes con joins pesados sobre
-    # MOV_POS/cp_tbl_mov_completo_29_05_26 (~25s), de ahí el cache largo: el
-    # histórico de meses cerrados no cambia, solo el corte del mes en curso.
+    """Serie mensual (corte a fin de cada mes desde 2022-01) de plazas
+    totales/activas/inactivas/ocupadas/vacantes, para la gráfica histórica
+    de CuadrosVacanciaTab. El SP recorre mes a mes con joins pesados sobre
+    MOV_POS/cp_tbl_mov_completo_29_05_26 (~25s), de ahí el cache largo: el
+    histórico de meses cerrados no cambia, solo el corte del mes en curso.
+
+    NO SE RECORTA POR UN, negado a los roles con alcance: el SP devuelve 5
+    conteos por mes sin dimensión de unidad. A diferencia de
+    `cuadro_vacancia`, aquí los datos crudos sí existen (el SP los recorre en
+    vivo desde MOV_POS), así que esto SÍ sería recuperable — pero implica
+    reescribir `sp_conteo_plazas_historico_serie` para agrupar por `Cd UN` y
+    volver a medir sus ~25s por corrida. Queda como trabajo aparte, no como
+    olvido: mientras tanto el frontend le oculta la gráfica a esos roles.
+    """
+
     view_permission = "authentication.view_plantilla_mov_posiciones"
 
     def get(self, request, *args, **kwargs):
@@ -10246,6 +10807,11 @@ class PlazasMovimientoMesView(APIView):
     # cp_tbl_mov_completo_29_05_26 (no hace falta: aquí solo importa el
     # tránsito Activa/Inactiva, no Ocupada/Vacante) y acotado a las dos
     # posiciones cuyo estado cambió, no al conteo agregado.
+    #
+    # ALCANCE POR UN: la caché guarda el resultado COMPLETO (las CTE de
+    # snapshot son lo caro, ~1-3s, y no dependen de quién pregunta); el
+    # recorte va al salir, sobre `cd_un`, que ya viene mapeado en cada fila.
+    un_scope = UN_SCOPE_APLICADO
     view_permission = "authentication.view_plantilla_mov_posiciones"
 
     # A pedido del usuario (2026-08-12): la fila devuelta es el registro
@@ -10390,10 +10956,13 @@ class PlazasMovimientoMesView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        un_scope = get_un_scope_for_request(request)
         cache_key = f"plazas_movimiento_mes_{tipo}_{fecha_anterior}_{fecha_actual}"
         cached_data = cache.get(cache_key)
         if cached_data is not None:
-            return Response(cached_data, status=status.HTTP_200_OK)
+            return Response(
+                _scope_un_filas(cached_data, un_scope), status=status.HTTP_200_OK
+            )
 
         query = self._QUERY_CREACION if tipo == "creacion" else self._QUERY_DESACTIVACION
 
@@ -10429,8 +10998,13 @@ class PlazasMovimientoMesView(APIView):
                 "plazas_movimiento_mes tipo=%s %s->%s: %dms, %d filas",
                 tipo, fecha_anterior, fecha_actual, elapsed_ms, len(results),
             )
+            # Se cachea SIN recortar y se responde recortado — nunca al revés,
+            # o la primera petición de un rol restringido dejaría su vista
+            # parcial cacheada para todos los demás.
             cache.set(cache_key, results, 3600)
-            return Response(results, status=status.HTTP_200_OK)
+            return Response(
+                _scope_un_filas(results, un_scope), status=status.HTTP_200_OK
+            )
         except Exception:
             logger.exception("Error inesperado en {}".format(request.path))
             return Response(
@@ -10439,15 +11013,28 @@ class PlazasMovimientoMesView(APIView):
 
 
 class DesgloseJerarquicoView(APIView):
+    """Filas plaza×persona del sub-tab Cuadros Vacancia.
+
+    ALCANCE POR UN: la caché guarda el cruce COMPLETO y el recorte va al
+    salir, sobre la columna `Cd UN` de EMPLEADOS_COMPLETOS_SIG que ya trae
+    cada fila (aquí la unidad que manda es la de la persona, no la de la
+    plaza: cada renglón es un empleado con nombre, RFC y CURP).
+    """
+
+    un_scope = UN_SCOPE_APLICADO
     view_permission = "authentication.view_plantilla_mov_posiciones"
 
     def get(self, request, *args, **kwargs):
         from django.db import connection
 
+        un_scope = get_un_scope_for_request(request)
         cache_key = "desglose_jerarquico"
         cached_data = cache.get(cache_key)
         if cached_data is not None:
-            return Response(cached_data, status=status.HTTP_200_OK)
+            return Response(
+                _scope_un_filas(cached_data, un_scope, key="Cd UN"),
+                status=status.HTTP_200_OK,
+            )
 
         # SELECT amplía todas las columnas de EMPLEADOS_COMPLETOS_SIG expuestas
         # en ALL_AVAILABLE_COLUMNS del front (EmployeesModal.jsx) — antes solo
@@ -10540,7 +11127,10 @@ class DesgloseJerarquicoView(APIView):
                 results = [dict(zip(columns, row)) for row in cursor.fetchall()]
 
             cache.set(cache_key, results, None)
-            return Response(results, status=status.HTTP_200_OK)
+            return Response(
+                _scope_un_filas(results, un_scope, key="Cd UN"),
+                status=status.HTTP_200_OK,
+            )
         except Exception:
             logger.exception("Error inesperado en {}".format(request.path))
             return Response(
@@ -10549,15 +11139,23 @@ class DesgloseJerarquicoView(APIView):
 
 
 class DesgloseJerarquicoOcupadosView(APIView):
+    """Igual que DesgloseJerarquicoView pero solo plazas ocupadas — mismo
+    recorte por UN, misma columna `Cd UN`."""
+
+    un_scope = UN_SCOPE_APLICADO
     view_permission = "authentication.view_plantilla_mov_posiciones"
 
     def get(self, request, *args, **kwargs):
         from django.db import connection
 
+        un_scope = get_un_scope_for_request(request)
         cache_key = "desglose_jerarquico_ocupados"
         cached_data = cache.get(cache_key)
         if cached_data is not None:
-            return Response(cached_data, status=status.HTTP_200_OK)
+            return Response(
+                _scope_un_filas(cached_data, un_scope, key="Cd UN"),
+                status=status.HTTP_200_OK,
+            )
 
         # SELECT amplía todas las columnas de EMPLEADOS_COMPLETOS_SIG expuestas
         # en ALL_AVAILABLE_COLUMNS del front (EmployeesModal.jsx) — ver mismo
@@ -10645,7 +11243,10 @@ class DesgloseJerarquicoOcupadosView(APIView):
                 results = [dict(zip(columns, row)) for row in cursor.fetchall()]
 
             cache.set(cache_key, results, None)
-            return Response(results, status=status.HTTP_200_OK)
+            return Response(
+                _scope_un_filas(results, un_scope, key="Cd UN"),
+                status=status.HTTP_200_OK,
+            )
         except Exception:
             logger.exception("Error inesperado en {}".format(request.path))
             return Response(
@@ -10660,15 +11261,22 @@ class AduanasOcupacionVacanciaView(APIView):
     ocupación y vacancia, con el mismo criterio de "plaza activa" que
     DesgloseJerarquicoView/DesgloseJerarquicoOcupadosView (Cuadros Vacancia),
     para que los totales cuadren entre subtabs.
+
+    ALCANCE POR UN: el agregado no se puede recortar una vez armado (son
+    conteos, ya no se sabe de quién era cada uno), así que la caché guarda los
+    GRUPOS CRUDOS con su `cd_un` —una fila por aduana × nivel jerárquico ×
+    nivel × unidad— y la tabla pivote se arma en cada petición con los grupos
+    que le tocan. Mismo patrón que EmpleadosEstatusPorNivelUaView: una sola
+    copia sin recortar en Redis, el recorte siempre a la salida.
     """
 
+    un_scope = UN_SCOPE_APLICADO
     view_permission = "authentication.view_plantilla_mov_posiciones"
 
     def get(self, request, *args, **kwargs):
-        cache_key = "aduanas_ocupacion_vacancia"
-        cached_data = cache.get(cache_key)
-        if cached_data is not None:
-            return Response(cached_data, status=status.HTTP_200_OK)
+        un_scope = get_un_scope_for_request(request)
+        cache_key = "aduanas_ocupacion_vacancia_grupos"
+        grupos = cache.get(cache_key)
 
         def agg_query(estado_nomina_op):
             return f"""
@@ -10679,6 +11287,7 @@ class AduanasOcupacionVacanciaView(APIView):
                 TRIM(e.`longitud`) AS longitud,
                 TRIM(e.`NJ`) AS nj,
                 TRIM(e.`Nivel`) AS nivel,
+                TRIM(e.`Cd UN`) AS cd_un,
                 COUNT(*) AS cantidad
             FROM EMPLEADOS_COMPLETOS_SIG e
             INNER JOIN MOV_POS m ON e.`Posición` = m.`Nº Pos Actual`
@@ -10690,18 +11299,25 @@ class AduanasOcupacionVacanciaView(APIView):
               AND m.`Partida Ptal` <> '11401'
               AND e.`Unidad Administrativa` LIKE 'Aduana %%'
               AND e.`Aduana` IS NOT NULL AND e.`Aduana` <> ''
-            GROUP BY TRIM(e.`Aduana`), TRIM(e.`tipo`), TRIM(e.`latitud`), TRIM(e.`longitud`), TRIM(e.`NJ`), TRIM(e.`Nivel`);
+            GROUP BY TRIM(e.`Aduana`), TRIM(e.`tipo`), TRIM(e.`latitud`), TRIM(e.`longitud`), TRIM(e.`NJ`), TRIM(e.`Nivel`), TRIM(e.`Cd UN`);
             """
 
         try:
-            with connection.cursor() as cursor:
-                cursor.execute(agg_query("="))
-                columns = [col[0] for col in cursor.description]
-                vac_rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+            if grupos is None:
+                with connection.cursor() as cursor:
+                    cursor.execute(agg_query("="))
+                    columns = [col[0] for col in cursor.description]
+                    vac_todas = [dict(zip(columns, row)) for row in cursor.fetchall()]
 
-                cursor.execute(agg_query("<>"))
-                columns = [col[0] for col in cursor.description]
-                ocu_rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+                    cursor.execute(agg_query("<>"))
+                    columns = [col[0] for col in cursor.description]
+                    ocu_todas = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+                grupos = {"vacancia": vac_todas, "ocupacion": ocu_todas}
+                cache.set(cache_key, grupos, None)
+
+            vac_rows = _scope_un_filas(grupos["vacancia"], un_scope)
+            ocu_rows = _scope_un_filas(grupos["ocupacion"], un_scope)
 
             # dict() sobre tuplas con clave duplicada se queda con la última:
             # NIVELES_JERARQUICOS define (3, "Director") antes que (3, "Titular de
@@ -10771,7 +11387,10 @@ class AduanasOcupacionVacanciaView(APIView):
                 "vacancia": build_pivot(vac_rows),
             }
 
-            cache.set(cache_key, resultado, None)
+            # La tabla pivote NO se cachea: lo cacheado son los grupos crudos
+            # (arriba), que sí son iguales para todos. Armarla cuesta un
+            # recorrido sobre unos cientos de grupos, nada frente al riesgo de
+            # dejar cacheada la vista recortada de un rol.
             return Response(resultado, status=status.HTTP_200_OK)
         except Exception:
             logger.exception("Error inesperado en {}".format(request.path))

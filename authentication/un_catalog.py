@@ -48,12 +48,16 @@ def normalizar_cd_un(raw):
 #   que lo traen (todas de 2022-2023). No existe ni una sola fila con este
 #   código en la plantilla activa: solo sobrevive en BAJAS_SIG (18) y en
 #   MOV_POS (1,144).
+#   "00011" -> "00100" (Dirección General de Operación Aduanera). Confirmado
+#   por el usuario revisando los movimientos que lo traen (3 filas en
+#   cp_tbl_mov_completo, 17 en MOV_POS).
 #
-# "00011" (17 filas en MOV_POS) queda sin mapear a propósito: no hay evidencia
-# de a qué unidad corresponde, y sin mapeo simplemente no lo ve ningún rol
-# restringido (falla cerrado). Si aparece a quién pertenece, va aquí.
+# Estos dos son los ÚNICOS códigos fuera de catálogo que aparecen en los datos:
+# auditadas las tres tablas con UN (EMPLEADOS_COMPLETOS_SIG, BAJAS_SIG, MOV_POS
+# y cp_tbl_mov_completo), todo lo demás cae en las 13 unidades generales.
 UN_ALIAS = {
     "00005": "00004",
+    "00011": "00100",
 }
 
 
