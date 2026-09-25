@@ -12,6 +12,7 @@ from django.contrib.auth import authenticate, login, update_session_auth_hash
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db.models import Count
+from django.shortcuts import get_object_or_404
 from django.db.models.functions import ExtractHour, TruncDate
 from django.utils import timezone
 from . import mantenimiento
@@ -467,21 +468,28 @@ class TableroLayoutView(views.APIView):
     MAX_NOMBRE = 60
 
     def get(self, request):
-        layout = TableroLayout.objects.filter(usuario=request.user).first()
-        return Response({
-            "widgets": layout.widgets if layout else [],
-            "escritorios": layout.escritorios if layout else [],
-        })
+        return Response(self.leer_layout(request.user))
 
     def put(self, request):
-        widgets = request.data.get("widgets")
+        return self.guardar_layout(request.user, request.data)
+
+    @staticmethod
+    def leer_layout(usuario):
+        layout = TableroLayout.objects.filter(usuario=usuario).first()
+        return {
+            "widgets": layout.widgets if layout else [],
+            "escritorios": layout.escritorios if layout else [],
+        }
+
+    def guardar_layout(self, usuario, data):
+        widgets = data.get("widgets")
         if not isinstance(widgets, list):
             return Response(
                 {"error": "'widgets' debe ser una lista."}, status=status.HTTP_400_BAD_REQUEST
             )
         defaults = {"widgets": widgets}
-        if "escritorios" in request.data:
-            escritorios = request.data.get("escritorios")
+        if "escritorios" in data:
+            escritorios = data.get("escritorios")
             if (
                 not isinstance(escritorios, list)
                 or len(escritorios) > self.MAX_ESCRITORIOS
@@ -492,10 +500,33 @@ class TableroLayoutView(views.APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             defaults["escritorios"] = [n.strip()[: self.MAX_NOMBRE] for n in escritorios]
-        layout, _ = TableroLayout.objects.update_or_create(
-            usuario=request.user, defaults=defaults
-        )
+        layout, _ = TableroLayout.objects.update_or_create(usuario=usuario, defaults=defaults)
         return Response({"widgets": layout.widgets, "escritorios": layout.escritorios})
+
+
+class TableroLayoutUsuarioView(TableroLayoutView):
+    """
+    Lo mismo que TableroLayoutView pero sobre el tablero de OTRO usuario,
+    identificado por su id de Whitelist. Es para que un administrador cargue un
+    tablero por defecto a un usuario recién dado de alta (o respalde el de
+    alguien), por eso exige `manage_usuarios` en vez de ir autoescopado.
+
+    Si el usuario de Django todavía no existe (alta sin contraseña) se crea
+    igual que al administrarlo desde la whitelist, para poder colgarle el layout.
+    """
+
+    view_permission = "authentication.manage_usuarios"
+    edit_permission = "authentication.manage_usuarios"
+
+    def _usuario(self, whitelist_id):
+        entry = get_object_or_404(Whitelist.objects.select_related("user", "rol"), pk=whitelist_id)
+        return sincronizar_usuario_django(entry)
+
+    def get(self, request, whitelist_id):
+        return Response(self.leer_layout(self._usuario(whitelist_id)))
+
+    def put(self, request, whitelist_id):
+        return self.guardar_layout(self._usuario(whitelist_id), request.data)
 
 
 class MantenimientoView(views.APIView):

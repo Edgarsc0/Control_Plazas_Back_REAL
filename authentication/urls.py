@@ -9,6 +9,7 @@ from .views import (
     PresenceHeartbeatView,
     PresenceListView,
     RoleViewSet,
+    TableroLayoutUsuarioView,
     TableroLayoutView,
     UserVisitsView,
     WhitelistViewSet,
@@ -29,4 +30,5 @@ urlpatterns = [
     path('visits/', UserVisitsView.as_view(), name='user-visits'),
     path('maintenance/', MantenimientoView.as_view(), name='maintenance'),
     path('tablero-layout/', TableroLayoutView.as_view(), name='tablero-layout'),
+    path('tablero-layout/usuario/<int:whitelist_id>/', TableroLayoutUsuarioView.as_view(), name='tablero-layout-usuario'),
 ]
