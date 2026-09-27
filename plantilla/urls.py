@@ -48,6 +48,8 @@ from .views import (
     FiltrosGuardadosView,
     FiltroGuardadoDetalleView,
     CadenaMandoView,
+    CadenaMandoSugerenciasView,
+    EmpleadosEstatusPlantillaView,
     ZafiroBitacoraView,
     ZafiroDuracionPromedioPorHoraView,
     UltimaActualizacionZafiroView,
@@ -560,6 +562,16 @@ urlpatterns = [
         "cadena_mando/",
         CadenaMandoView.as_view(),
         name="cadena_mando",
+    ),
+    path(
+        "empleados/estatus/",
+        EmpleadosEstatusPlantillaView.as_view(),
+        name="empleados_estatus_plantilla",
+    ),
+    path(
+        "cadena_mando/sugerencias/",
+        CadenaMandoSugerenciasView.as_view(),
+        name="cadena_mando_sugerencias",
     ),
     path(
         "bajas_sig/",

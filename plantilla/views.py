@@ -2609,10 +2609,32 @@ class EmpleadosCompletosActivosDetalleView(APIView):
         oficio = request.query_params.get("oficio")
         nivel = request.query_params.get("nivel")
         search = (request.query_params.get("search") or "").strip()
+        unidad_administrativa = (request.query_params.get("unidad_administrativa") or "").strip()
         # Se aplica sin importar cuál de los 3 permisos OR de arriba destrabó
         # el acceso — los 3 tabs comparten este dataset, así que el scope debe
         # cubrirlos a la vez (ver bloque de comentario junto a _scope_un_filas).
         un_scope = get_un_scope_for_request(request)
+
+        if unidad_administrativa:
+            # Plantilla completa de UNA unidad administrativa, tal cual la tabla:
+            # SELECT * FROM EMPLEADOS_COMPLETOS_SIG WHERE unidad_administrativa = <UA>
+            # (sin limitar a posiciones activas: incluye vacantes y demás filas de la UA).
+            # La usa el modal "Plantilla de la unidad" de los widgets del tablero. Sin
+            # caché (una clave por UA) y con el recorte por UN a nivel SQL, igual que
+            # la rama `search`. No se ordena aquí: el front ordena por nivel tabular con
+            # la regla de negocio (P<D<S<A<K<J<H), que SQL no puede expresar.
+            try:
+                queryset = EmpleadosCompletosSig.objects.filter(
+                    unidad_administrativa=unidad_administrativa
+                )
+                queryset = _scope_un_queryset(queryset, un_scope)
+                resultados = _enriquecer_empleados_completos_rows(list(queryset.values()))
+                return _responder_detalle_scoped(request, resultados, un_scope)
+            except Exception:
+                logger.exception("Error inesperado en {}".format(request.path))
+                return Response(
+                    {"error": "Error interno del servidor"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
 
         if search:
             # Búsqueda libre sobre el universo de posiciones activas (mismo
@@ -7062,6 +7084,141 @@ class CadenaMandoView(APIView):
                 {"error": "Error interno del servidor"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
+
+
+class CadenaMandoSugerenciasView(APIView):
+    """Autocompletado del buscador de "Cadena de mando" mientras se escribe.
+
+    `CadenaMandoView` acepta posición, nombre o número de empleado, así que las
+    sugerencias buscan por los tres: posición o No. Empleado que EMPIEZAN con lo
+    escrito, o nombre que contenga TODAS las palabras escritas (en cualquier
+    orden, sin distinguir mayúsculas). Al elegir una sugerencia el front manda
+    la `posicion` exacta, que es lo que `CadenaMandoView` resuelve sin
+    ambigüedad (un nombre parcial podría coincidir con varias personas y ese
+    endpoint se queda con la primera).
+
+    GET /plantilla/cadena_mando/sugerencias/?q=<texto>[&limit=<n>]
+
+    Mismos permisos que `CadenaMandoView` y, igual que ella, no declara
+    `un_scope`: HasModulePermission la niega a los roles con alcance por
+    Unidad de Negocio, así que nunca expone filas fuera del alcance.
+    """
+
+    view_permission = (
+        "authentication.view_organigrama_institucional",
+        "authentication.view_organigrama_alineacion",
+    )
+    LIMITE_DEFAULT = 8
+    LIMITE_MAXIMO = 20
+
+    def get(self, request, *args, **kwargs):
+        termino = (request.query_params.get("q") or "").strip()
+        if len(termino) < 2:
+            return Response([], status=status.HTTP_200_OK)
+
+        try:
+            limite = min(int(request.query_params.get("limit", self.LIMITE_DEFAULT)), self.LIMITE_MAXIMO)
+        except (TypeError, ValueError):
+            limite = self.LIMITE_DEFAULT
+
+        por_nombre = Q()
+        for palabra in termino.split():
+            por_nombre &= Q(nombres__icontains=palabra)
+        filtro = Q(posicion__istartswith=termino) | Q(id_empleado__istartswith=termino) | por_nombre
+
+        filas = list(
+            EmpleadosCompletosSig.objects.filter(filtro)
+            .exclude(posicion__isnull=True)
+            .exclude(posicion="")
+            .values("posicion", "nombre_puesto_funcional", "nombres", "id_empleado")
+            .order_by("posicion")
+            .distinct()[:limite]
+        )
+        resultados = [
+            {
+                "posicion": f["posicion"],
+                "puesto": f["nombre_puesto_funcional"],
+                "ocupante": (f["nombres"] or "").strip() or None,
+                "id_empleado": (f["id_empleado"] or "").strip() or None,
+            }
+            for f in filas
+        ]
+        return Response(resultados, status=status.HTTP_200_OK)
+
+
+class EmpleadosEstatusPlantillaView(APIView):
+    """¿Sigue activo en la plantilla o ya causó baja? Para un lote de No. Empleado.
+
+    Pensado para los buscadores de personas (p. ej. "Buscar movimiento"), donde tras encontrar a
+    alguien la pregunta inmediata es "¿sigue activo?".
+
+    GET /plantilla/empleados/estatus/?empleados=<id>,<id>,...   (máximo 300)
+
+    Responde `{ "<id>": { "baja": bool, "fecha_baja": str|None, "en_plantilla": bool } }`:
+      - `baja`: aparece en BAJAS_SIG (criterio de negocio de "ya causó baja"); `fecha_baja` es su
+        fecha efectiva más reciente.
+      - `en_plantilla`: aparece hoy en EMPLEADOS_COMPLETOS_SIG (plantilla vigente). Sirve para no
+        marcar como baja a quien causó baja y luego REINGRESÓ (aparece en las dos tablas): el
+        front decide "activo" si `en_plantilla`, y "baja" solo si `baja` y no `en_plantilla`.
+
+    Solo responde por los ids que se le mandan, que salen de filas que el usuario ya puede ver en
+    su propio buscador (ya recortadas por su alcance de UN); por eso declara `un_scope` sin
+    volver a recortar: filtrar aquí las bajas por UN respondería "activo" para una baja de otra
+    unidad, que sería falso. HasModulePermission niega esta vista a roles sin permiso de módulo.
+    """
+
+    un_scope = UN_SCOPE_APLICADO
+
+    view_permission = (
+        "authentication.view_plantilla_movimientos",
+        "authentication.view_plantilla_mov_posiciones",
+        "authentication.view_plantilla_detalle",
+        "authentication.view_plantilla_bajas",
+    )
+    MAX_IDS = 300
+
+    def get(self, request, *args, **kwargs):
+        crudos = (request.query_params.get("empleados") or "").split(",")
+        ids = []
+        vistos = set()
+        for r in crudos:
+            i = r.strip()
+            if i and i.upper() != "VACANTE" and i not in vistos:
+                vistos.add(i)
+                ids.append(i)
+        ids = ids[: self.MAX_IDS]
+        if not ids:
+            return Response({}, status=status.HTTP_200_OK)
+
+        from django.db import connection
+
+        marcadores = ",".join(["%s"] * len(ids))
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"""SELECT TRIM(`NO_EMPLEADO`), MAX(`FECHA_EFECTIVA`)
+                    FROM BAJAS_SIG WHERE TRIM(`NO_EMPLEADO`) IN ({marcadores})
+                    GROUP BY TRIM(`NO_EMPLEADO`)""",
+                ids,
+            )
+            bajas = {fila[0]: fila[1] for fila in cursor.fetchall()}
+            cursor.execute(
+                f"""SELECT DISTINCT TRIM(`Numempleado`)
+                    FROM EMPLEADOS_COMPLETOS_SIG WHERE TRIM(`Numempleado`) IN ({marcadores})""",
+                ids,
+            )
+            en_plantilla = {fila[0] for fila in cursor.fetchall()}
+
+        return Response(
+            {
+                i: {
+                    "baja": i in bajas,
+                    "fecha_baja": (str(bajas[i]) if bajas.get(i) else None),
+                    "en_plantilla": i in en_plantilla,
+                }
+                for i in ids
+            },
+            status=status.HTTP_200_OK,
+        )
 
 from .models import ZafiroBitacora
 
