@@ -21,6 +21,7 @@ from .models import (
     ModulePermission,
     PresenceLog,
     TableroLayout,
+    MemoriaColumnas,
     Whitelist,
     sincronizar_usuario_django,
 )
@@ -582,3 +583,85 @@ class MantenimientoView(views.APIView):
         config.exentos.set(Whitelist.objects.filter(id__in=set(exentos) | set(propio)))
         mantenimiento.invalidar_cache()
         return Response(self._payload(request))
+
+
+class MemoriasColumnasView(views.APIView):
+    """Memorias de columnas (hasta 3 por tabla) del usuario autenticado — ver MemoriaColumnas.
+    Autoescopado a `request.user` (nadie lee ni escribe las de otro), así que como
+    TableroLayoutView no declara permiso de módulo: son datos propios, no filas de empleados.
+
+    GET    ?tabla=<t>                              -> [{slot, nombre, columnas}, ...]
+    PUT    {tabla, slot, nombre, columnas: [...]}  -> guarda/reemplaza ese slot
+    DELETE ?tabla=<t>&slot=<n>                     -> borra ese slot
+
+    Restricción de columnas del rol: en `plantilla_detalle` las columnas se recortan al guardar
+    contra RolColumnScope (+ el set fijo siempre incluido + la foto). El front ya solo ofrece
+    las permitidas; esto es la segunda capa, para que una memoria nunca las guarde aunque se
+    llame a la API directo. Las otras tablas no tienen restricción de columnas por rol.
+    """
+
+    TABLAS = {"plantilla_detalle", "bajas", "mov_posiciones", "movimientos", "alineacion"}
+    MAX_COLUMNAS = 300
+    MAX_NOMBRE = 40
+
+    def _tabla(self, valor):
+        tabla = (valor or "").strip()
+        return tabla if tabla in self.TABLAS else None
+
+    @staticmethod
+    def _serializar(m):
+        return {"slot": m.slot, "nombre": m.nombre, "columnas": m.columnas}
+
+    def get(self, request):
+        tabla = self._tabla(request.query_params.get("tabla"))
+        if not tabla:
+            return Response({"error": "Tabla no válida."}, status=status.HTTP_400_BAD_REQUEST)
+        memorias = MemoriaColumnas.objects.filter(usuario=request.user, tabla=tabla).order_by("slot")
+        return Response([self._serializar(m) for m in memorias])
+
+    def put(self, request):
+        data = request.data if isinstance(request.data, dict) else {}
+        tabla = self._tabla(data.get("tabla"))
+        try:
+            slot = int(data.get("slot"))
+        except (TypeError, ValueError):
+            slot = None
+        columnas = data.get("columnas")
+        if not tabla or slot not in MemoriaColumnas.SLOTS:
+            return Response({"error": "Tabla o espacio de memoria no válido."}, status=status.HTTP_400_BAD_REQUEST)
+        if (
+            not isinstance(columnas, list)
+            or len(columnas) > self.MAX_COLUMNAS
+            or not all(isinstance(c, str) and 0 < len(c) <= 100 for c in columnas)
+        ):
+            return Response({"error": "'columnas' debe ser una lista de claves."}, status=status.HTTP_400_BAD_REQUEST)
+
+        columnas = list(dict.fromkeys(c.strip() for c in columnas))
+        if tabla == "plantilla_detalle":
+            from .columnas_detalle_catalog import COLUMNAS_DETALLE_SIEMPRE_INCLUIDAS
+            from .scoping import get_columnas_scope_for_request
+
+            permitidas = get_columnas_scope_for_request(request)
+            if permitidas is not None:
+                validas = set(permitidas) | set(COLUMNAS_DETALLE_SIEMPRE_INCLUIDAS) | {"foto"}
+                columnas = [c for c in columnas if c in validas]
+        if not columnas:
+            return Response({"error": "La memoria debe tener al menos una columna."}, status=status.HTTP_400_BAD_REQUEST)
+
+        nombre = str(data.get("nombre") or "").strip()[: self.MAX_NOMBRE]
+        memoria, _ = MemoriaColumnas.objects.update_or_create(
+            usuario=request.user, tabla=tabla, slot=slot,
+            defaults={"nombre": nombre, "columnas": columnas},
+        )
+        return Response(self._serializar(memoria))
+
+    def delete(self, request):
+        tabla = self._tabla(request.query_params.get("tabla"))
+        try:
+            slot = int(request.query_params.get("slot"))
+        except (TypeError, ValueError):
+            slot = None
+        if not tabla or slot not in MemoriaColumnas.SLOTS:
+            return Response({"error": "Tabla o espacio de memoria no válido."}, status=status.HTTP_400_BAD_REQUEST)
+        MemoriaColumnas.objects.filter(usuario=request.user, tabla=tabla, slot=slot).delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)

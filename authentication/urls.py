@@ -11,6 +11,7 @@ from .views import (
     RoleViewSet,
     TableroLayoutUsuarioView,
     TableroLayoutView,
+    MemoriasColumnasView,
     UserVisitsView,
     WhitelistViewSet,
 )
@@ -30,5 +31,6 @@ urlpatterns = [
     path('visits/', UserVisitsView.as_view(), name='user-visits'),
     path('maintenance/', MantenimientoView.as_view(), name='maintenance'),
     path('tablero-layout/', TableroLayoutView.as_view(), name='tablero-layout'),
+    path('memorias-columnas/', MemoriasColumnasView.as_view(), name='memorias-columnas'),
     path('tablero-layout/usuario/<int:whitelist_id>/', TableroLayoutUsuarioView.as_view(), name='tablero-layout-usuario'),
 ]

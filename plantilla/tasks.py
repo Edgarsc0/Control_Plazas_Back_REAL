@@ -1760,13 +1760,17 @@ def importar_zafiro(self):
                 "active_position_codes",
                 "active_employees_filtered",
                 "plantilla_vacantes_por_nivel",
-                "plantilla_vacantes_por_nivel_resumen",
+                "plantilla_vacantes_por_nivel_resumen",  # forma vieja, ya sin uso
+                "plantilla_vacantes_por_nivel_resumen_grupos",
                 "empleados_completos_estatus_resumen",
                 "empleados_completos_activos_detalle",
                 "empleados_estatus_por_nivel_ua",  # forma vieja, ya sin uso
-                "empleados_estatus_por_nivel_ua_grupos",
+                "empleados_estatus_por_nivel_ua_grupos",  # forma vieja, ya sin uso
+                "empleados_estatus_por_nivel_ua_grupos_v2",  # forma vieja, ya sin uso
+                "empleados_estatus_por_nivel_ua_grupos_v3",
                 "empleados_distribucion_geografica",  # forma vieja, ya sin uso
-                "empleados_distribucion_geografica_grupos",
+                "empleados_distribucion_geografica_grupos",  # forma vieja, ya sin uso
+                "empleados_distribucion_geografica_grupos_v2",
                 "mov_pos_detalle",
                 "mov_pos_card_stats",  # forma vieja, ya sin uso
                 "mov_pos_card_stats_grupos",

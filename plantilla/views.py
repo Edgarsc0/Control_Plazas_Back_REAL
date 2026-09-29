@@ -10,6 +10,7 @@ from django.core import exceptions
 from django.db.models import (
     Aggregate,
     Avg,
+    BooleanField,
     Case,
     CharField,
     Count,
@@ -163,6 +164,139 @@ def apply_text_search(queryset, query, fields):
     for field in fields:
         q |= Q(**{f"{field}__icontains": query})
     return queryset.filter(q)
+
+
+import re as _re_busqueda
+import unicodedata as _unicodedata_busqueda
+
+_SEPARADORES_BUSQUEDA = _re_busqueda.compile(r"[\s,;/|]+")
+_PALABRAS_BLOB = _re_busqueda.compile(r"[^a-z0-9]+")
+
+
+def _normalizar_busqueda(valor):
+    """Minúsculas y sin acentos (la ñ queda como n), igual que normalizeForSearch del front."""
+    if valor is None:
+        return ""
+    texto = _unicodedata_busqueda.normalize("NFD", str(valor))
+    return "".join(ch for ch in texto if not _unicodedata_busqueda.combining(ch)).lower()
+
+
+def _tokens_busqueda(query):
+    return [t for t in _SEPARADORES_BUSQUEDA.split(_normalizar_busqueda(query)) if t]
+
+
+def _tolerancia_token(token):
+    # Números y palabras cortas (posición, núm. de empleado, RFC parcial…) exigen coincidencia
+    # exacta: ahí un "casi igual" es otra persona.
+    if len(token) < 4 or any(ch.isdigit() for ch in token):
+        return 0
+    return 2 if len(token) >= 8 else 1
+
+
+def _distancia_acotada(a, b, maximo):
+    """Damerau-Levenshtein (con transposición adyacente) con corte temprano."""
+    if abs(len(a) - len(b)) > maximo:
+        return maximo + 1
+    prev2 = None
+    prev = list(range(len(b) + 1))
+    for i in range(1, len(a) + 1):
+        cur = [i] + [0] * len(b)
+        min_fila = i
+        for j in range(1, len(b) + 1):
+            costo = 0 if a[i - 1] == b[j - 1] else 1
+            v = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + costo)
+            if prev2 is not None and i > 1 and j > 1 and a[i - 1] == b[j - 2] and a[i - 2] == b[j - 1]:
+                v = min(v, prev2[j - 2] + 1)
+            cur[j] = v
+            min_fila = min(min_fila, v)
+        if min_fila > maximo:
+            return maximo + 1
+        prev2, prev = prev, cur
+    return prev[len(b)]
+
+
+def _palabras_cercanas(token, vocabulario, maximo, limite=40):
+    """Palabras del vocabulario a ≤ ``maximo`` ediciones del token (palabra completa o su
+    prefijo del mismo largo, para admitir escribir incompleto y con error: "eduadr")."""
+    n = len(token)
+    cercanas = set()
+    for p in vocabulario:
+        if abs(len(p) - n) <= maximo and _distancia_acotada(token, p, maximo) <= maximo:
+            cercanas.add(p)
+        # Prefijo con error solo en palabras de 6+ letras: con menos, "marin" ~ "marti(nez)".
+        elif n >= 6 and len(p) > n + maximo and _distancia_acotada(token, p[:n], maximo) <= maximo:
+            cercanas.add(p[:n])
+        if len(cercanas) >= limite:
+            break
+    return cercanas
+
+
+def _q_token(token_o_variantes, fields):
+    q = Q()
+    for variante in token_o_variantes:
+        for field in fields:
+            q |= Q(**{f"{field}__icontains": variante})
+    return q
+
+
+def apply_flexible_text_search(queryset, query, fields, campos_vocabulario=None):
+    """Búsqueda libre flexible (misma lógica que utils/busquedaFlexible.js del front):
+
+      1. Sin acentos ni mayúsculas (la collation *_ai_ci / *_unicode_ci ya lo resuelve en SQL).
+      2. Por palabras en cualquier orden: cada palabra debe aparecer en ALGÚN campo (AND de
+         ORs), así "cuevas eduardo" encuentra "Eduardo Cuevas Tello".
+      3. Solo si el nivel 2 no encontró NADA: tolerancia a errores de dedo leves por palabra
+         (1 edición; 2 si la palabra tiene 8+ letras). Nunca se mezclan exactas con aproximadas.
+         Números y palabras de < 4 letras siempre exigen coincidencia exacta.
+
+    El nivel 3 no recorre filas en Python: arma un vocabulario con las palabras distintas de
+    ``campos_vocabulario`` (por defecto ``fields``), busca las cercanas a cada palabra mal
+    escrita y vuelve a SQL con ellas. Escala igual con 11 mil filas que con 150 mil.
+
+    Todo opera sobre el ``queryset`` recibido, así que cualquier recorte previo (scope por UN,
+    posiciones activas) sigue aplicando igual en el nivel aproximado — y el vocabulario también
+    sale de ese queryset ya recortado, así que no revela palabras de otras unidades.
+    """
+    tokens = _tokens_busqueda(query)
+    if not tokens:
+        return queryset
+    exacto = queryset
+    for token in tokens:
+        exacto = exacto.filter(_q_token([token], fields))
+    tolerancias = [_tolerancia_token(t) for t in tokens]
+    if not any(tolerancias) or exacto.exists():
+        return exacto
+
+    vocabulario = set()
+    for campo in campos_vocabulario or fields:
+        for valor in queryset.order_by().values_list(campo, flat=True).distinct():
+            vocabulario.update(
+                w for w in _PALABRAS_BLOB.split(_normalizar_busqueda(valor)) if len(w) >= 3 and not w.isdigit()
+            )
+
+    aproximado = queryset
+    grupos = []
+    for token, maximo in zip(tokens, tolerancias):
+        variantes = {token}
+        if maximo:
+            variantes |= _palabras_cercanas(token, vocabulario, maximo)
+        grupos.append((token, variantes))
+        aproximado = aproximado.filter(_q_token(variantes, fields))
+
+    # SQL solo sabe de subcadenas: la variante "martin" (de "marin") también encaja en
+    # "Martinez". Se verifica en Python, sobre el puñado de candidatos, que cada variante
+    # cercana coincida con una PALABRA COMPLETA (o su prefijo, si así se encontró).
+    pks = []
+    for fila in aproximado.values_list("pk", *fields)[:500]:
+        blob = _normalizar_busqueda(" ".join(str(v) for v in fila[1:] if v is not None))
+        palabras = set(_PALABRAS_BLOB.split(blob))
+        if all(
+            token in blob
+            or any(p in palabras or (len(token) >= 6 and any(w.startswith(p) for w in palabras)) for p in variantes - {token})
+            for token, variantes in grupos
+        ):
+            pks.append(fila[0])
+    return queryset.filter(pk__in=pks)
 
 
 def annotate_fecha_anuencia(queryset, source_field="fecha_vacancia", overrides=None, baseline=None):
@@ -2020,59 +2154,102 @@ class PlantillaVacantesPorNivelView(APIView):
 
 
 class PlantillaVacantesPorNivelResumenView(APIView):
+    """Conteo global por estado de nómina (widget "Vacantes por nivel" e inicio del dashboard).
+
+    ALCANCE POR UN: esta vista conserva `IsAuthenticated` (la consume el inicio del dashboard,
+    para cualquier usuario), así que HasModulePermission no le aplica el scope — por eso lo
+    aplica ella misma. Antes devolvía los conteos globales a CUALQUIER usuario autenticado,
+    incluidos los roles restringidos a una UN. Ahora cachea los grupos crudos
+    (cd_un × estado × nivel × oficial, sin recortar, compartidos por todos) y cada petición
+    agrega solo las unidades que le tocan — mismo patrón que EmpleadosEstatusPorNivelUaView.
+
+    `?plantilla_oficial=1`: solo la plantilla oficial (ver _es_posicion_plantilla_oficial).
+    """
+
     permission_classes = [IsAuthenticated, SinMantenimiento]
+    un_scope = UN_SCOPE_APLICADO
+    CACHE_KEY = "plantilla_vacantes_por_nivel_resumen_grupos"
+
+    @classmethod
+    def _grupos(cls):
+        grupos = cache.get(cls.CACHE_KEY)
+        if grupos is not None:
+            return grupos
+        fuera_de_oficial = (
+            Q(posicion__startswith="103L") | Q(posicion__startswith="1039")
+            | Q(partida__regex=r"^\s*11401\s*$")
+        )
+        grupos = list(
+            EmpleadosCompletosSig.objects.filter(posicion__in=obtener_posiciones_activas())
+            .exclude(Q(estado_nomina__isnull=True) | Q(estado_nomina="Estado Nomina"))
+            .annotate(oficial=Case(When(fuera_de_oficial, then=Value(False)), default=Value(True),
+                                   output_field=BooleanField()))
+            .values("cd_un", "estado_nomina", "nivel", "oficial")
+            .annotate(count=Count("id"))
+        )
+        cache.set(cls.CACHE_KEY, grupos, None)
+        return grupos
 
     @staticmethod
-    def obtener_resumen_dinamico():
-        cache_key = "plantilla_vacantes_por_nivel_resumen"
-        cached_data = cache.get(cache_key)
-        if cached_data is not None:
-            return cached_data
-
-        active_position_codes = obtener_posiciones_activas()
-
-        base_qs = EmpleadosCompletosSig.objects.filter(
-            posicion__in=active_position_codes
-        ).exclude(Q(estado_nomina__isnull=True) | Q(estado_nomina="Estado Nomina"))
-
-        estados_unicos = base_qs.values_list("estado_nomina", flat=True).distinct()
-
-        # total_niveles: Conteo de niveles distintos
-        # total_registros: Conteo total de filas válidas
-        agregaciones = {
-            "total_niveles": Count("nivel", distinct=True),
-            "total_registros": Count("*"),
-        }
-
-        # 3. Iteramos sobre los estados para crear el equivalente al SUM(CASE...)
-        for estado in estados_unicos:
-            # Usamos el nombre del estado con la primera letra en mayúscula y sin espacios
-            # para ser consistentes con la otra vista y evitar colisiones con campos del modelo (que son minúsculas)
-            llave = estado.replace(" ", "_")
-
-            agregaciones[llave] = Sum(
-                Case(
-                    When(estado_nomina=estado, then=1),
-                    default=0,
-                    output_field=IntegerField(),
-                )
-            )
-
-        # 4. Ejecutamos la consulta pasándole el diccionario desempaquetado (**agregaciones)
-        resultado = base_qs.aggregate(**agregaciones)
-        cache.set(cache_key, resultado, None)
-
+    def _agregar(grupos, un_scope, solo_oficial=False):
+        # Misma forma de respuesta que antes: total_niveles, total_registros y una llave por
+        # estado (con espacios → "_"). Las llaves de estado se emiten todas, aunque en el
+        # alcance del usuario valgan 0, para que la forma no cambie según el rol.
+        resultado = {"total_niveles": 0, "total_registros": 0}
+        for g in grupos:
+            resultado.setdefault(g["estado_nomina"].replace(" ", "_"), 0)
+        niveles = set()
+        for g in _scope_un_filas(grupos, un_scope):
+            if solo_oficial and not g["oficial"]:
+                continue
+            resultado[g["estado_nomina"].replace(" ", "_")] += g["count"]
+            resultado["total_registros"] += g["count"]
+            if g["nivel"] is not None:
+                niveles.add(g["nivel"])
+        resultado["total_niveles"] = len(niveles)
         return resultado
+
+    @classmethod
+    def obtener_resumen_dinamico(cls, un_scope=None, solo_oficial=False):
+        return cls._agregar(cls._grupos(), un_scope, solo_oficial)
 
     def get(self, request, *args, **kwargs):
         try:
-            datos = self.obtener_resumen_dinamico()
+            datos = self.obtener_resumen_dinamico(
+                get_un_scope_for_request(request), _pide_plantilla_oficial(request)
+            )
             return Response(datos, status=status.HTTP_200_OK)
         except Exception:
             logger.exception("Error inesperado en {}".format(request.path))
             return Response(
                 {"error": "Error interno del servidor"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+
+def _es_posicion_plantilla_oficial(fila):
+    """Misma regla que el switch "Plantilla oficial" de Plantilla Detalle
+    (esPosicionPlantillaOficial en PlantillaDetalleTab.jsx) y que Cuadros de Vacancia: fuera los
+    laudos (103L…), el rango 1039… y las plazas PASEM (partida 11401). Los widgets del tablero
+    piden siempre este universo con `?plantilla_oficial=1`."""
+    posicion = str(fila.get("posicion") or "").strip()
+    if posicion.startswith("103L") or posicion.startswith("1039"):
+        return False
+    return str(fila.get("partida") or "").strip() != "11401"
+
+
+# La misma regla en SQL crudo (alias `e` = EMPLEADOS_COMPLETOS_SIG) y como Q del ORM. `%%` porque
+# se interpola en f-strings que luego pasan por cursor.execute con parámetros.
+SQL_PLANTILLA_OFICIAL = (
+    "(e.`Posición` NOT LIKE '103L%%' AND e.`Posición` NOT LIKE '1039%%' "
+    "AND COALESCE(TRIM(e.`Partida`), '') <> '11401')"
+)
+Q_FUERA_DE_PLANTILLA_OFICIAL = (
+    Q(posicion__startswith="103L") | Q(posicion__startswith="1039") | Q(partida__regex=r"^\s*11401\s*$")
+)
+
+
+def _pide_plantilla_oficial(request):
+    return request.query_params.get("plantilla_oficial") in ("1", "true")
 
 
 class EmpleadosCompletosEstatusNominaResumenView(APIView):
@@ -2096,6 +2273,8 @@ class EmpleadosCompletosEstatusNominaResumenView(APIView):
             filas = _scope_un_filas(
                 _obtener_detalle_activos_cacheado(), get_un_scope_for_request(request)
             )
+            if _pide_plantilla_oficial(request):
+                filas = [f for f in filas if _es_posicion_plantilla_oficial(f)]
 
             resumen = {
                 "total_registros": len(filas),
@@ -2617,15 +2796,26 @@ class EmpleadosCompletosActivosDetalleView(APIView):
 
         if unidad_administrativa:
             # Plantilla completa de UNA unidad administrativa, tal cual la tabla:
-            # SELECT * FROM EMPLEADOS_COMPLETOS_SIG WHERE unidad_administrativa = <UA>
-            # (sin limitar a posiciones activas: incluye vacantes y demás filas de la UA).
+            # SELECT * FROM EMPLEADOS_COMPLETOS_SIG WHERE unidad_administrativa = <UA>,
+            # acotado a POSICIONES ACTIVAS igual que las otras dos ramas de esta vista.
             # La usa el modal "Plantilla de la unidad" de los widgets del tablero. Sin
             # caché (una clave por UA) y con el recorte por UN a nivel SQL, igual que
             # la rama `search`. No se ordena aquí: el front ordena por nivel tabular con
             # la regla de negocio (P<D<S<A<K<J<H), que SQL no puede expresar.
+            #
+            # Antes esta rama NO filtraba por posición activa, "para incluir vacantes".
+            # Era una confusión de dos cosas distintas: `Estado Nómina` vacío (una plaza
+            # ACTIVA sin ocupante, que sí debe salir) y `Estado Psn = 'I'` en MOV_POS
+            # (una plaza DADA DE BAJA, que no). El resultado era que el modal contaba
+            # las plazas inactivas como vacantes y no cuadraba con nada más del sistema:
+            # para Tecnologías de la Información mostraba 306 filas (212 activos + 94
+            # "vacantes") mientras la pestaña Plantilla Detalle y el tooltip del propio
+            # widget mostraban 288 (212 + 76) — las 18 de diferencia eran posiciones
+            # inactivas. Reportado 2026-09-28.
             try:
                 queryset = EmpleadosCompletosSig.objects.filter(
-                    unidad_administrativa=unidad_administrativa
+                    unidad_administrativa=unidad_administrativa,
+                    posicion__in=obtener_posiciones_activas(),
                 )
                 queryset = _scope_un_queryset(queryset, un_scope)
                 resultados = _enriquecer_empleados_completos_rows(list(queryset.values()))
@@ -2652,7 +2842,10 @@ class EmpleadosCompletosActivosDetalleView(APIView):
                     posicion__in=active_position_codes
                 )
                 queryset = _scope_un_queryset(queryset, un_scope)
-                queryset = apply_text_search(queryset, search, CAMPOS_BUSQUEDA_EMPLEADOS_DETALLE)
+                queryset = apply_flexible_text_search(
+                    queryset, search, CAMPOS_BUSQUEDA_EMPLEADOS_DETALLE,
+                    campos_vocabulario=["nombres", "unidad_administrativa", "nombre_puesto_funcional", "departamento"],
+                )
                 resultados = _enriquecer_empleados_completos_rows(list(queryset.values()))
                 return _responder_detalle_scoped(request, resultados, un_scope)
             except Exception:
@@ -4354,10 +4547,12 @@ class EmpleadosEstatusPorNivelUaView(APIView):
     # La clave lleva sufijo porque la forma del valor cambió: la vieja
     # (`empleados_estatus_por_nivel_ua`, la respuesta ya agregada) quedaría
     # ilegible para este código.
-    CACHE_KEY = "empleados_estatus_por_nivel_ua_grupos"
+    # `_v2`: los grupos ahora llevan también la dimensión `oficial` (ver `get`).
+    # `_v3`: los grupos llevan también `unidad_de_negocio` (nombre de la UN, ver `_agregar`).
+    CACHE_KEY = "empleados_estatus_por_nivel_ua_grupos_v3"
 
     @staticmethod
-    def _agregar(grupos, un_scope):
+    def _agregar(grupos, un_scope, solo_oficial=False):
         """Colapsa los grupos crudos (cd_un × UA × nivel × estatus) al payload
         que espera el frontend, tras descartar las unidades fuera de alcance.
         `por_nivel` se deriva sumando sobre las UA, no con un segundo scan.
@@ -4366,10 +4561,23 @@ class EmpleadosEstatusPorNivelUaView(APIView):
         por_nivel = {}
         por_ua = {}
         ua_codigos = {}
+        # UA → código de su Unidad de Negocio (y nombre de la UN): el widget "Plazas por UA"
+        # agrupa por UN las unidades administrativas adscritas a una dirección general (p. ej.
+        # las dos DOAF dentro de la UAF). Sale de los grupos YA recortados, así que no revela
+        # unidades fuera del alcance del usuario.
+        ua_un = {}
+        un_nombres = {}
         for item in _scope_un_filas(grupos, un_scope):
+            if solo_oficial and not item.get("oficial", True):
+                continue
             ua_name = item["unidad_administrativa"] or "SIN UA"
             if item["cd_ua"]:
                 ua_codigos.setdefault(ua_name, item["cd_ua"])
+            cd_un = (item.get("cd_un") or "").strip()
+            if cd_un:
+                ua_un.setdefault(ua_name, cd_un)
+                if item.get("unidad_de_negocio"):
+                    un_nombres.setdefault(cd_un, item["unidad_de_negocio"].strip())
             nv = item["nivel"] or "SIN NIVEL"
             est = item["estado_nomina"] or "SIN ESTATUS"
             count = item["count"]
@@ -4382,14 +4590,22 @@ class EmpleadosEstatusPorNivelUaView(APIView):
             celda = por_ua.setdefault(ua_name, {}).setdefault(nv, {})
             celda[est] = celda.get(est, 0) + count
 
-        return {"por_nivel": por_nivel, "por_ua": por_ua, "ua_codigos": ua_codigos}
+        return {
+            "por_nivel": por_nivel, "por_ua": por_ua, "ua_codigos": ua_codigos,
+            "ua_un": ua_un, "un_nombres": un_nombres,
+        }
 
     def get(self, request, *args, **kwargs):
         un_scope = get_un_scope_for_request(request)
+        # `?plantilla_oficial=1` (widgets del tablero): mismo universo que el switch "Plantilla
+        # oficial" ENCENDIDO de Plantilla Detalle — sin laudos (103L…), sin el rango 1039… y sin
+        # PASEM (partida 11401); ver esPosicionPlantillaOficial en PlantillaDetalleTab.jsx. Sin el
+        # parámetro, el universo completo de siempre (pestaña Estatus Nómina).
+        solo_oficial = request.query_params.get("plantilla_oficial") in ("1", "true")
 
         grupos = cache.get(self.CACHE_KEY)
         if grupos is not None:
-            return Response(self._agregar(grupos, un_scope), status=status.HTTP_200_OK)
+            return Response(self._agregar(grupos, un_scope, solo_oficial), status=status.HTTP_200_OK)
 
         try:
             # 1. Obtener posiciones actualmente activas
@@ -4398,14 +4614,22 @@ class EmpleadosEstatusPorNivelUaView(APIView):
             # 2. Agrupar los registros de EMPLEADOS_COMPLETOS_SIG en esas
             # posiciones. `cd_un` entra al GROUP BY solo como dimensión de
             # recorte; se normaliza al filtrar (_scope_un_filas hace strip).
+            # `oficial` entra como una dimensión más del GROUP BY (misma regla que el switch
+            # "Plantilla oficial"), así una sola copia en caché sirve a los dos universos.
+            fuera_de_oficial = (
+                Q(posicion__startswith="103L") | Q(posicion__startswith="1039")
+                | Q(partida__regex=r"^\s*11401\s*$")
+            )
             grupos = list(
                 EmpleadosCompletosSig.objects.filter(posicion__in=active_position_codes)
-                .values("cd_un", "unidad_administrativa", "cd_ua", "nivel", "estado_nomina")
+                .annotate(oficial=Case(When(fuera_de_oficial, then=Value(False)), default=Value(True),
+                                       output_field=BooleanField()))
+                .values("cd_un", "unidad_de_negocio", "unidad_administrativa", "cd_ua", "nivel", "estado_nomina", "oficial")
                 .annotate(count=Count("id"))
             )
 
             cache.set(self.CACHE_KEY, grupos, None)
-            return Response(self._agregar(grupos, un_scope), status=status.HTTP_200_OK)
+            return Response(self._agregar(grupos, un_scope, solo_oficial), status=status.HTTP_200_OK)
         except Exception:
             logger.exception("Error inesperado en {}".format(request.path))
             return Response(
@@ -4432,7 +4656,7 @@ class EmpleadosDistribucionGeograficaView(APIView):
     coordenada simplemente no le aparece.
     """
 
-    CACHE_KEY = "empleados_distribucion_geografica_grupos"
+    CACHE_KEY = "empleados_distribucion_geografica_grupos_v2"  # v2: solo plantilla oficial
 
     un_scope = UN_SCOPE_APLICADO
     view_permission = "authentication.view_plantilla_geografia"
@@ -4538,8 +4762,11 @@ class EmpleadosDistribucionGeograficaView(APIView):
             # cada coordenada en una fila por unidad, que _agregar vuelve a
             # juntar. Para un usuario sin restricción el resultado es el mismo
             # punto de siempre, con el mismo conteo.
+            # Mapa y Torre Caballito cuentan siempre la plantilla OFICIAL (como Plantilla
+            # Detalle con su switch encendido): el universo completo solo se ve en esa pestaña.
             grupos = list(
                 EmpleadosCompletosSig.objects.filter(posicion__in=active_position_codes)
+                .exclude(Q_FUERA_DE_PLANTILLA_OFICIAL)
                 .exclude(latitud__isnull=True)
                 .exclude(latitud="")
                 .exclude(longitud__isnull=True)
@@ -8110,6 +8337,7 @@ class TorreCaballito3DView(APIView):
             FROM EMPLEADOS_COMPLETOS_SIG e
             INNER JOIN MOV_POS_LATEST activas
                 ON e.`Posición` = activas.`Nº Pos Actual` AND activas.`Estado Psn` = 'A'
+               AND {SQL_PLANTILLA_OFICIAL}
             WHERE e.`Descripción ubicación` IS NOT NULL
               AND (
                   e.`Descripción ubicación` LIKE '%%Caballito Reforma 10 P%%'
@@ -8215,6 +8443,7 @@ class TorreCaballitoEmpleadosView(APIView):
             FROM EMPLEADOS_COMPLETOS_SIG e
             INNER JOIN MOV_POS_LATEST activas
                 ON e.`Posición` = activas.`Nº Pos Actual` AND activas.`Estado Psn` = 'A'
+               AND {SQL_PLANTILLA_OFICIAL}
             WHERE {where_clause}
             ORDER BY e.`Descripción ubicación`, e.`Nombres`;
         """
@@ -8282,31 +8511,57 @@ class TorreCaballitoSearchView(APIView):
 
         from django.db import connection
 
-        query = f"""
-            SELECT
-                e.`Posición`,
-                e.`Numempleado`,
-                e.`Nombres`,
-                e.`Unidad Administrativa`,
-                e.`Descripción ubicación`
+        # Misma búsqueda flexible que apply_flexible_text_search, en SQL crudo: cada palabra
+        # (en cualquier orden) debe estar en el nombre o el núm. de empleado; si con eso no hay
+        # nada, se reintenta con las palabras cercanas (errores de dedo) tomadas del
+        # vocabulario de nombres de la propia torre — ya recortado por UN, así que tampoco
+        # revela nombres de otras unidades.
+        base_from = f"""
             FROM EMPLEADOS_COMPLETOS_SIG e
             INNER JOIN MOV_POS_LATEST activas
                 ON e.`Posición` = activas.`Nº Pos Actual` AND activas.`Estado Psn` = 'A'
+               AND {SQL_PLANTILLA_OFICIAL}
             WHERE e.`Descripción ubicación` IS NOT NULL
               AND (
                   e.`Descripción ubicación` LIKE '%%Caballito Reforma 10 P%%'
                   OR e.`Descripción ubicación` LIKE '%%Torre Caballito Reforma 10 P%%'
               )
-              AND UPPER(TRIM(e.`Numempleado`)) <> 'VACANTE'
-              AND (e.`Nombres` LIKE %s OR e.`Numempleado` LIKE %s){filtro_un}
-            LIMIT 20;
+              AND UPPER(TRIM(e.`Numempleado`)) <> 'VACANTE'{filtro_un}
         """
+        tokens = _tokens_busqueda(q)
 
-        like_q = f"%{q}%"
-        with connection.cursor() as cursor:
-            cursor.execute(query, [like_q, like_q] + params_un)
-            columns = [col[0] for col in cursor.description]
-            results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        def _buscar(grupos):
+            condiciones, params = [], []
+            for variantes in grupos:
+                ors = []
+                for v in variantes:
+                    ors.append("e.`Nombres` LIKE %s OR e.`Numempleado` LIKE %s")
+                    params += [f"%{v}%", f"%{v}%"]
+                condiciones.append("(" + " OR ".join(ors) + ")")
+            sql = f"""
+                SELECT e.`Posición`, e.`Numempleado`, e.`Nombres`,
+                       e.`Unidad Administrativa`, e.`Descripción ubicación`
+                {base_from} AND {" AND ".join(condiciones)}
+                LIMIT 20;
+            """
+            with connection.cursor() as cursor:
+                cursor.execute(sql, params_un + params)
+                columns = [col[0] for col in cursor.description]
+                return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+        results = _buscar([[t] for t in tokens]) if tokens else []
+        tolerancias = [_tolerancia_token(t) for t in tokens]
+        if not results and any(tolerancias):
+            with connection.cursor() as cursor:
+                cursor.execute(f"SELECT DISTINCT e.`Nombres` {base_from}", params_un)
+                vocabulario = {
+                    w for (nombre,) in cursor.fetchall()
+                    for w in _PALABRAS_BLOB.split(_normalizar_busqueda(nombre)) if len(w) >= 3
+                }
+            results = _buscar([
+                {t} | (_palabras_cercanas(t, vocabulario, m) if m else set())
+                for t, m in zip(tokens, tolerancias)
+            ])
 
         # Parse piso for frontend convenience
         import re
@@ -8393,6 +8648,7 @@ class EmpleadosPorUbicacionView(APIView):
         # personas que el punto contó.
         queryset = _scope_un_queryset(
             EmpleadosCompletosSig.objects.filter(posicion__in=active_position_codes)
+            .exclude(Q_FUERA_DE_PLANTILLA_OFICIAL)
             .annotate(_lat=Trim("latitud"), _lng=Trim("longitud"))
             .filter(_lat=lat, _lng=lng),
             un_scope,
@@ -8470,6 +8726,7 @@ class EmpleadosGeografiaSearchView(APIView):
             FROM EMPLEADOS_COMPLETOS_SIG e
             INNER JOIN MOV_POS_LATEST activas
                 ON e.`Posición` = activas.`Nº Pos Actual` AND activas.`Estado Psn` = 'A'
+               AND {SQL_PLANTILLA_OFICIAL}
             WHERE e.`latitud` IS NOT NULL AND e.`latitud` != ''
               AND e.`longitud` IS NOT NULL AND e.`longitud` != ''
               AND (e.`Nombres` LIKE %s OR e.`Numempleado` LIKE %s){filtro_un}
@@ -8551,7 +8808,10 @@ class MovimientosPersonalListView(APIView):
         # nombre completo ("Juan Pérez López") también matchee aunque esté
         # repartido en los 3 campos reales.
         queryset = _annotate_full_name(queryset, "full_name")
-        queryset = apply_text_search(
+        # Búsqueda flexible (palabras en cualquier orden, tolerancia a errores de dedo); el
+        # vocabulario para los errores de dedo sale solo de los campos de nombre: con 150 mil
+        # movimientos, recorrer también acción/motivo/UA no aporta y cuesta.
+        queryset = apply_flexible_text_search(
             queryset,
             request.query_params.get("search", ""),
             [
@@ -8565,6 +8825,7 @@ class MovimientosPersonalListView(APIView):
                 "motivo_nombre",
                 "un_admin",
             ],
+            campos_vocabulario=["nombre", "ap_pat", "ap_mat"],
         )
 
         # Dynamic Column Filters
@@ -11209,7 +11470,9 @@ class DesgloseJerarquicoView(APIView):
             m.id AS mov_pos_id,
             e.`Unidad de Negocio`,
             e.`Cd UA`,
-            COALESCE(u.nombre, e.`Cd UA`) AS `nombre_ua`,
+            -- Si la UA no está en el catálogo (p. ej. las DOAF 909/922), el nombre de la plantilla
+            -- antes que el código: sin esto la UA quedaba rotulada solo con su número.
+            COALESCE(u.nombre, NULLIF(TRIM(e.`Unidad Administrativa`), ''), e.`Cd UA`) AS `nombre_ua`,
             e.`Cd UN`,
             e.`Código Presupuestal`,
             e.`Escala`,
@@ -11325,7 +11588,9 @@ class DesgloseJerarquicoOcupadosView(APIView):
             e.`Posición`,
             e.`Unidad de Negocio`,
             e.`Cd UA`,
-            COALESCE(u.nombre, e.`Cd UA`) AS `nombre_ua`,
+            -- Si la UA no está en el catálogo (p. ej. las DOAF 909/922), el nombre de la plantilla
+            -- antes que el código: sin esto la UA quedaba rotulada solo con su número.
+            COALESCE(u.nombre, NULLIF(TRIM(e.`Unidad Administrativa`), ''), e.`Cd UA`) AS `nombre_ua`,
             e.`Cd UN`,
             e.`Código Presupuestal`,
             e.`Escala`,
@@ -12370,7 +12635,7 @@ class PlazaSugerenciasView(APIView):
     posición) — cubre las plazas vigentes en el dataset de ZAFIRO, que es
     el caso de uso real de este buscador.
 
-    GET /plantilla/plazas/sugerencias/?q=<prefijo>
+    GET /plantilla/plazas/sugerencias/?q=<prefijo de posición | nombre del ocupante>
 
     Si la plaza está ocupada, incluye "ocupante" (nombre completo) para que
     se pueda distinguir sin tener que abrir el árbol, y "activa" (bool: la
@@ -12398,15 +12663,28 @@ class PlazaSugerenciasView(APIView):
         except (TypeError, ValueError):
             limite = self.LIMITE_DEFAULT
 
-        queryset = _scope_un_queryset(
-            EmpleadosCompletosSig.objects.filter(posicion__istartswith=termino),
-            get_un_scope_for_request(request),
-        )
+        # Con letras se busca por NOMBRE del ocupante (búsqueda flexible: palabras en cualquier
+        # orden, sin acentos, errores de dedo leves); solo dígitos, por prefijo de posición como
+        # siempre. En ambos casos el scope por UN se aplica ANTES de buscar, así que tampoco el
+        # vocabulario de errores de dedo sale de otras unidades.
+        por_nombre = any(ch.isalpha() for ch in termino)
+        base = _scope_un_queryset(EmpleadosCompletosSig.objects.all(), get_un_scope_for_request(request))
+        if por_nombre:
+            if len(termino) < 3:
+                return Response([], status=status.HTTP_200_OK)
+            queryset = apply_flexible_text_search(
+                base.exclude(nombres__isnull=True).exclude(nombres=""),
+                termino, ["nombres", "numempleado"], campos_vocabulario=["nombres"],
+            )
+            orden = ("nombres", "posicion")
+        else:
+            queryset = base.filter(posicion__istartswith=termino)
+            orden = ("posicion",)
         filas = list(
             queryset.exclude(posicion__isnull=True)
             .exclude(posicion="")
             .values("posicion", "nombre_puesto_funcional", "nombres")
-            .order_by("posicion")
+            .order_by(*orden)
             .distinct()[:limite]
         )
         # Estado de la plaza (Activa/Inactiva): `Estado Psn` = 'A' en
@@ -12423,7 +12701,62 @@ class PlazaSugerenciasView(APIView):
             }
             for f in filas
         ]
+        if por_nombre:
+            resultados += self._ocupantes_anteriores(request, termino, resultados, limite, activas)
         return Response(resultados, status=status.HTTP_200_OK)
+
+    @staticmethod
+    def _ocupantes_anteriores(request, termino, actuales, limite, activas):
+        """Personas que OCUPARON una plaza y hoy ya no (bajas, promociones…): se buscan en el
+        histórico de movimientos, con la misma búsqueda flexible y el mismo recorte por UN
+        (`_scope_un_movimientos`, que ya normaliza la columna `un` de esa tabla). Una fila por
+        (plaza, persona) con el periodo en que tuvo movimientos; se omiten las parejas que ya
+        salieron como ocupante actual."""
+        from django.db.models import Max, Min
+        from .models import CpTblMovCompleto290526
+
+        base = _annotate_full_name(
+            _scope_un_movimientos(CpTblMovCompleto290526.objects.all(), get_un_scope_for_request(request)),
+            "full_name",
+        ).exclude(posicion__isnull=True).exclude(posicion="")
+        encontrados = apply_flexible_text_search(
+            base, termino, ["full_name", "num_empleado"], campos_vocabulario=["nombre", "ap_pat", "ap_mat"],
+        )
+        grupos = (
+            encontrados.values("posicion", "num_empleado")
+            .annotate(nombre=Max("full_name"), puesto=Max("puesto_ptal"),
+                      desde=Min("fecha_efectiva"), hasta=Max("fecha_efectiva"))
+            .order_by("-hasta")[: limite * 3]
+        )
+        vistos = {(r["posicion"], _normalizar_busqueda(r["ocupante"])) for r in actuales}
+        anteriores = []
+        for g in grupos:
+            nombre = " ".join((g["nombre"] or "").split())
+            clave = ((g["posicion"] or "").strip(), _normalizar_busqueda(nombre))
+            if not nombre or clave in vistos:
+                continue
+            vistos.add(clave)
+            anteriores.append({
+                "posicion": clave[0],
+                "puesto": g["puesto"],
+                "ocupada": True,
+                "ocupante": nombre,
+                "activa": clave[0] in activas,
+                "historico": True,
+                "desde": g["desde"].isoformat() if g["desde"] else None,
+                "hasta": g["hasta"].isoformat() if g["hasta"] else None,
+            })
+        # Primero quien coincide mejor: más palabras buscadas presentes TAL CUAL como palabra
+        # del nombre ("rafel marin" → Marin antes que "Mario Rafael"); a igualdad, el más reciente
+        # (sort estable sobre el orden por fecha).
+        tokens = _tokens_busqueda(termino)
+
+        def _exactas(r):
+            palabras = set(_PALABRAS_BLOB.split(_normalizar_busqueda(r["ocupante"])))
+            return sum(1 for t in tokens if t in palabras)
+
+        anteriores.sort(key=_exactas, reverse=True)
+        return anteriores[:limite]
 
 
 class HistoriaPlazaView(APIView):
@@ -12454,7 +12787,7 @@ class HistoriaPlazaView(APIView):
         if request.query_params.get("refrescar") != "1":
             en_cache = cache.get(cache_key)
             if en_cache is not None:
-                return Response(en_cache, status=status.HTTP_200_OK)
+                return Response({**en_cache, **self._datos_basicos(posicion)}, status=status.HTTP_200_OK)
 
         with connection.cursor() as cursor:
             cursor.execute("CALL sp_historia_plaza(%s)", [posicion])
@@ -12485,7 +12818,21 @@ class HistoriaPlazaView(APIView):
         # 5 min: el SP tarda ~30ms, pero el usuario expande y colapsa ramas
         # repetidamente y no tiene sentido repetir la consulta cada vez.
         cache.set(cache_key, datos, timeout=300)
-        return Response(datos, status=status.HTTP_200_OK)
+        return Response({**datos, **self._datos_basicos(posicion)}, status=status.HTTP_200_OK)
+
+    @staticmethod
+    def _datos_basicos(posicion):
+        """Nivel y SMN (salario mensual neto) de la plaza, de EMPLEADOS_COMPLETOS_SIG — la misma
+        fuente que la sección "Plaza" del expediente. Fuera de la caché del SP para que siempre
+        reflejen la última carga. Si la plaza ya no está en la plantilla, van en None."""
+        fila = (
+            EmpleadosCompletosSig.objects.filter(posicion=posicion)
+            .values("nivel", "smn").first()
+        ) or {}
+        return {
+            "nivel": (fila.get("nivel") or "").strip() or None,
+            "smn": (fila.get("smn") or "").strip() or None,
+        }
 
 
 class HistoriaEmpleadoView(APIView):

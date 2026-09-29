@@ -278,3 +278,32 @@ class TableroLayout(models.Model):
 
     def __str__(self):
         return f"{self.usuario} - {len(self.widgets)} widgets"
+
+
+class MemoriaColumnas(models.Model):
+    """Hasta 3 "memorias" de columnas visibles por usuario y por tabla (botón Configurar
+    columnas). `tabla` identifica la tabla (plantilla_detalle, bajas, mov_posiciones,
+    movimientos, alineacion): cada una tiene su propio catálogo de columnas, así que una
+    memoria de Plantilla Detalle se aplica a esa tabla dondequiera que aparezca (pestaña o
+    modales del tablero).
+
+    Para `plantilla_detalle` las columnas se recortan al guardar contra RolColumnScope (ver
+    MemoriasColumnasView): una memoria nunca puede contener columnas que el rol no permite.
+    """
+
+    SLOTS = (1, 2, 3)
+
+    usuario = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="memorias_columnas")
+    tabla = models.CharField(max_length=40)
+    slot = models.PositiveSmallIntegerField()
+    nombre = models.CharField(max_length=40, blank=True, default="")
+    columnas = models.JSONField(default=list, encoder=DjangoJSONEncoder)
+    actualizado_en = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["usuario", "tabla", "slot"], name="uniq_memoria_columnas_slot"),
+        ]
+
+    def __str__(self):
+        return f"{self.usuario} · {self.tabla} · {self.slot}"
