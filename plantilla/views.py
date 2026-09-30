@@ -1,4 +1,5 @@
 import datetime
+import gzip
 import json
 import re
 import logging
@@ -2401,6 +2402,53 @@ def _paginated_or_full_response(request, data):
     return Response(data, status=status.HTTP_200_OK)
 
 
+def _respuesta_completa_cacheada(request, base_cache_key, obtener_datos_fn, un_codes, columnas_permitidas=None):
+    """Envoltura de `_paginated_or_full_response` para el camino SIN paginar:
+    cachea bytes JSON+gzip de la respuesta YA recortada por alcance (UN y
+    columnas), para no rematerializar/filtrar/serializar/comprimir un dataset
+    de decenas de miles de filas en cada petición idéntica.
+
+    La clave usa `huella_scope(un_codes, columnas_permitidas)` — "all" para
+    el caso sin restricción (superadmin, la gran mayoría de las peticiones
+    pesadas) y un hash de 12 caracteres por combinación real de alcance, así
+    que dos usuarios con el mismo rol comparten una sola copia y uno con
+    alcance distinto nunca puede recibir la de otro.
+
+    Se invalida junto con `base_cache_key`: como la clave lleva el prefijo
+    "{base_cache_key}_respgz_", cualquier `r.scan_iter("*{base_cache_key}_*")`
+    que ya exista para limpiar las variantes por filtro (oficio/nivel) también
+    la alcanza sin cambios — ver `_invalidar_cache_detalle_plantilla`,
+    `_invalidar_cache_nivel_jerarquico` y el barrido de `importar_zafiro`. El
+    borrado total de `/api/plantilla/bitacora/invalidar-cache/` (o el botón
+    "Borrar caché del servidor") también la limpia sin necesitar saberlo:
+    hace FLUSHDB por patrón de TODAS las keys de caché de Django (ver
+    `cache_invalidation.invalidar_todo_el_cache_servidor`).
+
+    Devuelve None (y no cachea nada) si la request pide `?pagination=true`
+    — el envelope paginado no es lo que se cachea aquí; el caller debe seguir
+    el camino normal en ese caso.
+    """
+    if request.query_params.get("pagination", "false").strip().lower() == "true":
+        return None
+
+    resp_key = f"{base_cache_key}_respgz_{huella_scope(un_codes, columnas_permitidas)}"
+    comprimido = cache.get(resp_key)
+    if comprimido is None:
+        datos = obtener_datos_fn()
+        comprimido = gzip.compress(orjson_dumps(datos), compresslevel=6)
+        cache.set(resp_key, comprimido, None)
+
+    if "gzip" not in (request.META.get("HTTP_ACCEPT_ENCODING") or ""):
+        # Cliente sin soporte gzip (poco común): servir sin comprimir en vez
+        # de arriesgar una respuesta ilegible.
+        return orjson_response(gzip.decompress(comprimido))
+
+    resp = HttpResponse(comprimido, content_type="application/json")
+    resp["Content-Encoding"] = "gzip"
+    resp["Content-Length"] = str(len(comprimido))
+    return resp
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # Alcance de datos por Unidad de Negocio (UN) — ver RolUnScope y
 # authentication.scoping.get_un_scope_for_request. Alcance por COLUMNAS de
@@ -2895,6 +2943,22 @@ class EmpleadosCompletosActivosDetalleView(APIView):
                 )
 
         try:
+            columnas_permitidas = get_columnas_scope_for_request(request)
+
+            def _detalle_ya_recortado():
+                filas = _scope_un_filas(_obtener_detalle_activos_cacheado(), un_scope)
+                return _strip_columnas_filas(filas, columnas_permitidas)
+
+            cacheada = _respuesta_completa_cacheada(
+                request,
+                "empleados_completos_activos_detalle",
+                _detalle_ya_recortado,
+                un_scope,
+                columnas_permitidas,
+            )
+            if cacheada is not None:
+                return cacheada
+
             resultados = _obtener_detalle_activos_cacheado()
             return _responder_detalle_scoped(request, resultados, un_scope)
         except Exception:
@@ -8034,14 +8098,25 @@ class BajasSigListView(APIView):
                     {"error": "Error interno del servidor"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
                 )
 
-        cache_key = "bajas_sig_list"
-        cached_data = cache.get(cache_key)
-        if cached_data is not None:
-            return _responder_bajas_scoped(request, cached_data, un_scope)
+        def _obtener_bajas_todas():
+            cache_key = "bajas_sig_list"
+            cached_data = cache.get(cache_key)
+            if cached_data is not None:
+                return cached_data
+            bajas = list(BajasSig.objects.all().values())
+            cache.set(cache_key, bajas, None)
+            return bajas
 
-        bajas = list(BajasSig.objects.all().values())
-        cache.set(cache_key, bajas, None)
-        return _responder_bajas_scoped(request, bajas, un_scope)
+        cacheada = _respuesta_completa_cacheada(
+            request,
+            "bajas_sig_list",
+            lambda: _scope_un_filas(_obtener_bajas_todas(), un_scope, key=CAMPO_UN_BAJAS),
+            un_scope,
+        )
+        if cacheada is not None:
+            return cacheada
+
+        return _responder_bajas_scoped(request, _obtener_bajas_todas(), un_scope)
 
 
 class BajasMotivosPieView(APIView):
@@ -11566,16 +11641,37 @@ class DesgloseJerarquicoOcupadosView(APIView):
     view_permission = "authentication.view_plantilla_mov_posiciones"
 
     def get(self, request, *args, **kwargs):
+        un_scope = get_un_scope_for_request(request)
+
+        try:
+            cacheada = _respuesta_completa_cacheada(
+                request,
+                "desglose_jerarquico_ocupados",
+                lambda: _scope_un_filas(self._obtener_desglose_ocupados(), un_scope, key="Cd UN"),
+                un_scope,
+            )
+            if cacheada is not None:
+                return cacheada
+
+            resultados = self._obtener_desglose_ocupados()
+            return Response(
+                _scope_un_filas(resultados, un_scope, key="Cd UN"),
+                status=status.HTTP_200_OK,
+            )
+        except Exception:
+            logger.exception("Error inesperado en {}".format(request.path))
+            return Response(
+                {"error": "Error interno del servidor"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @staticmethod
+    def _obtener_desglose_ocupados():
         from django.db import connection
 
-        un_scope = get_un_scope_for_request(request)
         cache_key = "desglose_jerarquico_ocupados"
         cached_data = cache.get(cache_key)
         if cached_data is not None:
-            return Response(
-                _scope_un_filas(cached_data, un_scope, key="Cd UN"),
-                status=status.HTTP_200_OK,
-            )
+            return cached_data
 
         # SELECT amplía todas las columnas de EMPLEADOS_COMPLETOS_SIG expuestas
         # en ALL_AVAILABLE_COLUMNS del front (EmployeesModal.jsx) — ver mismo
@@ -11658,22 +11754,13 @@ class DesgloseJerarquicoOcupadosView(APIView):
           AND m.`Partida Ptal` <> '11401';
         """
 
-        try:
-            with connection.cursor() as cursor:
-                cursor.execute(query)
-                columns = [col[0] for col in cursor.description]
-                results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        with connection.cursor() as cursor:
+            cursor.execute(query)
+            columns = [col[0] for col in cursor.description]
+            results = [dict(zip(columns, row)) for row in cursor.fetchall()]
 
-            cache.set(cache_key, results, None)
-            return Response(
-                _scope_un_filas(results, un_scope, key="Cd UN"),
-                status=status.HTTP_200_OK,
-            )
-        except Exception:
-            logger.exception("Error inesperado en {}".format(request.path))
-            return Response(
-                {"error": "Error interno del servidor"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+        cache.set(cache_key, results, None)
+        return results
 
 
 class AduanasOcupacionVacanciaView(APIView):

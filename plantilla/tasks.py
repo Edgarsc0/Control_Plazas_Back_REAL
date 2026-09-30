@@ -1791,7 +1791,11 @@ def importar_zafiro(self):
             cache.delete_many(cache_keys)
 
             # Invalidar por patrón las claves hasheadas por parámetros de request
-            for pattern in ("*mov_stats_*", "*bajas_sig_list_*", "*empleados_completos_activos_detalle_*", "*excel_estatus_file_*", "*excel_task_result_*"):
+            # (incluye *_respgz_* de _respuesta_completa_cacheada en views.py:
+            # "bajas_sig_list_*" y "empleados_completos_activos_detalle_*" ya lo
+            # cubrían por contener el substring; "desglose_jerarquico_ocupados_*"
+            # es nuevo, no tenía scan por patrón antes de esto).
+            for pattern in ("*mov_stats_*", "*bajas_sig_list_*", "*empleados_completos_activos_detalle_*", "*desglose_jerarquico_ocupados_*", "*excel_estatus_file_*", "*excel_task_result_*"):
                 for key in r.scan_iter(pattern):
                     r.delete(key)
         except Exception:

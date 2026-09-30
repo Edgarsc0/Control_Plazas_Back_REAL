@@ -116,8 +116,13 @@ def _invalidar_cache_nivel_jerarquico():
         import redis as redis_lib
 
         r = redis_lib.Redis.from_url(settings.CELERY_BROKER_URL)
-        for key in r.scan_iter("*empleados_completos_activos_detalle_*"):
-            r.delete(key)
+        # También barre las respuestas ya serializadas+gzip por alcance
+        # (*_respgz_*, ver _respuesta_completa_cacheada en views.py) de estas
+        # dos claves — desglose_jerarquico_ocupados no tenía hasta ahora
+        # ningún scan por patrón, solo el delete exacto de arriba.
+        for pattern in ("*empleados_completos_activos_detalle_*", "*desglose_jerarquico_ocupados_*"):
+            for key in r.scan_iter(pattern):
+                r.delete(key)
     except Exception:
         logger.exception("Error al invalidar cache filtrado de empleados_completos_activos_detalle")
 
