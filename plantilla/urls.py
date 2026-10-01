@@ -51,6 +51,7 @@ from .views import (
     CadenaMandoSugerenciasView,
     EmpleadosEstatusPlantillaView,
     ZafiroBitacoraView,
+    ZafiroBitacoraEnCursoView,
     ZafiroDuracionPromedioPorHoraView,
     UltimaActualizacionZafiroView,
     IniciarSincronizacionZafiroView,
@@ -337,6 +338,11 @@ urlpatterns = [
         "bitacora/invalidar-cache-manual/",
         InvalidarCacheManualView.as_view(),
         name="zafiro_invalidar_cache_manual",
+    ),
+    path(
+        "bitacora/en-curso/",
+        ZafiroBitacoraEnCursoView.as_view(),
+        name="zafiro_bitacora_en_curso",
     ),
     path(
         "bitacora/",

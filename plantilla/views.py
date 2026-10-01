@@ -7548,6 +7548,42 @@ class ZafiroBitacoraView(APIView):
         return Response(data, status=status.HTTP_200_OK)
 
 
+class ZafiroBitacoraEnCursoView(APIView):
+    """
+    Endpoint ligero para el polling de la corrida RUNNING actual.
+    Evita tener que re-descargar toda la bitácora cada 2s solo para
+    refrescar el estado/log en vivo de la ejecución en curso.
+    """
+
+    view_permission = "authentication.view_monitoreo_zafiro"
+
+    def get(self, request):
+        log = (
+            ZafiroBitacora.objects.filter(status="RUNNING")
+            .order_by("-fecha_ejecucion")
+            .first()
+        )
+        if not log:
+            return Response(None, status=status.HTTP_200_OK)
+
+        return Response(
+            {
+                "id": log.id,
+                "fecha_ejecucion": log.fecha_ejecucion.isoformat(),
+                "duracion_segundos": log.duracion_segundos,
+                "registros_posiciones": log.registros_posiciones,
+                "registros_completos": log.registros_completos,
+                "registros_bajas": log.registros_bajas,
+                "registros_historial": log.registros_historial,
+                "status": log.status,
+                "error_message": log.error_message,
+                "es_historico": log.es_historico,
+                "logs_en_vivo": log.logs_en_vivo,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
 class ZafiroDuracionPromedioPorHoraView(APIView):
     """
     Endpoint para obtener el promedio de duración (segundos) de las
