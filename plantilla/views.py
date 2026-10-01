@@ -10932,11 +10932,15 @@ def _resolver_datos_anuencia(codigos):
         return {}
 
     mapa = _get_mapa_codigos()
-    posicion_por_codigo = {}
+    posiciones_por_codigo = {}
     for pos, cod in mapa.items():
         cod_upper = str(cod or "").strip().upper()
         if cod_upper in codigos_por_upper:
-            posicion_por_codigo[codigos_por_upper[cod_upper]] = pos
+            posiciones_por_codigo.setdefault(codigos_por_upper[cod_upper], []).append(pos)
+    # Un código compartido por VARIAS posiciones no se puede resolver: antes se quedaba con la
+    # última que apareciera (arbitraria). Es el caso del rótulo "Sin Código" (82 plazas hoy), que no
+    # es un código real — mandarlo desde el front ya no es posible, esto cubre la llamada directa.
+    posicion_por_codigo = {cod: poss[0] for cod, poss in posiciones_por_codigo.items() if len(poss) == 1}
 
     posiciones = list(posicion_por_codigo.values())
     if not posiciones:
