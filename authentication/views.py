@@ -318,6 +318,67 @@ class UserVisitsView(views.APIView):
         )
 
 
+class UserVisitsHeatmapView(views.APIView):
+    """Mapa de calor mensual de actividad de un usuario: segundos activos
+    aproximados por día (heartbeats × HEARTBEAT_INTERVAL_SECONDS, misma
+    aproximación que el promedio histórico por hora de UserVisitsView).
+    Alimenta el mapa de calor del histograma de Roles > Usuarios."""
+
+    view_permission = "authentication.manage_roles"
+
+    def get(self, request):
+        email = request.query_params.get("email")
+        if not email:
+            return Response({"error": "email es requerido"}, status=status.HTTP_400_BAD_REQUEST)
+
+        month_str = request.query_params.get("month")
+        if month_str:
+            try:
+                month_start = datetime.strptime(month_str, "%Y-%m").date().replace(day=1)
+            except ValueError:
+                return Response(
+                    {"error": "month inválido, usa YYYY-MM"}, status=status.HTTP_400_BAD_REQUEST
+                )
+        else:
+            month_start = timezone.localtime().date().replace(day=1)
+
+        next_month_start = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
+
+        tz = timezone.get_current_timezone()
+        range_start = timezone.make_aware(datetime.combine(month_start, dt_time.min), tz)
+        range_end = timezone.make_aware(datetime.combine(next_month_start, dt_time.min), tz)
+
+        # Mismo truco que hourly_average_active_seconds_all_time: CONVERT_TZ
+        # no está disponible, así que se agrupa en UTC crudo y el día local se
+        # calcula a mano desplazando con el offset fijo del huso horario.
+        offset_hours = int(timezone.localtime().utcoffset().total_seconds() // 3600)
+
+        qs = (
+            PresenceLog.objects.filter(email=email, created_at__gte=range_start, created_at__lt=range_end)
+            .annotate(
+                utc_day=TruncDate("created_at", tzinfo=dt_timezone.utc),
+                utc_hour=ExtractHour("created_at", tzinfo=dt_timezone.utc),
+            )
+            .values("utc_day", "utc_hour")
+            .annotate(count=Count("id"))
+        )
+
+        days_seconds = {}
+        for row in qs:
+            local_day = row["utc_day"]
+            if row["utc_hour"] + offset_hours < 0:
+                local_day -= timedelta(days=1)
+            key = local_day.isoformat()
+            days_seconds[key] = days_seconds.get(key, 0) + row["count"] * HEARTBEAT_INTERVAL_SECONDS
+
+        return Response(
+            {
+                "month": month_start.strftime("%Y-%m"),
+                "days": days_seconds,
+            }
+        )
+
+
 class LoginView(views.APIView):
     """
     Inicio de sesión con correo + contraseña.

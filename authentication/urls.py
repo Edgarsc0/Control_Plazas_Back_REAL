@@ -12,6 +12,7 @@ from .views import (
     TableroLayoutUsuarioView,
     TableroLayoutView,
     MemoriasColumnasView,
+    UserVisitsHeatmapView,
     UserVisitsView,
     WhitelistViewSet,
 )
@@ -29,6 +30,7 @@ urlpatterns = [
     path('presence/heartbeat/', PresenceHeartbeatView.as_view(), name='presence-heartbeat'),
     path('presence/active/', PresenceListView.as_view(), name='presence-active'),
     path('visits/', UserVisitsView.as_view(), name='user-visits'),
+    path('visits/heatmap/', UserVisitsHeatmapView.as_view(), name='user-visits-heatmap'),
     path('maintenance/', MantenimientoView.as_view(), name='maintenance'),
     path('tablero-layout/', TableroLayoutView.as_view(), name='tablero-layout'),
     path('memorias-columnas/', MemoriasColumnasView.as_view(), name='memorias-columnas'),
