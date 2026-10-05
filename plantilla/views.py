@@ -2800,6 +2800,12 @@ def _responder_bajas_scoped(request, filas, un_scope):
     )
 
 
+def _calcular_detalle_activos():
+    active_position_codes = obtener_posiciones_activas()
+    queryset = EmpleadosCompletosSig.objects.filter(posicion__in=active_position_codes)
+    return _enriquecer_empleados_completos_rows(list(queryset.values()))
+
+
 def _obtener_detalle_activos_cacheado():
     """
     Filas enriquecidas de EmpleadosCompletosSig acotadas a posiciones activas
@@ -2808,15 +2814,49 @@ def _obtener_detalle_activos_cacheado():
     con EmpleadosCompletosEstatusNominaResumenView para que la tarjeta de
     resumen nunca contradiga el conteo real de la tabla de Detalle (ver
     docstring de esa vista).
+
+    Candado (Redis, vía cache.add) alrededor del recálculo: ZAFIRO borra este
+    cache_key al terminar cada corrida (cache.delete_many, ver tasks.py), y
+    sin candado cada request concurrente que llegaba justo después repetía
+    por su cuenta la misma query + enriquecimiento de ~11 mil filas en
+    paralelo ("cache stampede") — en vez de que UNA la calculara y el resto
+    esperara a leerla. Reportado 2026-10-05: 4 requests idénticas de 1.3 MB
+    en 2 minutos justo tras terminar una corrida de ZAFIRO.
     """
     cache_key = "empleados_completos_activos_detalle"
     cached_data = cache.get(cache_key)
     if cached_data is not None:
         return cached_data
 
-    active_position_codes = obtener_posiciones_activas()
-    queryset = EmpleadosCompletosSig.objects.filter(posicion__in=active_position_codes)
-    resultados = _enriquecer_empleados_completos_rows(list(queryset.values()))
+    lock_key = f"{cache_key}:lock"
+    LOCK_TTL = 60  # tope de seguridad si el proceso que calcula muere sin liberar el candado
+    WAIT_STEP = 0.25
+    MAX_WAIT = 30
+
+    if cache.add(lock_key, "1", timeout=LOCK_TTL):
+        try:
+            resultados = _calcular_detalle_activos()
+            cache.set(cache_key, resultados, None)
+            return resultados
+        finally:
+            cache.delete(lock_key)
+
+    # Otro proceso ya está calculando: esperar a que pueble la caché en vez
+    # de recalcular en paralelo (gthread: este sleep solo bloquea ESTE hilo,
+    # el worker sigue atendiendo otras requests en sus demás hilos).
+    import time
+
+    waited = 0.0
+    while waited < MAX_WAIT:
+        time.sleep(WAIT_STEP)
+        waited += WAIT_STEP
+        cached_data = cache.get(cache_key)
+        if cached_data is not None:
+            return cached_data
+
+    # Se agotó la espera (el que tenía el candado tardó más de MAX_WAIT o
+    # murió sin liberarlo): calcular de todos modos, mejor tarde que nunca.
+    resultados = _calcular_detalle_activos()
     cache.set(cache_key, resultados, None)
     return resultados
 
