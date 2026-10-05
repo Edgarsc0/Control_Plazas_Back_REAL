@@ -91,6 +91,49 @@ ZAFIRO_FILES = {
 
 from django.utils import timezone
 
+# Cliente Redis perezoso y compartido para publicar progreso en vivo (ver
+# _append_log abajo) — un solo cliente reusado por las ~74 llamadas de una
+# corrida completa, en vez de abrir una conexión nueva en cada una.
+_redis_progreso_client = None
+
+
+def _publicar_progreso_zafiro(bitacora):
+    """
+    Publica el snapshot completo de la bitácora RUNNING al canal Redis
+    "zafiro_en_curso" — lo consume ZafiroEnCursoSSEView (SSE) para que el
+    front reciba el progreso en tiempo real en vez de hacer polling cada
+    2-2.5s a /plantilla/bitacora/en-curso/ (ver ZafiroCorridaActualWidget.jsx
+    y monitoreo_zafiro/ClientComponent.jsx, antes del cambio). Mismo shape
+    que esa vista REST, para no tener que tocar el front más de lo
+    necesario. Nunca debe tronar la tarea de ZAFIRO: cualquier falla aquí
+    (Redis caído, etc.) se traga y solo queda logueada.
+    """
+    global _redis_progreso_client
+    try:
+        import json
+
+        import redis as redis_lib
+
+        if _redis_progreso_client is None:
+            _redis_progreso_client = redis_lib.Redis.from_url(settings.CELERY_BROKER_URL)
+
+        payload = {
+            "id": bitacora.id,
+            "fecha_ejecucion": bitacora.fecha_ejecucion.isoformat() if bitacora.fecha_ejecucion else None,
+            "duracion_segundos": bitacora.duracion_segundos,
+            "registros_posiciones": bitacora.registros_posiciones,
+            "registros_completos": bitacora.registros_completos,
+            "registros_bajas": bitacora.registros_bajas,
+            "registros_historial": bitacora.registros_historial,
+            "status": bitacora.status,
+            "error_message": bitacora.error_message,
+            "es_historico": bitacora.es_historico,
+            "logs_en_vivo": bitacora.logs_en_vivo,
+        }
+        _redis_progreso_client.publish("zafiro_en_curso", json.dumps(payload))
+    except Exception:
+        logger.exception("No se pudo publicar progreso de ZAFIRO en Redis (zafiro_en_curso)")
+
 
 def _append_log(bitacora, mensaje, is_error=False):
     if is_error:
@@ -110,6 +153,7 @@ def _append_log(bitacora, mensaje, is_error=False):
     else:
         bitacora.logs_en_vivo += linea
     bitacora.save(update_fields=["logs_en_vivo"])
+    _publicar_progreso_zafiro(bitacora)
 
 
 def _ejecutar_script_node(

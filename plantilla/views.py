@@ -7943,6 +7943,105 @@ class ZafiroSSEView(View):
         return response
 
 
+class ZafiroEnCursoSSEView(View):
+    """
+    SSE para el progreso de la corrida de ZAFIRO en curso (status RUNNING):
+    reemplaza el polling de 2-2.5s a /plantilla/bitacora/en-curso/ que
+    hacían ZafiroCorridaActualWidget.jsx y monitoreo_zafiro/ClientComponent.jsx
+    (duplicado entre ambos, ~74 requests/corrida en vez de ~74 mensajes push).
+
+    A diferencia de ZafiroSSEView (solo expone timestamps de corridas EXITO,
+    sin datos sensibles), este stream lleva logs_en_vivo y conteos completos
+    de la bitácora — mismo contenido que ZafiroBitacoraEnCursoView (REST),
+    gateado por el permiso view_monitoreo_zafiro. Como EventSource no puede
+    mandar headers, el token viaja por query param (mismo patrón que
+    CeldaUpdatesSSEView).
+
+    tasks.importar_zafiro publica un snapshot completo al canal Redis
+    "zafiro_en_curso" en cada llamada a _append_log() — la primera llamada
+    (justo tras crear el registro RUNNING) ya cubre el "inicio", y la
+    última (tras fijar status=EXITO/ERROR) ya trae el registro final
+    completo, así que no hace falta un fallback a BD como en ZafiroSSEView.
+    """
+
+    def get(self, request):
+        import time
+
+        import redis
+        from django.db import close_old_connections, connections
+        from django.http import HttpResponseForbidden, StreamingHttpResponse
+        from rest_framework.authtoken.models import Token
+
+        token_key = request.GET.get("token")
+        token_obj = (
+            Token.objects.filter(key=token_key).select_related("user").first()
+            if token_key else None
+        )
+        user = token_obj.user if token_obj else None
+        if not user or not user.is_active or not user.has_perm("authentication.view_monitoreo_zafiro"):
+            return HttpResponseForbidden("No autorizado.")
+
+        def _snapshot_actual():
+            log = (
+                ZafiroBitacora.objects.filter(status="RUNNING")
+                .order_by("-fecha_ejecucion")
+                .first()
+            )
+            if not log:
+                return None
+            return {
+                "id": log.id,
+                "fecha_ejecucion": log.fecha_ejecucion.isoformat(),
+                "duracion_segundos": log.duracion_segundos,
+                "registros_posiciones": log.registros_posiciones,
+                "registros_completos": log.registros_completos,
+                "registros_bajas": log.registros_bajas,
+                "registros_historial": log.registros_historial,
+                "status": log.status,
+                "error_message": log.error_message,
+                "es_historico": log.es_historico,
+                "logs_en_vivo": log.logs_en_vivo,
+            }
+
+        def event_stream():
+            import json
+
+            r = redis.Redis.from_url(settings.CELERY_BROKER_URL)
+            pubsub = r.pubsub()
+            pubsub.subscribe("zafiro_en_curso")
+
+            close_old_connections()
+            yield f"data: {json.dumps(_snapshot_actual())}\n\n"
+
+            start = time.monotonic()
+            try:
+                while True:
+                    if time.monotonic() - start > SSE_MAX_LIFETIME_SECONDS:
+                        break
+                    message = pubsub.get_message(
+                        ignore_subscribe_messages=True, timeout=20.0
+                    )
+                    if message:
+                        yield f"data: {message['data'].decode('utf-8')}\n\n"
+                    else:
+                        yield ": ping\n\n"
+            finally:
+                try:
+                    pubsub.unsubscribe("zafiro_en_curso")
+                    pubsub.close()
+                except Exception:
+                    pass
+                connections.close_all()
+
+        response = StreamingHttpResponse(
+            event_stream(), content_type="text/event-stream"
+        )
+        response["Cache-Control"] = "no-cache"
+        response["X-Accel-Buffering"] = "no"
+        response["Content-Encoding"] = "identity"
+        return response
+
+
 class CeldaUpdatesSSEView(View):
     """
     SSE dedicado a cambios de celdas de EMPLEADOS_COMPLETOS_SIG (tab Detalle

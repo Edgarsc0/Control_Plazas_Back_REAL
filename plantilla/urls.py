@@ -58,6 +58,7 @@ from .views import (
     InvalidarCacheManualView,
     InvalidarCacheZafiroView,
     ZafiroSSEView,
+    ZafiroEnCursoSSEView,
     CeldaUpdatesSSEView,
     AnuenciaAnexoUpdatesSSEView,
     BajasSigListView,
@@ -343,6 +344,11 @@ urlpatterns = [
         "bitacora/en-curso/",
         ZafiroBitacoraEnCursoView.as_view(),
         name="zafiro_bitacora_en_curso",
+    ),
+    path(
+        "bitacora/en-curso/sse/",
+        ZafiroEnCursoSSEView.as_view(),
+        name="zafiro_bitacora_en_curso_sse",
     ),
     path(
         "bitacora/",
