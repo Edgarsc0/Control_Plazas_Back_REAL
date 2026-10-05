@@ -8003,6 +8003,15 @@ class ZafiroEnCursoSSEView(View):
                 "logs_en_vivo": log.logs_en_vivo,
             }
 
+        def _firma(snapshot):
+            if not snapshot:
+                return None
+            return (
+                snapshot.get("id"),
+                snapshot.get("status"),
+                len(snapshot.get("logs_en_vivo") or ""),
+            )
+
         def event_stream():
             import json
 
@@ -8011,7 +8020,9 @@ class ZafiroEnCursoSSEView(View):
             pubsub.subscribe("zafiro_en_curso")
 
             close_old_connections()
-            yield f"data: {json.dumps(_snapshot_actual())}\n\n"
+            inicial = _snapshot_actual()
+            last_sent = _firma(inicial)
+            yield f"data: {json.dumps(inicial)}\n\n"
 
             start = time.monotonic()
             try:
@@ -8022,9 +8033,28 @@ class ZafiroEnCursoSSEView(View):
                         ignore_subscribe_messages=True, timeout=20.0
                     )
                     if message:
-                        yield f"data: {message['data'].decode('utf-8')}\n\n"
+                        data_str = message["data"].decode("utf-8")
+                        try:
+                            last_sent = _firma(json.loads(data_str))
+                        except Exception:
+                            pass
+                        yield f"data: {data_str}\n\n"
                     else:
-                        yield ": ping\n\n"
+                        # Sin mensaje de Redis en 20s: el Celery worker que
+                        # corre importar_zafiro puede vivir en otra máquina
+                        # con su propio Redis local (mismo caso documentado
+                        # en ZafiroSSEView) — el publish de _append_log()
+                        # nunca llegaría a este pubsub en ese escenario. Se
+                        # revisa directo en la BD compartida por si avanzó
+                        # algo que el pubsub no entregó.
+                        close_old_connections()
+                        actual = _snapshot_actual()
+                        firma_actual = _firma(actual)
+                        if firma_actual != last_sent:
+                            last_sent = firma_actual
+                            yield f"data: {json.dumps(actual)}\n\n"
+                        else:
+                            yield ": ping\n\n"
             finally:
                 try:
                     pubsub.unsubscribe("zafiro_en_curso")
