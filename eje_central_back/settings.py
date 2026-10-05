@@ -41,6 +41,7 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     # Third party apps
+    "channels",
     "rest_framework",
     "rest_framework.authtoken",
     "corsheaders",
@@ -86,6 +87,23 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = "eje_central_back.wsgi.application"
+
+# ASGI_APPLICATION solo lo usa el proceso de websockets (plazas-ws, ver
+# eje_central_back/asgi.py y gunicorn_ws.conf.py) — el tráfico HTTP normal
+# (incluye SSE) sigue serví­do 100% por WSGI_APPLICATION arriba, sin tocar.
+ASGI_APPLICATION = "eje_central_back.asgi.application"
+
+# Capa de canales para websockets (Channels), en Redis. DB 1 a propósito:
+# separada de CELERY_BROKER_URL/CACHES (DB 0) para no mezclar pub/sub de
+# websockets con las colas de Celery ni con el caché.
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels_redis.core.RedisChannelLayer",
+        "CONFIG": {
+            "hosts": [os.getenv("CHANNELS_REDIS_URL", "redis://127.0.0.1:6379/1")],
+        },
+    },
+}
 
 DATABASES = {
     "default": {
