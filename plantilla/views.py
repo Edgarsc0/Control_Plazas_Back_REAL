@@ -10882,6 +10882,7 @@ class MovimientosPersonalStatsView(APIView):
     def get(self, request):
         accion_nombre = request.query_params.get("accion_nombre")
         fecha_captura__in = request.query_params.get("fecha_captura__in")
+        motivos_count_por_accion = request.query_params.get("motivos_count_por_accion")
 
         from django.db.models import Count, F, Value
         from django.db.models.functions import Coalesce, ExtractYear, NullIf
@@ -10902,6 +10903,26 @@ class MovimientosPersonalStatsView(APIView):
             for val in val_list:
                 q_objects |= Q(fecha_captura__startswith=val)
             queryset = queryset.filter(q_objects)
+
+        if motivos_count_por_accion:
+            # Cuántos motivos distintos tiene cada acción, en un solo query
+            # (GROUP BY accion_nombre, COUNT(DISTINCT motivo_nombre)). Antes el
+            # front pedía esto acción por acción (uno por cada slice del pie
+            # de Movimientos: hasta 16 requests en paralelo solo para un
+            # tooltip, ~6s en total por el límite de 6 conexiones concurrentes
+            # del navegador — ver MovimientosPersonalTab.jsx).
+            rows = (
+                queryset.annotate(
+                    accion_val=Coalesce(NullIf(F("accion_nombre"), Value("")), Value("Sin acción")),
+                    motivo_val=Coalesce(NullIf(F("motivo_nombre"), Value("")), Value("Sin motivo")),
+                )
+                .values("accion_val")
+                .annotate(motivos=Count("motivo_val", distinct=True))
+            )
+            return Response(
+                {"motivos_count": {row["accion_val"]: row["motivos"] for row in rows}},
+                status=status.HTTP_200_OK,
+            )
 
         if accion_nombre:
             queryset = queryset.filter(accion_nombre=accion_nombre)
