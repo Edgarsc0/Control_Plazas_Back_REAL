@@ -324,6 +324,20 @@ class ModulePermission(models.Model):
             ("edit_plantilla_detalle", "Plantilla de Empleados: editar celdas en tab Detalle"),
             ("edit_datos_personales", "Plantilla de Empleados: editar Escolaridad/Contacto/Domicilio en Datos Personales"),
             ("view_plantilla_historico", "Plantilla de Empleados: consultar plantillas históricas (tab Detalle)"),
+            # Tarjetas de resumen del banner de plantillas históricas (tab
+            # Detalle): cada una se puede ocultar por separado sin quitar el
+            # permiso general de arriba, que es el que abre el modo histórico.
+            # "Plazas Activas" NO tiene permiso propio: es la implícita de
+            # `view_plantilla_historico` y no se puede revocar. Tampoco se
+            # pueden revocar a la vez `_ocupadas` y `_vacantes` (activas =
+            # ocupadas + vacantes; dejar ambas fuera vaciaría "activas" sin
+            # haber quitado el permiso que la sostiene) — regla reforzada en
+            # el front (picker de Roles) y en `has_perm`/HasModulePermission
+            # no aplica aquí: es solo UI, no hay endpoint que lo necesite.
+            ("view_plantilla_historico_plazas_totales", "Plantilla de Empleados: mostrar tarjeta Plazas Totales (plantillas históricas)"),
+            ("view_plantilla_historico_plazas_inactivas", "Plantilla de Empleados: mostrar plazas Inactivas (plantillas históricas, tarjeta y tabla)"),
+            ("view_plantilla_historico_plazas_ocupadas", "Plantilla de Empleados: mostrar plazas Ocupadas (plantillas históricas, tarjeta y tabla)"),
+            ("view_plantilla_historico_plazas_vacantes", "Plantilla de Empleados: mostrar plazas Vacantes (plantillas históricas, tarjeta y tabla)"),
             # Sin este permiso el rol ve SIEMPRE la plantilla oficial (sin Laudos,
             # 1039 ni PASEM) y no se le muestra el switch para apagarla.
             ("view_plantilla_switch_oficial", "Plantilla de Empleados: usar el switch Plantilla Oficial (tab Detalle)"),
