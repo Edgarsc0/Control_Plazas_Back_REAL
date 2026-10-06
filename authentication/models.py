@@ -299,6 +299,9 @@ class ModulePermission(models.Model):
             ("edit_plantilla_detalle", "Plantilla de Empleados: editar celdas en tab Detalle"),
             ("edit_datos_personales", "Plantilla de Empleados: editar Escolaridad/Contacto/Domicilio en Datos Personales"),
             ("view_plantilla_historico", "Plantilla de Empleados: consultar plantillas históricas (tab Detalle)"),
+            # Sin este permiso el rol ve SIEMPRE la plantilla oficial (sin Laudos,
+            # 1039 ni PASEM) y no se le muestra el switch para apagarla.
+            ("view_plantilla_switch_oficial", "Plantilla de Empleados: usar el switch Plantilla Oficial (tab Detalle)"),
             ("view_anuencia_eliminados", "Plantilla de Empleados: ver y reactivar Anexos 2 eliminados (Anuencia)"),
             # Fotografía de empleado — permiso independiente por tab/componente
             # (un rol puede ver el tab pero no la fotografía dentro de él).

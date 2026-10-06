@@ -2250,8 +2250,18 @@ Q_FUERA_DE_PLANTILLA_OFICIAL = (
 )
 
 
+PERMISO_SWITCH_PLANTILLA_OFICIAL = "authentication.view_plantilla_switch_oficial"
+
+
+def _solo_plantilla_oficial(request):
+    """True si quien pide NO puede salirse de la plantilla oficial: sin el
+    permiso del switch, Laudos/1039/PASEM nunca salen del servidor (no basta
+    con ocultar el switch en la pantalla)."""
+    return not request.user.has_perm(PERMISO_SWITCH_PLANTILLA_OFICIAL)
+
+
 def _pide_plantilla_oficial(request):
-    return request.query_params.get("plantilla_oficial") in ("1", "true")
+    return _solo_plantilla_oficial(request) or request.query_params.get("plantilla_oficial") in ("1", "true")
 
 
 class EmpleadosCompletosEstatusNominaResumenView(APIView):
@@ -2405,7 +2415,7 @@ def _paginated_or_full_response(request, data):
     return Response(data, status=status.HTTP_200_OK)
 
 
-def _respuesta_completa_cacheada(request, base_cache_key, obtener_datos_fn, un_codes, columnas_permitidas=None):
+def _respuesta_completa_cacheada(request, base_cache_key, obtener_datos_fn, un_codes, columnas_permitidas=None, variante=""):
     """Envoltura de `_paginated_or_full_response` para el camino SIN paginar:
     cachea bytes JSON+gzip de la respuesta YA recortada por alcance (UN y
     columnas), para no rematerializar/filtrar/serializar/comprimir un dataset
@@ -2434,7 +2444,9 @@ def _respuesta_completa_cacheada(request, base_cache_key, obtener_datos_fn, un_c
     if request.query_params.get("pagination", "false").strip().lower() == "true":
         return None
 
-    resp_key = f"{base_cache_key}_respgz_{huella_scope(un_codes, columnas_permitidas)}"
+    # `variante`: otro recorte que también cambia el contenido (hoy, "solo
+    # plantilla oficial"); va en la clave para no servir una copia por otra.
+    resp_key = f"{base_cache_key}_respgz_{huella_scope(un_codes, columnas_permitidas)}{variante}"
     comprimido = cache.get(resp_key)
     if comprimido is None:
         datos = obtener_datos_fn()
@@ -2832,6 +2844,8 @@ def _responder_detalle_scoped(request, filas, un_scope):
     de paginar (para que ?page_size grande no sirva de nada), y responde con
     el mismo envelope de siempre."""
     filas = _scope_un_filas(filas, un_scope)
+    if _solo_plantilla_oficial(request):
+        filas = [f for f in filas if _es_posicion_plantilla_oficial(f)]
     filas = _strip_columnas_filas(filas, get_columnas_scope_for_request(request))
     return _paginated_or_full_response(request, filas)
 
@@ -3036,8 +3050,12 @@ class EmpleadosCompletosActivosDetalleView(APIView):
         try:
             columnas_permitidas = get_columnas_scope_for_request(request)
 
+            solo_oficial = _solo_plantilla_oficial(request)
+
             def _detalle_ya_recortado():
                 filas = _scope_un_filas(_obtener_detalle_activos_cacheado(), un_scope)
+                if solo_oficial:
+                    filas = [f for f in filas if _es_posicion_plantilla_oficial(f)]
                 return _strip_columnas_filas(filas, columnas_permitidas)
 
             cacheada = _respuesta_completa_cacheada(
@@ -3046,6 +3064,7 @@ class EmpleadosCompletosActivosDetalleView(APIView):
                 _detalle_ya_recortado,
                 un_scope,
                 columnas_permitidas,
+                variante="_oficial" if solo_oficial else "",
             )
             if cacheada is not None:
                 return cacheada
@@ -3658,6 +3677,8 @@ def _resolver_export_detalle(request, posiciones, columnas):
             EmpleadosCompletosSig.objects.filter(posicion__in=posiciones), un_scope
         ).values()
     }
+    if _solo_plantilla_oficial(request):
+        rows_by_posicion = {p: r for p, r in rows_by_posicion.items() if _es_posicion_plantilla_oficial(r)}
     rows = _aplicar_mapeos_detalle_excel(
         [rows_by_posicion[str(p)] for p in posiciones if str(p) in rows_by_posicion]
     )
@@ -11594,7 +11615,7 @@ class PlantillaHistoricaView(APIView):
     _FECHA_MINIMA = datetime.date(2022, 1, 1)
 
     @staticmethod
-    def _recortar_por_un(payload, un_scope):
+    def _recortar_por_un(payload, un_scope, solo_oficial=False):
         """Recorta el payload ya construido (o leído de caché) al alcance por UN.
 
         El resumen NO se puede reusar: viene de `sp_conteo_plazas_historico`,
@@ -11604,10 +11625,13 @@ class PlantillaHistoricaView(APIView):
         se pierden (las calcula el SP internamente, no son derivables de las
         filas): van en None, que el front ya sabe mostrar como "sin dato".
         """
-        if un_scope is None:
+        if un_scope is None and not solo_oficial:
             return payload
 
         filas = _scope_un_filas(payload.get("filas") or [], un_scope)
+        if solo_oficial:
+            # Sin permiso del switch: solo la plantilla oficial (ver _solo_plantilla_oficial).
+            filas = [f for f in filas if _es_posicion_plantilla_oficial(f)]
         activas = [f for f in filas if f.get("estado_plaza") == "A"]
         ocupadas = [f for f in activas if (f.get("estado_nomina") or "").strip()]
         return {
@@ -11655,7 +11679,10 @@ class PlantillaHistoricaView(APIView):
         cache_key = f"plantilla_historica_{fecha.isoformat()}"
         cached_data = cache.get(cache_key)
         if cached_data is not None:
-            return Response(self._recortar_por_un(cached_data, un_scope), status=status.HTTP_200_OK)
+            return Response(
+                self._recortar_por_un(cached_data, un_scope, _solo_plantilla_oficial(request)),
+                status=status.HTTP_200_OK,
+            )
 
         try:
             with connection.cursor() as cursor:
@@ -11740,7 +11767,9 @@ class PlantillaHistoricaView(APIView):
             # 24h de margen es aceptable frente al costo (~90s) de repetir el
             # cálculo en cada consulta.
             cache.set(cache_key, payload, 60 * 60 * 24)
-            return Response(self._recortar_por_un(payload, un_scope), status=status.HTTP_200_OK)
+            return Response(
+                self._recortar_por_un(payload, un_scope, _solo_plantilla_oficial(request)), status=status.HTTP_200_OK
+            )
         except Exception:
             logger.exception("Error inesperado en {}".format(request.path))
             return Response(

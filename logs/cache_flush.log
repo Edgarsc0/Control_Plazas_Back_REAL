@@ -1,0 +1,420 @@
+2026-10-05 05:03:42 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 05:03:42 cache keys borradas: 
+2026-10-05 05:03:42 cache keys borradas: 11
+2026-10-05 05:05:01 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 05:05:01 cache keys borradas: 
+2026-10-05 05:05:01 cache keys borradas: 1
+2026-10-05 05:12:22 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 05:12:22 cache keys borradas: 
+2026-10-05 05:12:22 cache keys borradas: 31
+2026-10-05 05:12:24 warm: 200 24.0s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 05:12:24 warm: 200 7.8s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 05:12:24 warm: 200 4.5s /api/plantilla/mov_pos_alineacion/
+2026-10-05 05:12:24 warm: 200 1.8s /api/plantilla/bajas_sig/historico/
+2026-10-05 05:12:24 warm: 200 1.6s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 05:12:24 warm: 200 1.0s /api/plantilla/bajas_sig/
+2026-10-05 05:35:01 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 05:35:01 cache keys borradas: 
+2026-10-05 05:35:01 cache keys borradas: 23
+2026-10-05 05:35:04 warm: 200 24.2s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 05:35:04 warm: 200 7.9s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 05:35:04 warm: 200 3.8s /api/plantilla/mov_pos_alineacion/
+2026-10-05 05:35:04 warm: 200 1.7s /api/plantilla/bajas_sig/historico/
+2026-10-05 05:35:04 warm: 200 1.6s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 05:35:04 warm: 200 1.0s /api/plantilla/bajas_sig/
+2026-10-05 06:05:01 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 06:05:01 cache keys borradas: 
+2026-10-05 06:05:01 cache keys borradas: 22
+2026-10-05 06:05:02 warm: 200 23.1s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 06:05:02 warm: 200 7.4s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 06:05:02 warm: 200 4.6s /api/plantilla/mov_pos_alineacion/
+2026-10-05 06:05:02 warm: 200 4.4s /api/plantilla/bajas_sig/historico/
+2026-10-05 06:05:02 warm: 200 2.4s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 06:05:02 warm: 200 1.2s /api/plantilla/bajas_sig/
+2026-10-05 06:35:01 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 06:35:01 cache keys borradas: 
+2026-10-05 06:35:01 cache keys borradas: 22
+2026-10-05 06:35:04 warm: 200 24.5s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 06:35:04 warm: 200 7.3s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 06:35:04 warm: 200 4.2s /api/plantilla/mov_pos_alineacion/
+2026-10-05 06:35:04 warm: 200 3.5s /api/plantilla/bajas_sig/historico/
+2026-10-05 06:35:04 warm: 200 2.0s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 06:35:04 warm: 200 1.2s /api/plantilla/bajas_sig/
+2026-10-05 07:05:01 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 07:05:01 cache keys borradas: 
+2026-10-05 07:05:01 cache keys borradas: 18
+2026-10-05 07:05:02 warm: 200 24.4s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 07:05:02 warm: 200 7.6s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 07:05:02 warm: 200 4.4s /api/plantilla/mov_pos_alineacion/
+2026-10-05 07:05:02 warm: 200 2.5s /api/plantilla/bajas_sig/historico/
+2026-10-05 07:05:02 warm: 200 2.1s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 07:05:02 warm: 200 1.1s /api/plantilla/bajas_sig/
+2026-10-05 07:35:01 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 07:35:01 cache keys borradas: 
+2026-10-05 07:35:01 cache keys borradas: 2
+2026-10-05 07:35:03 warm: 200 24.6s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 07:35:03 warm: 200 7.5s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 07:35:03 warm: 200 4.0s /api/plantilla/mov_pos_alineacion/
+2026-10-05 07:35:03 warm: 200 2.2s /api/plantilla/bajas_sig/historico/
+2026-10-05 07:35:03 warm: 200 1.5s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 07:35:03 warm: 200 0.9s /api/plantilla/bajas_sig/
+2026-10-05 08:05:01 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 08:05:01 cache keys borradas: 
+2026-10-05 08:05:01 cache keys borradas: 2
+2026-10-05 08:05:03 warm: 200 22.6s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 08:05:03 warm: 200 7.9s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 08:05:03 warm: 200 3.4s /api/plantilla/mov_pos_alineacion/
+2026-10-05 08:05:03 warm: 200 2.1s /api/plantilla/bajas_sig/historico/
+2026-10-05 08:05:03 warm: 200 1.3s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 08:05:03 warm: 200 0.9s /api/plantilla/bajas_sig/
+2026-10-05 08:35:01 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 08:35:01 cache keys borradas: 
+2026-10-05 08:35:01 cache keys borradas: 17
+2026-10-05 08:35:04 warm: 200 22.2s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 08:35:04 warm: 200 6.7s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 08:35:04 warm: 200 3.8s /api/plantilla/mov_pos_alineacion/
+2026-10-05 08:35:04 warm: 200 2.7s /api/plantilla/bajas_sig/historico/
+2026-10-05 08:35:04 warm: 200 1.6s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 08:35:04 warm: 200 1.0s /api/plantilla/bajas_sig/
+2026-10-05 09:05:01 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 09:05:01 cache keys borradas: 
+2026-10-05 09:05:01 cache keys borradas: 2
+2026-10-05 09:05:03 warm: 200 23.1s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 09:05:03 warm: 200 7.2s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 09:05:03 warm: 200 3.7s /api/plantilla/mov_pos_alineacion/
+2026-10-05 09:05:03 warm: 200 2.4s /api/plantilla/bajas_sig/historico/
+2026-10-05 09:05:03 warm: 200 1.6s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 09:05:03 warm: 200 0.9s /api/plantilla/bajas_sig/
+2026-10-05 09:35:02 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 09:35:02 cache keys borradas: 
+2026-10-05 09:35:02 cache keys borradas: 17
+2026-10-05 09:35:04 warm: 200 23.1s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 09:35:04 warm: 200 7.1s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 09:35:04 warm: 200 3.5s /api/plantilla/mov_pos_alineacion/
+2026-10-05 09:35:04 warm: 200 2.1s /api/plantilla/bajas_sig/historico/
+2026-10-05 09:35:04 warm: 200 1.7s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 09:35:04 warm: 200 1.0s /api/plantilla/bajas_sig/
+2026-10-05 10:05:01 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 10:05:01 cache keys borradas: 
+2026-10-05 10:05:01 cache keys borradas: 17
+2026-10-05 10:05:03 warm: 200 23.2s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 10:05:03 warm: 200 8.6s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 10:05:03 warm: 200 3.9s /api/plantilla/mov_pos_alineacion/
+2026-10-05 10:05:03 warm: 200 2.2s /api/plantilla/bajas_sig/historico/
+2026-10-05 10:05:03 warm: 200 1.6s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 10:05:03 warm: 200 1.0s /api/plantilla/bajas_sig/
+2026-10-05 10:35:01 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 10:35:01 cache keys borradas: 
+2026-10-05 10:35:01 cache keys borradas: 17
+2026-10-05 10:35:04 warm: 200 24.3s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 10:35:04 warm: 200 7.7s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 10:35:04 warm: 200 3.7s /api/plantilla/mov_pos_alineacion/
+2026-10-05 10:35:04 warm: 200 1.9s /api/plantilla/bajas_sig/historico/
+2026-10-05 10:35:04 warm: 200 1.7s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 10:35:04 warm: 200 1.0s /api/plantilla/bajas_sig/
+2026-10-05 11:05:01 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 11:05:01 cache keys borradas: 
+2026-10-05 11:05:01 cache keys borradas: 2
+2026-10-05 11:05:02 warm: 200 23.1s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 11:05:02 warm: 200 7.9s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 11:05:02 warm: 200 4.7s /api/plantilla/mov_pos_alineacion/
+2026-10-05 11:05:02 warm: 200 3.3s /api/plantilla/bajas_sig/historico/
+2026-10-05 11:05:02 warm: 200 2.3s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 11:05:02 warm: 200 1.2s /api/plantilla/bajas_sig/
+2026-10-05 11:35:01 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 11:35:01 cache keys borradas: 
+2026-10-05 11:35:01 cache keys borradas: 17
+2026-10-05 11:35:04 warm: 200 24.5s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 11:35:04 warm: 200 7.5s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 11:35:04 warm: 200 4.2s /api/plantilla/mov_pos_alineacion/
+2026-10-05 11:35:04 warm: 200 2.0s /api/plantilla/bajas_sig/historico/
+2026-10-05 11:35:04 warm: 200 1.7s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 11:35:04 warm: 200 1.0s /api/plantilla/bajas_sig/
+2026-10-05 12:05:01 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 12:05:01 cache keys borradas: 
+2026-10-05 12:05:01 cache keys borradas: 2
+2026-10-05 12:05:03 warm: 200 23.0s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 12:05:03 warm: 200 8.2s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 12:05:03 warm: 200 4.1s /api/plantilla/mov_pos_alineacion/
+2026-10-05 12:05:03 warm: 200 3.6s /api/plantilla/bajas_sig/historico/
+2026-10-05 12:05:03 warm: 200 2.1s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 12:05:03 warm: 200 1.2s /api/plantilla/bajas_sig/
+2026-10-05 12:35:01 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 12:35:01 cache keys borradas: 
+2026-10-05 12:35:01 cache keys borradas: 2
+2026-10-05 12:35:04 warm: 200 24.8s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 12:35:04 warm: 200 7.3s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 12:35:04 warm: 200 4.1s /api/plantilla/mov_pos_alineacion/
+2026-10-05 12:35:04 warm: 200 3.0s /api/plantilla/bajas_sig/historico/
+2026-10-05 12:35:04 warm: 200 1.9s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 12:35:04 warm: 200 1.0s /api/plantilla/bajas_sig/
+2026-10-05 13:05:01 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 13:05:01 cache keys borradas: 
+2026-10-05 13:05:01 cache keys borradas: 2
+2026-10-05 13:05:02 warm: 200 23.6s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 13:05:02 warm: 200 7.7s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 13:05:02 warm: 200 4.0s /api/plantilla/mov_pos_alineacion/
+2026-10-05 13:05:02 warm: 200 3.0s /api/plantilla/bajas_sig/historico/
+2026-10-05 13:05:02 warm: 200 1.8s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 13:05:02 warm: 200 1.1s /api/plantilla/bajas_sig/
+2026-10-05 13:35:01 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 13:35:01 cache keys borradas: 
+2026-10-05 13:35:01 cache keys borradas: 2
+2026-10-05 13:35:04 warm: 200 24.0s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 13:35:04 warm: 200 7.3s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 13:35:04 warm: 200 4.2s /api/plantilla/mov_pos_alineacion/
+2026-10-05 13:35:04 warm: 200 1.5s /api/plantilla/bajas_sig/historico/
+2026-10-05 13:35:04 warm: 200 1.5s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 13:35:04 warm: 200 0.9s /api/plantilla/bajas_sig/
+2026-10-05 14:05:01 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 14:05:01 cache keys borradas: 
+2026-10-05 14:05:01 cache keys borradas: 2
+2026-10-05 14:05:02 warm: 200 23.3s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 14:05:02 warm: 200 8.3s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 14:05:02 warm: 200 4.9s /api/plantilla/mov_pos_alineacion/
+2026-10-05 14:05:02 warm: 200 5.0s /api/plantilla/bajas_sig/historico/
+2026-10-05 14:05:02 warm: 200 2.5s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 14:05:02 warm: 200 1.4s /api/plantilla/bajas_sig/
+2026-10-05 14:35:01 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 14:35:01 cache keys borradas: 
+2026-10-05 14:35:01 cache keys borradas: 2
+2026-10-05 14:35:03 warm: 200 24.5s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 14:35:03 warm: 200 7.4s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 14:35:03 warm: 200 4.1s /api/plantilla/mov_pos_alineacion/
+2026-10-05 14:35:03 warm: 200 1.7s /api/plantilla/bajas_sig/historico/
+2026-10-05 14:35:03 warm: 200 1.6s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 14:35:03 warm: 200 1.0s /api/plantilla/bajas_sig/
+2026-10-05 15:05:01 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 15:05:01 cache keys borradas: 
+2026-10-05 15:05:01 cache keys borradas: 2
+2026-10-05 15:05:03 warm: 200 26.1s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 15:05:03 warm: 200 9.0s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 15:05:03 warm: 200 4.4s /api/plantilla/mov_pos_alineacion/
+2026-10-05 15:05:03 warm: 200 2.5s /api/plantilla/bajas_sig/historico/
+2026-10-05 15:05:03 warm: 200 1.6s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 15:05:03 warm: 200 1.1s /api/plantilla/bajas_sig/
+2026-10-05 15:35:01 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 15:35:01 cache keys borradas: 
+2026-10-05 15:35:01 cache keys borradas: 1
+2026-10-05 15:35:04 warm: 200 24.8s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 15:35:04 warm: 200 7.4s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 15:35:04 warm: 200 4.0s /api/plantilla/mov_pos_alineacion/
+2026-10-05 15:35:04 warm: 200 1.8s /api/plantilla/bajas_sig/historico/
+2026-10-05 15:35:04 warm: 200 1.6s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 15:35:04 warm: 200 1.1s /api/plantilla/bajas_sig/
+2026-10-05 16:05:01 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 16:05:01 cache keys borradas: 
+2026-10-05 16:05:01 cache keys borradas: 2
+2026-10-05 16:05:03 warm: 200 24.5s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 16:05:03 warm: 200 7.6s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 16:05:03 warm: 200 3.6s /api/plantilla/mov_pos_alineacion/
+2026-10-05 16:05:03 warm: 200 2.1s /api/plantilla/bajas_sig/historico/
+2026-10-05 16:05:03 warm: 200 1.8s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 16:05:03 warm: 200 1.1s /api/plantilla/bajas_sig/
+2026-10-05 16:35:01 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 16:35:01 cache keys borradas: 
+2026-10-05 16:35:01 cache keys borradas: 19
+2026-10-05 16:35:04 warm: 200 23.3s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 16:35:04 warm: 200 8.2s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 16:35:04 warm: 200 4.3s /api/plantilla/mov_pos_alineacion/
+2026-10-05 16:35:04 warm: 200 2.2s /api/plantilla/bajas_sig/historico/
+2026-10-05 16:35:04 warm: 200 1.6s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 16:35:04 warm: 200 0.9s /api/plantilla/bajas_sig/
+2026-10-05 17:05:01 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 17:05:01 cache keys borradas: 
+2026-10-05 17:05:01 cache keys borradas: 16
+2026-10-05 17:05:03 warm: 200 23.6s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 17:05:03 warm: 200 8.1s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 17:05:03 warm: 200 4.6s /api/plantilla/mov_pos_alineacion/
+2026-10-05 17:05:03 warm: 200 1.5s /api/plantilla/bajas_sig/historico/
+2026-10-05 17:05:03 warm: 200 1.3s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 17:05:03 warm: 200 0.9s /api/plantilla/bajas_sig/
+2026-10-05 17:35:01 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 17:35:01 cache keys borradas: 
+2026-10-05 17:35:01 cache keys borradas: 11
+2026-10-05 17:35:04 warm: 200 27.0s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 17:35:04 warm: 200 8.3s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 17:35:04 warm: 200 4.8s /api/plantilla/mov_pos_alineacion/
+2026-10-05 17:35:04 warm: 200 1.7s /api/plantilla/bajas_sig/historico/
+2026-10-05 17:35:04 warm: 200 1.6s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 17:35:04 warm: 200 1.1s /api/plantilla/bajas_sig/
+2026-10-05 18:05:01 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 18:05:01 cache keys borradas: 
+2026-10-05 18:05:01 cache keys borradas: 19
+2026-10-05 18:05:02 warm: 200 23.9s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 18:05:02 warm: 200 7.5s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 18:05:02 warm: 200 4.8s /api/plantilla/mov_pos_alineacion/
+2026-10-05 18:05:02 warm: 200 1.5s /api/plantilla/bajas_sig/historico/
+2026-10-05 18:05:02 warm: 200 1.5s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 18:05:02 warm: 200 1.0s /api/plantilla/bajas_sig/
+2026-10-05 18:35:01 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 18:35:01 cache keys borradas: 
+2026-10-05 18:35:01 cache keys borradas: 2
+2026-10-05 18:35:04 warm: 200 24.9s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 18:35:04 warm: 200 7.9s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 18:35:04 warm: 200 4.0s /api/plantilla/mov_pos_alineacion/
+2026-10-05 18:35:04 warm: 200 2.2s /api/plantilla/bajas_sig/historico/
+2026-10-05 18:35:04 warm: 200 1.6s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 18:35:04 warm: 200 1.1s /api/plantilla/bajas_sig/
+2026-10-05 19:05:01 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 19:05:01 cache keys borradas: 
+2026-10-05 19:05:01 cache keys borradas: 2
+2026-10-05 19:05:03 warm: 200 24.8s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 19:05:03 warm: 200 7.6s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 19:05:03 warm: 200 4.3s /api/plantilla/mov_pos_alineacion/
+2026-10-05 19:05:03 warm: 200 2.0s /api/plantilla/bajas_sig/historico/
+2026-10-05 19:05:03 warm: 200 1.7s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 19:05:03 warm: 200 0.9s /api/plantilla/bajas_sig/
+2026-10-05 19:14:30 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 19:14:30 cache keys borradas: 
+2026-10-05 19:14:30 cache keys borradas: 1
+2026-10-05 19:14:32 warm: 200 23.2s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 19:14:32 warm: 200 0.5s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 19:14:32 warm: 200 4.7s /api/plantilla/mov_pos_alineacion/
+2026-10-05 19:14:32 warm: 200 2.0s /api/plantilla/bajas_sig/historico/
+2026-10-05 19:14:32 warm: 200 1.5s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 19:14:32 warm: 200 1.0s /api/plantilla/bajas_sig/
+2026-10-05 19:35:01 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 19:35:01 cache keys borradas: 
+2026-10-05 19:35:01 cache keys borradas: 34
+2026-10-05 19:35:03 warm: 200 26.0s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 19:35:03 warm: 200 8.0s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 19:35:03 warm: 200 4.2s /api/plantilla/mov_pos_alineacion/
+2026-10-05 19:35:03 warm: 200 2.3s /api/plantilla/bajas_sig/historico/
+2026-10-05 19:35:03 warm: 200 1.7s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 19:35:03 warm: 200 0.9s /api/plantilla/bajas_sig/
+2026-10-05 20:05:01 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 20:05:01 cache keys borradas: 
+2026-10-05 20:05:01 cache keys borradas: 23
+2026-10-05 20:05:03 warm: 200 23.2s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 20:05:03 warm: 200 7.8s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 20:05:03 warm: 200 4.0s /api/plantilla/mov_pos_alineacion/
+2026-10-05 20:05:03 warm: 200 1.4s /api/plantilla/bajas_sig/historico/
+2026-10-05 20:05:03 warm: 200 1.4s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 20:05:03 warm: 200 0.9s /api/plantilla/bajas_sig/
+2026-10-05 12:35:01 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 12:35:01 cache keys borradas: 
+2026-10-05 12:35:01 cache keys borradas: 19
+2026-10-05 12:35:03 warm: 200 23.8s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 12:35:03 warm: 200 7.0s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 12:35:03 warm: 200 3.9s /api/plantilla/mov_pos_alineacion/
+2026-10-05 12:35:03 warm: 200 1.4s /api/plantilla/bajas_sig/historico/
+2026-10-05 12:35:03 warm: 200 1.6s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 12:35:03 warm: 200 0.9s /api/plantilla/bajas_sig/
+2026-10-05 13:05:01 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 13:05:01 cache keys borradas: 
+2026-10-05 13:05:01 cache keys borradas: 2
+2026-10-05 13:05:03 warm: 200 24.4s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 13:05:03 warm: 200 7.5s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 13:05:03 warm: 200 3.9s /api/plantilla/mov_pos_alineacion/
+2026-10-05 13:05:03 warm: 200 1.7s /api/plantilla/bajas_sig/historico/
+2026-10-05 13:05:03 warm: 200 1.6s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 13:05:03 warm: 200 1.0s /api/plantilla/bajas_sig/
+2026-10-05 13:35:01 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 13:35:01 cache keys borradas: 
+2026-10-05 13:35:01 cache keys borradas: 2
+2026-10-05 13:35:04 warm: 200 24.1s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 13:35:04 warm: 200 7.5s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 13:35:04 warm: 200 4.7s /api/plantilla/mov_pos_alineacion/
+2026-10-05 13:35:04 warm: 200 2.4s /api/plantilla/bajas_sig/historico/
+2026-10-05 13:35:04 warm: 200 1.7s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 13:35:04 warm: 200 0.9s /api/plantilla/bajas_sig/
+2026-10-05 14:05:01 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 14:05:01 cache keys borradas: 
+2026-10-05 14:05:01 cache keys borradas: 23
+2026-10-05 14:05:03 warm: 200 23.9s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 14:05:03 warm: 200 8.2s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 14:05:03 warm: 200 3.7s /api/plantilla/mov_pos_alineacion/
+2026-10-05 14:05:03 warm: 200 3.1s /api/plantilla/bajas_sig/historico/
+2026-10-05 14:05:03 warm: 200 1.9s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 14:05:03 warm: 200 1.1s /api/plantilla/bajas_sig/
+2026-10-05 14:35:01 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 14:35:01 cache keys borradas: 
+2026-10-05 14:35:01 cache keys borradas: 29
+2026-10-05 14:35:02 warm: 200 24.8s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 14:35:02 warm: 200 7.4s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 14:35:02 warm: 200 3.7s /api/plantilla/mov_pos_alineacion/
+2026-10-05 14:35:02 warm: 200 2.0s /api/plantilla/bajas_sig/historico/
+2026-10-05 14:35:02 warm: 200 1.5s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 14:35:02 warm: 200 1.0s /api/plantilla/bajas_sig/
+2026-10-05 15:05:01 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 15:05:01 cache keys borradas: 
+2026-10-05 15:05:01 cache keys borradas: 26
+2026-10-05 15:05:02 warm: 200 23.9s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 15:05:02 warm: 200 2.3s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 15:05:02 warm: 200 4.3s /api/plantilla/mov_pos_alineacion/
+2026-10-05 15:05:02 warm: 200 2.4s /api/plantilla/bajas_sig/historico/
+2026-10-05 15:05:02 warm: 200 1.6s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 15:05:02 warm: 200 1.0s /api/plantilla/bajas_sig/
+2026-10-05 15:35:01 cache keys borradas: 90 objects imported automatically (use -v 2 for details).
+2026-10-05 15:35:01 cache keys borradas: 
+2026-10-05 15:35:01 cache keys borradas: 23
+2026-10-05 15:35:03 warm: 200 24.4s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 15:35:03 warm: 200 7.4s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 15:35:03 warm: 200 4.1s /api/plantilla/mov_pos_alineacion/
+2026-10-05 15:35:03 warm: 200 1.8s /api/plantilla/bajas_sig/historico/
+2026-10-05 15:35:03 warm: 200 1.7s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 15:35:03 warm: 200 1.1s /api/plantilla/bajas_sig/
+2026-10-05 16:05:01 cache keys borradas: 92 objects imported automatically (use -v 2 for details).
+2026-10-05 16:05:01 cache keys borradas: 
+2026-10-05 16:05:01 cache keys borradas: 26
+2026-10-05 16:05:02 warm: 200 23.4s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 16:05:02 warm: 200 7.7s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 16:05:02 warm: 200 3.9s /api/plantilla/mov_pos_alineacion/
+2026-10-05 16:05:02 warm: 200 2.2s /api/plantilla/bajas_sig/historico/
+2026-10-05 16:05:02 warm: 200 1.6s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 16:05:02 warm: 200 1.1s /api/plantilla/bajas_sig/
+2026-10-05 16:35:01 cache keys borradas: 92 objects imported automatically (use -v 2 for details).
+2026-10-05 16:35:01 cache keys borradas: 
+2026-10-05 16:35:01 cache keys borradas: 24
+2026-10-05 16:35:03 warm: 200 23.1s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 16:35:03 warm: 200 7.4s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 16:35:03 warm: 200 4.3s /api/plantilla/mov_pos_alineacion/
+2026-10-05 16:35:03 warm: 200 1.5s /api/plantilla/bajas_sig/historico/
+2026-10-05 16:35:03 warm: 200 1.5s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 16:35:03 warm: 200 0.9s /api/plantilla/bajas_sig/
+2026-10-05 17:05:01 cache keys borradas: 92 objects imported automatically (use -v 2 for details).
+2026-10-05 17:05:01 cache keys borradas: 
+2026-10-05 17:05:01 cache keys borradas: 36
+2026-10-05 17:05:03 warm: 200 24.3s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 17:05:03 warm: 200 7.8s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 17:05:03 warm: 200 4.5s /api/plantilla/mov_pos_alineacion/
+2026-10-05 17:05:03 warm: 200 1.5s /api/plantilla/bajas_sig/historico/
+2026-10-05 17:05:03 warm: 200 1.3s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 17:05:03 warm: 200 0.9s /api/plantilla/bajas_sig/
+2026-10-05 17:35:01 cache keys borradas: 93 objects imported automatically (use -v 2 for details).
+2026-10-05 17:35:01 cache keys borradas: 
+2026-10-05 17:35:01 cache keys borradas: 19
+2026-10-05 17:35:02 warm: 200 23.5s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 17:35:02 warm: 200 7.6s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 17:35:02 warm: 200 4.3s /api/plantilla/mov_pos_alineacion/
+2026-10-05 17:35:02 warm: 200 2.1s /api/plantilla/bajas_sig/historico/
+2026-10-05 17:35:02 warm: 200 1.7s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 17:35:02 warm: 200 1.0s /api/plantilla/bajas_sig/
+2026-10-05 18:05:01 cache keys borradas: 93 objects imported automatically (use -v 2 for details).
+2026-10-05 18:05:01 cache keys borradas: 
+2026-10-05 18:05:01 cache keys borradas: 19
+2026-10-05 18:05:03 warm: 200 23.3s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 18:05:03 warm: 200 7.8s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 18:05:03 warm: 200 4.8s /api/plantilla/mov_pos_alineacion/
+2026-10-05 18:05:03 warm: 200 1.6s /api/plantilla/bajas_sig/historico/
+2026-10-05 18:05:03 warm: 200 1.7s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 18:05:03 warm: 200 1.1s /api/plantilla/bajas_sig/
+2026-10-05 18:35:01 cache keys borradas: 93 objects imported automatically (use -v 2 for details).
+2026-10-05 18:35:01 cache keys borradas: 
+2026-10-05 18:35:01 cache keys borradas: 22
+2026-10-05 18:35:03 warm: 200 22.3s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 18:35:03 warm: 200 7.1s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 18:35:03 warm: 200 3.7s /api/plantilla/mov_pos_alineacion/
+2026-10-05 18:35:03 warm: 200 2.7s /api/plantilla/bajas_sig/historico/
+2026-10-05 18:35:03 warm: 200 1.7s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 18:35:03 warm: 200 1.0s /api/plantilla/bajas_sig/
+2026-10-05 19:05:01 cache keys borradas: 93 objects imported automatically (use -v 2 for details).
+2026-10-05 19:05:01 cache keys borradas: 
+2026-10-05 19:05:01 cache keys borradas: 28
+2026-10-05 19:05:03 warm: 200 22.9s /api/plantilla/conteo_plazas_historico_serie/
+2026-10-05 19:05:03 warm: 200 7.3s /api/plantilla/empleados_completos_estatus_resumen/
+2026-10-05 19:05:03 warm: 200 4.1s /api/plantilla/mov_pos_alineacion/
+2026-10-05 19:05:03 warm: 200 2.1s /api/plantilla/bajas_sig/historico/
+2026-10-05 19:05:03 warm: 200 1.6s /api/plantilla/desglose_jerarquico_ocupados/
+2026-10-05 19:05:03 warm: 200 0.9s /api/plantilla/bajas_sig/
