@@ -25,6 +25,8 @@ from .views import (
     DatosPersonalesCeldaOverrideView,
     ExportarPlantillaDetalleConFotosView,
     ExportarPlantillaHistoricaConFotosView,
+    RegistrarDescargaExcelView,
+    RegenerarDescargaExcelView,
     ExportarMovimientosPersonalConFotosView,
     ExportarBajasConFotosView,
     ExportarEmpleadosPorPosicionConFotosView,
@@ -409,6 +411,16 @@ urlpatterns = [
         "exportar_plantilla_detalle_con_fotos/",
         ExportarPlantillaDetalleConFotosView.as_view(),
         name="exportar_plantilla_detalle_con_fotos",
+    ),
+    path(
+        "registrar_descarga_excel/",
+        RegistrarDescargaExcelView.as_view(),
+        name="registrar_descarga_excel",
+    ),
+    path(
+        "descargas_excel/<int:pk>/regenerar/",
+        RegenerarDescargaExcelView.as_view(),
+        name="regenerar_descarga_excel",
     ),
     path(
         "exportar_plantilla_historica_con_fotos/",

@@ -2,7 +2,7 @@ from rest_framework.exceptions import APIException, PermissionDenied
 from rest_framework.permissions import BasePermission
 
 from .mantenimiento import usuario_bloqueado
-from .scoping import get_un_scope_for_request
+from .scoping import get_ua_scope_for_request, get_un_scope_for_request
 
 SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
 
@@ -30,6 +30,13 @@ UN_SCOPE_APLICADO = "aplicado"
 UN_SCOPE_NO_APLICA = "no_aplica"
 UN_SCOPE_EXENTO = "exento"
 UN_SCOPE_VALIDOS = (UN_SCOPE_APLICADO, UN_SCOPE_NO_APLICA, UN_SCOPE_EXENTO)
+
+
+# Mismos tres valores para el atributo `ua_scope` de una vista (alcance por
+# Unidad Administrativa, ver RolUaScope). Es una declaración APARTE de
+# `un_scope` a propósito: que una vista sepa recortar por UN no implica que
+# sepa recortar por UA, y a una aduana le mostraría toda su Dirección General.
+UA_SCOPE_VALIDOS = UN_SCOPE_VALIDOS
 
 
 class MantenimientoActivo(APIException):
@@ -141,7 +148,9 @@ class HasModulePermission(BasePermission):
         if extra and not self._tiene_alguno(user, extra):
             return False
 
-        return self._permitir_bajo_alcance_un(request, view)
+        return self._permitir_bajo_alcance_un(request, view) and self._permitir_bajo_alcance_ua(
+            request, view
+        )
 
     @staticmethod
     def _tiene_alguno(user, required):
@@ -165,3 +174,25 @@ class HasModulePermission(BasePermission):
         # falta un permiso de módulo, cuando lo que falta es cobertura de
         # filtrado por UN en esta vista.
         raise PermissionDenied(self.MENSAJE_SIN_DECLARAR)
+
+    #: Mensaje del 403 cuando la vista no declaró `ua_scope`.
+    MENSAJE_SIN_DECLARAR_UA = (
+        "Este módulo todavía no admite roles restringidos por Unidad Administrativa. "
+        "Se niega el acceso para no exponer información fuera de su unidad."
+    )
+
+    def _permitir_bajo_alcance_ua(self, request, view):
+        """Cierre por defecto del alcance por Unidad Administrativa: misma
+        lógica que el de UN, con su propia declaración (`ua_scope`)."""
+        if get_ua_scope_for_request(request) is None:
+            return True
+
+        if getattr(view, "ua_scope", None) in UA_SCOPE_VALIDOS:
+            return True
+
+        # Una vista que declaró no exponer datos de empleados/plazas tampoco
+        # tiene nada que recortar por UA: no hace falta declararlo dos veces.
+        if getattr(view, "un_scope", None) == UN_SCOPE_NO_APLICA:
+            return True
+
+        raise PermissionDenied(self.MENSAJE_SIN_DECLARAR_UA)

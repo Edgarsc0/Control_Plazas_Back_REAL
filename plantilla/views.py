@@ -46,6 +46,7 @@ from authentication.scoping import (
     get_columnas_scope_for_request,
     get_un_scope_for_request,
     huella_scope,
+    ua_de_alcance,
 )
 
 from .models import (
@@ -2256,6 +2257,8 @@ def _pide_plantilla_oficial(request):
 class EmpleadosCompletosEstatusNominaResumenView(APIView):
     # Filtra por Unidad de Negocio (ver el bloque de helpers _scope_un_*).
     un_scope = UN_SCOPE_APLICADO
+    # También recorta por Unidad Administrativa (ver AlcanceUN en authentication.scoping).
+    ua_scope = UN_SCOPE_APLICADO
     view_permission = "authentication.view_plantilla_detalle"
 
     def get(self, request, *args, **kwargs):
@@ -2575,16 +2578,41 @@ def _respuesta_completa_cacheada(request, base_cache_key, obtener_datos_fn, un_c
 # y marcar. Recordatorio: no otorgar permisos `edit_*` a un rol con alcance —
 # ninguna vista de escritura está recortada, y el default-deny las bloquea
 # justamente por eso.
+# Columna donde cada tabla guarda la Unidad Administrativa (código de 3
+# dígitos, ver authentication/ua_catalog.py), por nombre de campo del modelo.
+# Un modelo/fila que no tenga ninguna NO se puede recortar por UA: los helpers
+# de abajo devuelven vacío en ese caso (fail-closed) en vez de dejar pasar.
+CAMPOS_UA = ("cd_ua", "unidad_adva", "unidad_admon")
+
+
+def _campo_ua_de_modelo(modelo):
+    nombres = {f.name for f in modelo._meta.get_fields()}
+    return next((campo for campo in CAMPOS_UA if campo in nombres), None)
+
+
 def _scope_un_queryset(queryset, un_codes, field="cd_un"):
     """None -> queryset intacto (sin restricción). Lista -> solo filas cuyo
     Trim(field) esté en la lista (NULL/'' nunca pasa). Lista vacía -> .none()
-    (fail-closed, ver RolUnScope)."""
+    (fail-closed, ver RolUnScope).
+
+    Si el alcance trae además recorte por Unidad Administrativa (ver
+    authentication.scoping.AlcanceUN) se aplica también, sobre la columna de
+    UA del modelo; un modelo sin columna de UA devuelve .none()."""
     if un_codes is None:
         return queryset
     if not un_codes:
         return queryset.none()
     alias = f"_scope_{field}"
-    return queryset.annotate(**{alias: Trim(field)}).filter(**{f"{alias}__in": un_codes})
+    queryset = queryset.annotate(**{alias: Trim(field)}).filter(**{f"{alias}__in": un_codes})
+
+    ua_codes = ua_de_alcance(un_codes)
+    if ua_codes is None:
+        return queryset
+    campo_ua = _campo_ua_de_modelo(queryset.model)
+    if not ua_codes or campo_ua is None:
+        return queryset.none()
+    alias_ua = f"_scope_{campo_ua}"
+    return queryset.annotate(**{alias_ua: Trim(campo_ua)}).filter(**{f"{alias_ua}__in": ua_codes})
 
 
 def _scope_un_filas(filas, un_codes, key="cd_un"):
@@ -2594,8 +2622,19 @@ def _scope_un_filas(filas, un_codes, key="cd_un"):
         return filas
     if not un_codes:
         return []
+    ua_codes = ua_de_alcance(un_codes)  # antes de copiar: set() pierde `.ua`
     permitidos = set(un_codes)
-    return [f for f in filas if str(f.get(key) or "").strip() in permitidos]
+    filas = [f for f in filas if str(f.get(key) or "").strip() in permitidos]
+    if ua_codes is None:
+        return filas
+    # Recorte por Unidad Administrativa: la fila debe traer su UA en alguna de
+    # las claves conocidas; si no trae ninguna queda fuera (fail-closed).
+    uas = set(ua_codes)
+    return [
+        f
+        for f in filas
+        if any(str(f.get(campo) or "").strip() in uas for campo in CAMPOS_UA if f.get(campo))
+    ]
 
 
 def _numempleado_en_scope(numempleado, un_codes):
@@ -2726,10 +2765,15 @@ def _clausula_un_sql(un_codes, alias="e"):
     """
     if not un_codes:
         return "", []
-    return (
-        " AND TRIM(%s.`Cd UN`) IN (%s)" % (alias, ",".join(["%s"] * len(un_codes))),
-        list(un_codes),
-    )
+    ua_codes = ua_de_alcance(un_codes)  # antes de copiar: list() pierde `.ua`
+    sql = " AND TRIM(%s.`Cd UN`) IN (%s)" % (alias, ",".join(["%s"] * len(un_codes)))
+    params = list(un_codes)
+    if ua_codes is not None:
+        # Alcance por Unidad Administrativa. `IN (NULL)` nunca es verdadero:
+        # una lista vacía de UAs no devuelve nada (fail-closed) sin romper el SQL.
+        sql += " AND TRIM(%s.`Cd UA`) IN (%s)" % (alias, ",".join(["%s"] * len(ua_codes)) or "NULL")
+        params += list(ua_codes)
+    return sql, params
 
 
 def _variantes_padding_un(codigos):
@@ -2761,6 +2805,11 @@ def _scope_un_movimientos(queryset, un_codes, field="un"):
     if un_codes is None:
         return queryset
     if not un_codes:
+        return queryset.none()
+    if ua_de_alcance(un_codes) is not None:
+        # cp_tbl_mov_completo guarda la UA en `un_admin`, cuya escritura no se
+        # ha auditado (su `un` trae el mismo código con y sin ceros). Hasta
+        # hacerlo, un rol con alcance por UA no ve movimientos por esta vía.
         return queryset.none()
     return queryset.filter(**{f"{field}__in": _variantes_padding_un(un_codes)})
 
@@ -2866,6 +2915,8 @@ class EmpleadosCompletosActivosDetalleView(APIView):
     # contra `detalle`) — cualquiera de los 3 permisos basta, no solo Detalle.
     # Filtra por Unidad de Negocio (ver los helpers _scope_un_* / _responder_detalle_scoped).
     un_scope = UN_SCOPE_APLICADO
+    # También recorta por Unidad Administrativa (ver AlcanceUN en authentication.scoping).
+    ua_scope = UN_SCOPE_APLICADO
     view_permission = (
         "authentication.view_plantilla_detalle",
         "authentication.view_plantilla_estatus_nomina",
@@ -3165,6 +3216,8 @@ class EmpleadoFotoView(APIView):
     # HasModulePermission cuando view_permission es una tupla).
     # Filtra por Unidad de Negocio (ver los helpers _scope_un_* / _responder_detalle_scoped).
     un_scope = UN_SCOPE_APLICADO
+    # También recorta por Unidad Administrativa (ver AlcanceUN en authentication.scoping).
+    ua_scope = UN_SCOPE_APLICADO
     view_permission = (
         "authentication.view_plantilla_detalle_foto",
         "authentication.view_plantilla_estatus_nomina_foto",
@@ -3223,6 +3276,8 @@ class DatosPersonalesEmpleadoView(APIView):
 
     # Filtra por Unidad de Negocio (ver los helpers _scope_un_* / _responder_detalle_scoped).
     un_scope = UN_SCOPE_APLICADO
+    # También recorta por Unidad Administrativa (ver AlcanceUN en authentication.scoping).
+    ua_scope = UN_SCOPE_APLICADO
     # Único consumidor: la pestaña "Datos personales" del expediente. Al no
     # compartirse con ningún módulo, el permiso de pestaña se puede exigir
     # sin matices (ver `extra_permission` en HasModulePermission).
@@ -3360,6 +3415,12 @@ class DatosPersonalesBulkView(APIView):
 
     # Filtra por Unidad de Negocio (ver los helpers _scope_un_* / _responder_detalle_scoped).
     un_scope = UN_SCOPE_APLICADO
+    # También recorta por Unidad Administrativa (ver AlcanceUN en authentication.scoping).
+    ua_scope = UN_SCOPE_APLICADO
+    # Además del permiso del tab, exige el de la pestaña "Datos Personales" del
+    # expediente (igual que DatosPersonalesEmpleadoView): sin esto, cualquier rol
+    # con Plantilla Detalle podía bajarse los datos personales por el Excel.
+    extra_permission = "authentication.view_expediente_datos_personales"
     view_permission = (
         "authentication.view_plantilla_detalle",
         "authentication.view_plantilla_estatus_nomina",
@@ -3540,6 +3601,232 @@ def _excel_con_fotos_response(buffer, incluir_fotos, nombre_base):
     return response
 
 
+# ---------------------------------------------------------------------------
+# Auditoría de descargas de Excel (authentication.DescargaExcelLog)
+# ---------------------------------------------------------------------------
+PERMISO_DATOS_PERSONALES = "authentication.view_expediente_datos_personales"
+PERMISO_FOTO_DETALLE = "authentication.view_plantilla_detalle_foto"
+
+_MONO_KEYS_DETALLE_EXCEL = ["posicion", "id_empleado", "rfc", "curp", "nivel", "codigo_presupuestal",
+                            "ua", "cent", "dir", "subd", "jd", "depto", "numeral"]
+_DIR_SNAPSHOTS_EXCEL = "auditoria_excel"
+# Tope de lo que se acepta guardar del texto libre que manda el front.
+_MAX_FILTROS_JSON = 20000
+
+
+def _limpiar_columnas_export(columnas):
+    """Deja solo {key, label} de texto: `columnas` llega del cliente sin validar."""
+    limpias = []
+    for c in columnas or []:
+        if isinstance(c, dict) and c.get("key"):
+            limpias.append({"key": str(c["key"])[:100], "label": str(c.get("label") or c["key"])[:200]})
+    return limpias
+
+
+def _ip_de_request(request):
+    reenviada = (request.META.get("HTTP_X_FORWARDED_FOR") or "").split(",")[0].strip()
+    return (reenviada or request.META.get("REMOTE_ADDR") or "")[:64]
+
+
+def _columnas_datos_personales_export():
+    return [{"key": f"dp_{campo}", "label": label} for campo, label in DATOS_PERSONALES_EXPORT_FIELDS]
+
+
+def _agregar_datos_personales_a_filas(rows):
+    """Cruza por numempleado con DATOS_PERSONALES y agrega sus columnas
+    (prefijo "dp_" para no pisar columnas homónimas de Plantilla Detalle)."""
+    mapa_dp = _get_datos_personales_bulk_map([r.get("numempleado") for r in rows])
+    for r in rows:
+        registro_dp = mapa_dp.get(str(r.get("numempleado") or "").strip(), {})
+        for campo, _label in DATOS_PERSONALES_EXPORT_FIELDS:
+            r[f"dp_{campo}"] = registro_dp.get(campo, "")
+
+
+def _resolver_export_detalle(request, posiciones, columnas):
+    """Filas y columnas que REALMENTE puede exportar quien hace la petición.
+
+    `posiciones` y `columnas` llegan del cliente sin validar: las posiciones
+    se intersectan con el alcance por UN/UA (las ajenas desaparecen en
+    silencio — un error específico convertiría esto en un oráculo para
+    adivinar a qué unidad pertenece cada posición) y las columnas con el
+    alcance de columnas del rol (RolColumnScope).
+    """
+    un_scope = get_un_scope_for_request(request)
+    rows_by_posicion = {
+        str(r["posicion"]): r
+        for r in _scope_un_queryset(
+            EmpleadosCompletosSig.objects.filter(posicion__in=posiciones), un_scope
+        ).values()
+    }
+    rows = _aplicar_mapeos_detalle_excel(
+        [rows_by_posicion[str(p)] for p in posiciones if str(p) in rows_by_posicion]
+    )
+    columnas = _limpiar_columnas_export(columnas)
+    columnas_scope = get_columnas_scope_for_request(request)
+    if columnas_scope is not None:
+        permitidas = set(columnas_scope) | COLUMNAS_DETALLE_SIEMPRE_INCLUIDAS
+        columnas = [c for c in columnas if c["key"] in permitidas]
+    return rows, columnas
+
+
+def _registrar_descarga_excel(
+    request, *, modo, columnas, rows, incluyo_fotos, incluyo_datos_personales,
+    fecha_historica="", regenerada_de=None, guardar_snapshot=True,
+):
+    """Deja constancia de un Excel generado y guarda la copia de sus filas.
+
+    `columnas`/`rows` son las de la plantilla, SIN las columnas de datos
+    personales ni las fotografías: de eso solo se guarda la bandera (se
+    vuelven a cruzar al regenerar), para no multiplicar en disco copias de
+    información personal.
+    """
+    from authentication.models import DescargaExcelLog
+
+    filtros = request.data.get("filtros") if hasattr(request, "data") else None
+    if not isinstance(filtros, dict) or len(json.dumps(filtros, default=str)) > _MAX_FILTROS_JSON:
+        filtros = {}
+    grupo = request.user.groups.first()
+    log = DescargaExcelLog.objects.create(
+        email=(getattr(request.user, "email", "") or request.user.get_username())[:254],
+        rol=(grupo.name if grupo else ("SuperAdmin" if request.user.is_superuser else ""))[:150],
+        modulo="plantilla_detalle",
+        modo=modo,
+        fecha_historica=(fecha_historica or "")[:10],
+        total_filas=len(rows),
+        columnas=columnas,
+        filtros=filtros,
+        incluyo_fotos=bool(incluyo_fotos),
+        incluyo_datos_personales=bool(incluyo_datos_personales),
+        nombre_archivo=str((request.data.get("nombre_archivo") if hasattr(request, "data") else "") or "")[:255],
+        ip=_ip_de_request(request),
+        regenerada_de=regenerada_de,
+    )
+    if guardar_snapshot:
+        try:
+            claves = [c["key"] for c in columnas]
+            if "numempleado" not in claves:
+                claves.append("numempleado")  # llave de la foto y de los datos personales
+            carpeta = Path(settings.MEDIA_ROOT) / _DIR_SNAPSHOTS_EXCEL / f"{log.created_at:%Y-%m}"
+            carpeta.mkdir(parents=True, exist_ok=True)
+            destino = carpeta / f"{log.id}.json.gz"
+            contenido = {"rows": [{k: r.get(k) for k in claves} for r in rows]}
+            with gzip.open(destino, "wt", encoding="utf-8") as fh:
+                json.dump(contenido, fh, default=str, ensure_ascii=False)
+            log.snapshot = str(destino.relative_to(settings.MEDIA_ROOT))
+            log.save(update_fields=["snapshot"])
+        except Exception:
+            # La bitácora ya quedó; sin copia solo se pierde el "regenerar".
+            logger.exception("No se pudo guardar la copia de la descarga de Excel %s", log.id)
+    return log
+
+
+class RegistrarDescargaExcelView(APIView):
+    """Paso OBLIGATORIO antes del export client-side (ExcelJS) de Plantilla
+    Detalle: el navegador arma ese archivo sin pasar por el servidor, así que
+    el front registra aquí la descarga y solo si responde 201 genera el Excel.
+    Los exports con fotografías se registran solos (los arma el servidor)."""
+
+    un_scope = UN_SCOPE_APLICADO
+    ua_scope = UN_SCOPE_APLICADO
+    view_permission = "authentication.view_plantilla_detalle"
+
+    def post(self, request):
+        from authentication.models import DescargaExcelLog
+
+        columnas = request.data.get("columnas") or []
+        incluir_dp = bool(request.data.get("incluir_datos_personales")) and request.user.has_perm(
+            PERMISO_DATOS_PERSONALES
+        )
+        fecha = (request.data.get("fecha") or "").strip()
+
+        if fecha:
+            # Plantilla histórica: las filas son las que el front ya recibió,
+            # recortadas a su alcance, de PlantillaHistoricaView.
+            if not request.user.has_perm("authentication.view_plantilla_historico"):
+                return Response({"error": "Sin permiso para plantillas históricas."}, status=status.HTTP_403_FORBIDDEN)
+            rows = [r for r in (request.data.get("rows") or []) if isinstance(r, dict)]
+            columnas = _limpiar_columnas_export(columnas)
+            columnas_scope = get_columnas_scope_for_request(request)
+            if columnas_scope is not None:
+                permitidas = set(columnas_scope) | COLUMNAS_DETALLE_SIEMPRE_INCLUIDAS
+                columnas = [c for c in columnas if c["key"] in permitidas]
+            modo = DescargaExcelLog.MODO_HISTORICO
+        else:
+            posiciones = request.data.get("posiciones") or []
+            if not isinstance(posiciones, list):
+                posiciones = []
+            rows, columnas = _resolver_export_detalle(request, posiciones, columnas)
+            modo = DescargaExcelLog.MODO_ACTUAL
+
+        if not rows or not columnas:
+            return Response({"error": "No hay filas o columnas que exportar."}, status=status.HTTP_400_BAD_REQUEST)
+
+        log = _registrar_descarga_excel(
+            request, modo=modo, columnas=columnas, rows=rows, incluyo_fotos=False,
+            incluyo_datos_personales=incluir_dp, fecha_historica=fecha,
+        )
+        return Response(
+            {"id": log.id, "incluir_datos_personales": incluir_dp}, status=status.HTTP_201_CREATED
+        )
+
+
+class RegenerarDescargaExcelView(APIView):
+    """Vuelve a generar el Excel de una descarga registrada, a partir de la
+    copia de sus filas (botón del historial en Roles > Usuarios > Actividad).
+
+    Las filas y columnas son exactamente las de aquel día; las fotografías y
+    los datos personales, si los llevaba, se cruzan con lo vigente hoy. Sin
+    `un_scope` declarado a propósito: un rol con alcance restringido no puede
+    regenerar descargas (cierre por defecto de HasModulePermission)."""
+
+    view_permission = "authentication.manage_roles"
+
+    def get(self, request, pk):
+        from authentication.models import DescargaExcelLog
+        from .excel_fotos import generar_workbook_excel_con_fotos
+
+        log = DescargaExcelLog.objects.filter(pk=pk).first()
+        if log is None:
+            return Response({"error": "La descarga no existe."}, status=status.HTTP_404_NOT_FOUND)
+        origen = log.regenerada_de or log
+        ruta = Path(settings.MEDIA_ROOT) / origen.snapshot if origen.snapshot else None
+        if ruta is None or not ruta.is_file():
+            return Response(
+                {"error": "Esta descarga no conserva copia de sus datos y no se puede regenerar."},
+                status=status.HTTP_410_GONE,
+            )
+        with gzip.open(ruta, "rt", encoding="utf-8") as fh:
+            rows = json.load(fh).get("rows") or []
+
+        columnas = list(origen.columnas or [])
+        columnas_archivo = list(columnas)
+        if origen.incluyo_datos_personales:
+            _agregar_datos_personales_a_filas(rows)
+            columnas_archivo += _columnas_datos_personales_export()
+
+        fecha_descarga = origen.created_at.astimezone(ZoneInfo("America/Mexico_City")).strftime("%d/%m/%Y %H:%M")
+        leyenda = f"Copia de auditoría de la descarga realizada por {origen.email} el {fecha_descarga}"
+        es_historico = origen.modo == DescargaExcelLog.MODO_HISTORICO
+        if es_historico:
+            leyenda = f"Plantilla histórica al {origen.fecha_historica} · {leyenda}"
+
+        buffer = generar_workbook_excel_con_fotos(
+            columnas=columnas_archivo, rows=rows, incluir_fotos=origen.incluyo_fotos,
+            sheet_name="Plantilla_Empleados", numero_empleado_key="numempleado",
+            mono_keys=_MONO_KEYS_DETALLE_EXCEL,
+            # En modo histórico el front ya mandó Estado Nómina con su etiqueta.
+            estado_nomina_key=None if es_historico else "estado_nomina",
+            mapear_estado_nomina=None if es_historico else _mapear_estado_nomina_excel,
+            extra_legend=leyenda,
+        )
+        _registrar_descarga_excel(
+            request, modo=origen.modo, columnas=columnas, rows=rows,
+            incluyo_fotos=origen.incluyo_fotos, incluyo_datos_personales=origen.incluyo_datos_personales,
+            fecha_historica=origen.fecha_historica, regenerada_de=origen, guardar_snapshot=False,
+        )
+        return _excel_con_fotos_response(buffer, origen.incluyo_fotos, f"Auditoria_Descarga_{origen.id}")
+
+
 class ExportarPlantillaDetalleConFotosView(APIView):
     """
     Genera el Excel de Plantilla Detalle, opcionalmente con fotografías de
@@ -3557,53 +3844,29 @@ class ExportarPlantillaDetalleConFotosView(APIView):
 
     # Filtra por Unidad de Negocio (ver los helpers _scope_un_* / _responder_detalle_scoped).
     un_scope = UN_SCOPE_APLICADO
+    # También recorta por Unidad Administrativa (ver AlcanceUN en authentication.scoping).
+    ua_scope = UN_SCOPE_APLICADO
     view_permission = "authentication.view_plantilla_detalle"
 
     def post(self, request):
         from .excel_fotos import generar_workbook_excel_con_fotos
 
+        from authentication.models import DescargaExcelLog
+
         posiciones = request.data.get("posiciones") or []
         columnas = request.data.get("columnas") or []
-        incluir_fotos = bool(request.data.get("incluir_fotos")) and request.user.has_perm(
-            "authentication.view_plantilla_detalle_foto"
+        incluir_fotos = bool(request.data.get("incluir_fotos")) and request.user.has_perm(PERMISO_FOTO_DETALLE)
+        # Los datos personales los gobierna el permiso de la pestaña "Datos
+        # Personales" del expediente: sin él, la bandera del cliente se ignora.
+        incluir_datos_personales = bool(request.data.get("incluir_datos_personales")) and request.user.has_perm(
+            PERMISO_DATOS_PERSONALES
         )
-        incluir_datos_personales = bool(request.data.get("incluir_datos_personales"))
 
         if not posiciones or not columnas:
             return Response({"error": "Faltan 'posiciones' o 'columnas'."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # `posiciones` viene del cliente sin validar (ver docstring de la
-        # clase) — se intersecta con el scope de UN del usuario antes de
-        # construir el Excel. Las posiciones fuera de scope desaparecen en
-        # silencio del resultado (el filtro de abajo, `if str(p) in
-        # rows_by_posicion`, ya las excluye solo) en vez de responder un
-        # error: un error específico para "fuera de scope" convertiría este
-        # endpoint en un oráculo para adivinar a qué UN pertenece cada
-        # posición.
-        un_scope = get_un_scope_for_request(request)
-        rows_by_posicion = {
-            str(r["posicion"]): r
-            for r in _scope_un_queryset(
-                EmpleadosCompletosSig.objects.filter(posicion__in=posiciones), un_scope
-            ).values()
-        }
-        rows = _aplicar_mapeos_detalle_excel(
-            [rows_by_posicion[str(p)] for p in posiciones if str(p) in rows_by_posicion]
-        )
-
-        # `columnas` también viene del cliente sin validar — mismo criterio
-        # que `posiciones` arriba: si el rol tiene un scope de columnas
-        # (RolColumnScope), cualquier clave fuera de lo permitido se
-        # descarta en silencio antes de generar el archivo (no solo se
-        # oculta en la interfaz — nunca llega a escribirse en el Excel).
-        # "Incluir datos personales" se desactiva por completo para un rol
-        # con este scope: es un catálogo aparte (DATOS_PERSONALES_EXPORT_FIELDS)
-        # que este mecanismo no cubre todavía.
-        columnas_scope = get_columnas_scope_for_request(request)
-        if columnas_scope is not None:
-            permitidas = set(columnas_scope) | COLUMNAS_DETALLE_SIEMPRE_INCLUIDAS
-            columnas = [c for c in columnas if isinstance(c, dict) and c.get("key") in permitidas]
-            incluir_datos_personales = False
+        # Recorta posiciones (alcance UN/UA) y columnas (alcance de columnas).
+        rows, columnas = _resolver_export_detalle(request, posiciones, columnas)
 
         # Tope de seguridad: la plantilla activa completa son ~13,300 filas
         # hoy (medido) — con margen. Sin este tope, "sin querer" no hay
@@ -3615,24 +3878,20 @@ class ExportarPlantillaDetalleConFotosView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # "Incluir datos personales": cruce por numempleado con DATOS_PERSONALES,
-        # agregando sus columnas (prefijo "dp_" para no pisar columnas homónimas
-        # de Plantilla Detalle, ver DATOS_PERSONALES_EXPORT_FIELDS) al final.
+        _registrar_descarga_excel(
+            request, modo=DescargaExcelLog.MODO_ACTUAL, columnas=columnas, rows=rows,
+            incluyo_fotos=incluir_fotos, incluyo_datos_personales=incluir_datos_personales,
+        )
+
+        columnas_archivo = list(columnas)
         if incluir_datos_personales:
-            mapa_dp = _get_datos_personales_bulk_map([r.get("numempleado") for r in rows])
-            for r in rows:
-                registro_dp = mapa_dp.get(str(r.get("numempleado") or "").strip(), {})
-                for campo, _label in DATOS_PERSONALES_EXPORT_FIELDS:
-                    r[f"dp_{campo}"] = registro_dp.get(campo, "")
-            columnas = list(columnas) + [
-                {"key": f"dp_{campo}", "label": label} for campo, label in DATOS_PERSONALES_EXPORT_FIELDS
-            ]
+            _agregar_datos_personales_a_filas(rows)
+            columnas_archivo += _columnas_datos_personales_export()
 
         buffer = generar_workbook_excel_con_fotos(
-            columnas=columnas, rows=rows, incluir_fotos=incluir_fotos,
+            columnas=columnas_archivo, rows=rows, incluir_fotos=incluir_fotos,
             sheet_name="Plantilla_Empleados", numero_empleado_key="numempleado",
-            mono_keys=["posicion", "id_empleado", "rfc", "curp", "nivel", "codigo_presupuestal",
-                       "ua", "cent", "dir", "subd", "jd", "depto", "numeral"],
+            mono_keys=_MONO_KEYS_DETALLE_EXCEL,
             estado_nomina_key="estado_nomina", mapear_estado_nomina=_mapear_estado_nomina_excel,
         )
         return _excel_con_fotos_response(buffer, incluir_fotos, "Plantilla_Empleados")
@@ -3666,7 +3925,9 @@ class ExportarPlantillaHistoricaConFotosView(APIView):
         incluir_fotos = bool(request.data.get("incluir_fotos")) and request.user.has_perm(
             "authentication.view_plantilla_detalle_foto"
         )
-        incluir_datos_personales = bool(request.data.get("incluir_datos_personales"))
+        incluir_datos_personales = bool(request.data.get("incluir_datos_personales")) and request.user.has_perm(
+            PERMISO_DATOS_PERSONALES
+        )
 
         if not fecha or not rows or not columnas:
             return Response({"error": "Faltan 'fecha', 'rows' o 'columnas'."}, status=status.HTTP_400_BAD_REQUEST)
@@ -3678,7 +3939,6 @@ class ExportarPlantillaHistoricaConFotosView(APIView):
         if columnas_scope is not None:
             permitidas = set(columnas_scope) | COLUMNAS_DETALLE_SIEMPRE_INCLUIDAS
             columnas = [c for c in columnas if isinstance(c, dict) and c.get("key") in permitidas]
-            incluir_datos_personales = False
 
         # Mismo tope que el export en vivo (ver ExportarPlantillaDetalleConFotosView).
         if incluir_fotos and len(rows) > 15000:
@@ -3687,15 +3947,19 @@ class ExportarPlantillaHistoricaConFotosView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        from authentication.models import DescargaExcelLog
+
+        columnas = _limpiar_columnas_export(columnas)
+        rows = [r for r in rows if isinstance(r, dict)]
+        _registrar_descarga_excel(
+            request, modo=DescargaExcelLog.MODO_HISTORICO, columnas=columnas, rows=rows,
+            incluyo_fotos=incluir_fotos, incluyo_datos_personales=incluir_datos_personales,
+            fecha_historica=fecha,
+        )
+
         if incluir_datos_personales:
-            mapa_dp = _get_datos_personales_bulk_map([r.get("numempleado") for r in rows])
-            for r in rows:
-                registro_dp = mapa_dp.get(str(r.get("numempleado") or "").strip(), {})
-                for campo, _label in DATOS_PERSONALES_EXPORT_FIELDS:
-                    r[f"dp_{campo}"] = registro_dp.get(campo, "")
-            columnas = list(columnas) + [
-                {"key": f"dp_{campo}", "label": label} for campo, label in DATOS_PERSONALES_EXPORT_FIELDS
-            ]
+            _agregar_datos_personales_a_filas(rows)
+            columnas = columnas + _columnas_datos_personales_export()
 
         try:
             fecha_legend = datetime.datetime.strptime(fecha, "%Y-%m-%d").strftime("%d/%m/%Y")
@@ -7499,6 +7763,9 @@ class EmpleadosEstatusPlantillaView(APIView):
     """
 
     un_scope = UN_SCOPE_APLICADO
+    # Misma razón que `un_scope` (ver docstring): solo contesta activo/baja de
+    # ids que salen de filas que el usuario ya ve, sin recortar de nuevo.
+    ua_scope = UN_SCOPE_APLICADO
 
     view_permission = (
         "authentication.view_plantilla_movimientos",
@@ -11320,6 +11587,8 @@ class PlantillaHistoricaView(APIView):
     # recortan igual que en Plantilla Detalle — y el resumen se recalcula sobre lo
     # recortado para no delatar los totales de toda la ANAM. Ver `_recortar_por_un`.
     un_scope = UN_SCOPE_APLICADO
+    # También recorta por Unidad Administrativa (ver AlcanceUN en authentication.scoping).
+    ua_scope = UN_SCOPE_APLICADO
     view_permission = "authentication.view_plantilla_historico"
 
     _FECHA_MINIMA = datetime.date(2022, 1, 1)

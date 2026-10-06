@@ -24,9 +24,11 @@ from .models import (
     MemoriaColumnas,
     Whitelist,
     sincronizar_usuario_django,
+    RolPerfil,
 )
 from .presence import get_active_sessions, set_presence
-from .scoping import get_columnas_scope_for_user, get_un_scope_for_user
+from .scoping import get_columnas_scope_for_user, get_ua_scope_for_user, get_un_scope_for_user
+from .permissions import UN_SCOPE_NO_APLICA
 from .serializers import GroupSerializer, PermissionSerializer, WhitelistSerializer
 
 
@@ -47,7 +49,7 @@ class RoleViewSet(viewsets.ModelViewSet):
     queryset = (
         Group.objects.all()
         .prefetch_related("permissions__content_type")
-        .select_related("un_scope_config", "columnas_scope_config")
+        .select_related("un_scope_config", "columnas_scope_config", "ua_scope_config", "perfil_rol")
         .order_by("name")
     )
     serializer_class = GroupSerializer
@@ -55,6 +57,13 @@ class RoleViewSet(viewsets.ModelViewSet):
     edit_permission = "authentication.manage_roles"
 
     def perform_destroy(self, instance):
+        perfil = RolPerfil.objects.filter(rol=instance).first()
+        if perfil and perfil.es_sistema:
+            raise ValidationError("Los roles titulares de unidad los define el sistema y no se pueden eliminar.")
+        if RolPerfil.objects.filter(padre=instance).exists():
+            raise ValidationError(
+                "No se puede eliminar un rol que tiene subroles. Elimina o reubica primero sus subroles."
+            )
         if Whitelist.objects.filter(rol=instance).exists():
             raise ValidationError(
                 "No se puede eliminar un rol con usuarios asignados. Reasigna esos usuarios primero."
@@ -98,10 +107,17 @@ class MePermissionsView(views.APIView):
         # aplica siempre del lado servidor en cada endpoint, sin depender de
         # que el front lea/respete este campo.
         un_scope = get_un_scope_for_user(user)
-        if un_scope is None:
+        # Alcance por Unidad Administrativa (ver RolUaScope). Entra en la
+        # misma huella: el front la usa como llave de su caché, y dos roles
+        # de la misma UN pero distinta UA no deben compartir datos cacheados.
+        ua_scope = get_ua_scope_for_user(user)
+        if un_scope is None and ua_scope is None:
             un_scope_fingerprint = "all"
         else:
-            un_scope_fingerprint = hashlib.sha256(",".join(un_scope).encode()).hexdigest()[:12]
+            huella = "|".join(
+                "*" if alcance is None else ",".join(alcance) for alcance in (un_scope, ua_scope)
+            )
+            un_scope_fingerprint = hashlib.sha256(huella.encode()).hexdigest()[:12]
 
         # Alcance por columnas de Plantilla Detalle — mismo criterio que
         # un_scope arriba: informativo para el front (qué columnas ofrecer
@@ -117,6 +133,7 @@ class MePermissionsView(views.APIView):
                 "permissions": permissions,
                 "tablero": whitelist_entry.tablero if whitelist_entry else None,
                 "un_scope": un_scope,
+                "ua_scope": ua_scope,
                 "un_scope_fingerprint": un_scope_fingerprint,
                 "columnas_detalle_permitidas": columnas_detalle,
             }
@@ -316,6 +333,103 @@ class UserVisitsView(views.APIView):
                 "sessions": sessions_payload,
             }
         )
+
+
+class UserDescargasExcelView(views.APIView):
+    """Historial de archivos Excel generados por un usuario (bitácora
+    DescargaExcelLog): fecha, columnas, filtros y si llevaban fotografías o
+    datos personales. Alimenta la pestaña "Historial de descargas de Excel"
+    del diálogo de actividad en Roles > Usuarios."""
+
+    view_permission = "authentication.manage_roles"
+    MAX_FILAS = 300
+
+    def get(self, request):
+        from .models import DescargaExcelLog
+
+        email = (request.query_params.get("email") or "").strip()
+        if not email:
+            return Response({"error": "email es requerido"}, status=status.HTTP_400_BAD_REQUEST)
+
+        qs = DescargaExcelLog.objects.filter(email__iexact=email).select_related("regenerada_de")
+        total = qs.count()
+        resultados = []
+        for d in qs[: self.MAX_FILAS]:
+            origen = d.regenerada_de
+            resultados.append(
+                {
+                    "id": d.id,
+                    "fecha": d.created_at.isoformat(),
+                    "modulo": d.modulo,
+                    "modo": d.modo,
+                    "fecha_historica": d.fecha_historica,
+                    "total_filas": d.total_filas,
+                    "columnas": d.columnas,
+                    "filtros": d.filtros,
+                    "incluyo_fotos": d.incluyo_fotos,
+                    "incluyo_datos_personales": d.incluyo_datos_personales,
+                    "nombre_archivo": d.nombre_archivo,
+                    "rol": d.rol,
+                    "ip": d.ip,
+                    "regenerable": bool((origen or d).snapshot),
+                    "regenerada_de": (
+                        {"id": origen.id, "email": origen.email, "fecha": origen.created_at.isoformat()}
+                        if origen
+                        else None
+                    ),
+                }
+            )
+        return Response({"total": total, "results": resultados})
+
+
+class RegistrarDescargaExcelGenericaView(views.APIView):
+    """Registra en la bitácora un Excel generado en cualquier pantalla del
+    sistema. Lo llama el front en el momento de la descarga (ver
+    lib/excelAudit.js: intercepta toda descarga .xlsx/.xlsm). Plantilla
+    Detalle NO pasa por aquí: tiene su propio registro con copia de las filas
+    (plantilla.views.RegistrarDescargaExcelView). Estas descargas no guardan
+    copia, así que no se pueden regenerar desde el historial."""
+
+    # No devuelve datos de plantilla: aplica igual a roles con alcance UN/UA.
+    un_scope = UN_SCOPE_NO_APLICA
+    MAX_COLUMNAS = 300
+
+    def post(self, request):
+        import json
+
+        from .models import DescargaExcelLog
+
+        datos = request.data if isinstance(request.data, dict) else {}
+        columnas = []
+        for c in (datos.get("columnas") or [])[: self.MAX_COLUMNAS]:
+            if isinstance(c, dict) and (c.get("label") or c.get("key")):
+                etiqueta = str(c.get("label") or c.get("key"))[:200]
+                columnas.append({"key": str(c.get("key") or etiqueta)[:100], "label": etiqueta})
+            elif isinstance(c, str) and c.strip():
+                columnas.append({"key": c.strip()[:100], "label": c.strip()[:200]})
+        filtros = datos.get("filtros")
+        if not isinstance(filtros, dict) or len(json.dumps(filtros, default=str)) > 20000:
+            filtros = {}
+        try:
+            total_filas = max(0, int(datos.get("total_filas") or 0))
+        except (TypeError, ValueError):
+            total_filas = 0
+
+        grupo = request.user.groups.first()
+        reenviada = (request.META.get("HTTP_X_FORWARDED_FOR") or "").split(",")[0].strip()
+        log = DescargaExcelLog.objects.create(
+            email=(request.user.email or request.user.get_username())[:254],
+            rol=(grupo.name if grupo else ("SuperAdmin" if request.user.is_superuser else ""))[:150],
+            modulo=str(datos.get("modulo") or "Sin identificar")[:200],
+            total_filas=total_filas,
+            columnas=columnas,
+            filtros=filtros,
+            incluyo_fotos=bool(datos.get("incluyo_fotos")),
+            incluyo_datos_personales=bool(datos.get("incluyo_datos_personales")),
+            nombre_archivo=str(datos.get("nombre_archivo") or "")[:255],
+            ip=(reenviada or request.META.get("REMOTE_ADDR") or "")[:64],
+        )
+        return Response({"id": log.id}, status=status.HTTP_201_CREATED)
 
 
 class UserVisitsHeatmapView(views.APIView):
