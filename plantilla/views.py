@@ -4392,6 +4392,8 @@ class MovPosCeldaHistorialView(_CeldaHistorialBaseView):
     """
 
     view_permission = "authentication.view_plantilla_mov_posiciones"
+    # Sub-pestaña de Mov. Posiciones a la que pertenece (se exige ADEMÁS del tab).
+    extra_permission = "authentication.view_plantilla_mov_posiciones_tabla"
     tabla = TABLA_MOV_POS
     clave_key = "no_pos_actual"
 
@@ -5307,6 +5309,8 @@ class MovPosDetalleView(APIView):
 
     un_scope = UN_SCOPE_APLICADO
     view_permission = "authentication.view_plantilla_mov_posiciones"
+    # Sub-pestaña de Mov. Posiciones a la que pertenece (se exige ADEMÁS del tab).
+    extra_permission = "authentication.view_plantilla_mov_posiciones_tabla"
     pagination_class = MovPosPagination
 
     def get(self, request, *args, **kwargs):
@@ -6339,6 +6343,8 @@ class MovPosOcupacionDetalleView(APIView):
 
     un_scope = UN_SCOPE_APLICADO
     view_permission = "authentication.view_plantilla_mov_posiciones"
+    # Sub-pestaña de Mov. Posiciones a la que pertenece (se exige ADEMÁS del tab).
+    extra_permission = "authentication.view_plantilla_mov_posiciones_tabla"
 
     def get(self, request, *args, **kwargs):
         from .notificaciones_posicion import construir_detalle_ocupacion
@@ -6948,6 +6954,8 @@ class MovPosAlineacionView(APIView):
 
     un_scope = UN_SCOPE_APLICADO
     view_permission = "authentication.view_plantilla_mov_posiciones"
+    # Sub-pestaña de Mov. Posiciones a la que pertenece (se exige ADEMÁS del tab).
+    extra_permission = "authentication.view_plantilla_mov_posiciones_alineacion"
 
     def get(self, request, *args, **kwargs):
         try:
@@ -7046,6 +7054,8 @@ class MovPosAlineacionHistoricoView(APIView):
     """
 
     view_permission = "authentication.view_plantilla_mov_posiciones"
+    # Sub-pestaña de Mov. Posiciones a la que pertenece (se exige ADEMÁS del tab).
+    extra_permission = "authentication.view_plantilla_mov_posiciones_alineacion"
 
     def get(self, request, *args, **kwargs):
         try:
@@ -7092,6 +7102,8 @@ class MovPosExportExcelView(APIView):
 
     un_scope = UN_SCOPE_APLICADO
     view_permission = "authentication.view_plantilla_mov_posiciones"
+    # Sub-pestaña de Mov. Posiciones a la que pertenece (se exige ADEMÁS del tab).
+    extra_permission = "authentication.view_plantilla_mov_posiciones_tabla"
 
     def get(self, request, *args, **kwargs):
         from django.db import connection as db_connection
@@ -8495,7 +8507,16 @@ class AnuenciaAnexoUpdatesSSEView(View):
             if token_key else None
         )
         user = token_obj.user if token_obj else None
-        if not user or not user.is_active or not user.has_perm("authentication.view_plantilla_mov_posiciones"):
+        if (
+            not user
+            or not user.is_active
+            or not user.has_perm("authentication.view_plantilla_mov_posiciones")
+            # Lo escuchan la Tabla Principal (columna "En Anuencia") y la sub-pestaña Anuencia.
+            or not (
+                user.has_perm("authentication.view_plantilla_mov_posiciones_anuencia")
+                or user.has_perm("authentication.view_plantilla_mov_posiciones_tabla")
+            )
+        ):
             return HttpResponseForbidden("No autorizado.")
 
         def event_stream():
@@ -10588,6 +10609,8 @@ class AnuenciaAnexoViewSet(viewsets.ModelViewSet):
         "creado_por", "actualizado_por", "generado_por", "eliminado_por"
     ).filter(eliminado=False)
     view_permission = "authentication.view_plantilla_mov_posiciones"
+    # Sub-pestaña de Mov. Posiciones a la que pertenece (se exige ADEMÁS del tab).
+    extra_permission = "authentication.view_plantilla_mov_posiciones_anuencia"
     http_method_names = ["get", "post", "patch", "head", "options"]
     action_permissions = {
         "eliminados": "authentication.view_anuencia_eliminados",
@@ -10754,6 +10777,8 @@ class AnuenciaAnexo3VersionViewSet(viewsets.ModelViewSet):
 
     queryset = AnuenciaAnexo3Version.objects.select_related("creado_por", "actualizado_por").all()
     view_permission = "authentication.view_plantilla_mov_posiciones"
+    # Sub-pestaña de Mov. Posiciones a la que pertenece (se exige ADEMÁS del tab).
+    extra_permission = "authentication.view_plantilla_mov_posiciones_anuencia"
     http_method_names = ["get", "post", "patch", "head", "options"]
 
     def get_queryset(self):
@@ -10797,6 +10822,8 @@ class AnuenciaJustificacionCatalogoViewSet(viewsets.ModelViewSet):
     queryset = AnuenciaJustificacionCatalogo.objects.select_related("creado_por").all()
     serializer_class = AnuenciaJustificacionCatalogoSerializer
     view_permission = "authentication.view_plantilla_mov_posiciones"
+    # Sub-pestaña de Mov. Posiciones a la que pertenece (se exige ADEMÁS del tab).
+    extra_permission = "authentication.view_plantilla_mov_posiciones_anuencia"
     http_method_names = ["get", "post", "delete", "head", "options"]
 
     def perform_create(self, serializer):
@@ -11275,6 +11302,8 @@ class CuadroVacanciaView(APIView):
     """
 
     view_permission = "authentication.view_plantilla_mov_posiciones"
+    # Sub-pestaña de Mov. Posiciones a la que pertenece (se exige ADEMÁS del tab).
+    extra_permission = "authentication.view_plantilla_mov_posiciones_cuadros"
 
     def get(self, request, *args, **kwargs):
         try:
@@ -11337,6 +11366,8 @@ class AnuenciaSugerenciasView(APIView):
     """
 
     view_permission = "authentication.view_plantilla_mov_posiciones"
+    # Sub-pestaña de Mov. Posiciones a la que pertenece (se exige ADEMÁS del tab).
+    extra_permission = "authentication.view_plantilla_mov_posiciones_anuencia"
     LIMITE_DEFAULT = 10
     LIMITE_MAXIMO = 20
 
@@ -11493,6 +11524,8 @@ class AnuenciaLookupView(APIView):
     """
 
     view_permission = "authentication.view_plantilla_mov_posiciones"
+    # Sub-pestaña de Mov. Posiciones a la que pertenece (se exige ADEMÁS del tab).
+    extra_permission = "authentication.view_plantilla_mov_posiciones_anuencia"
 
     def get(self, request, *args, **kwargs):
         codigo = (request.query_params.get("codigo") or "").strip()
@@ -11534,6 +11567,8 @@ class AnuenciaLookupBulkView(APIView):
     """
 
     view_permission = "authentication.view_plantilla_mov_posiciones"
+    # Sub-pestaña de Mov. Posiciones a la que pertenece (se exige ADEMÁS del tab).
+    extra_permission = "authentication.view_plantilla_mov_posiciones_anuencia"
 
     def post(self, request, *args, **kwargs):
         codigos = request.data.get("codigos") or []
@@ -11794,6 +11829,8 @@ class ConteoPlazasHistoricoSerieView(APIView):
     """
 
     view_permission = "authentication.view_plantilla_mov_posiciones"
+    # Sub-pestaña de Mov. Posiciones a la que pertenece (se exige ADEMÁS del tab).
+    extra_permission = "authentication.view_plantilla_mov_posiciones_cuadros"
 
     def get(self, request, *args, **kwargs):
         from django.db import connection
@@ -11834,6 +11871,8 @@ class PlazasMovimientoMesView(APIView):
     # recorte va al salir, sobre `cd_un`, que ya viene mapeado en cada fila.
     un_scope = UN_SCOPE_APLICADO
     view_permission = "authentication.view_plantilla_mov_posiciones"
+    # Sub-pestaña de Mov. Posiciones a la que pertenece (se exige ADEMÁS del tab).
+    extra_permission = "authentication.view_plantilla_mov_posiciones_cuadros"
 
     # A pedido del usuario (2026-08-12): la fila devuelta es el registro
     # MOV_POS COMPLETO de la posición (todas sus columnas), sin tocar
@@ -12044,6 +12083,8 @@ class DesgloseJerarquicoView(APIView):
 
     un_scope = UN_SCOPE_APLICADO
     view_permission = "authentication.view_plantilla_mov_posiciones"
+    # Sub-pestaña de Mov. Posiciones a la que pertenece (se exige ADEMÁS del tab).
+    extra_permission = ("authentication.view_plantilla_mov_posiciones_cuadros", "authentication.view_plantilla_mov_posiciones_aduanas")
 
     def get(self, request, *args, **kwargs):
         from django.db import connection
@@ -12167,6 +12208,8 @@ class DesgloseJerarquicoOcupadosView(APIView):
 
     un_scope = UN_SCOPE_APLICADO
     view_permission = "authentication.view_plantilla_mov_posiciones"
+    # Sub-pestaña de Mov. Posiciones a la que pertenece (se exige ADEMÁS del tab).
+    extra_permission = ("authentication.view_plantilla_mov_posiciones_cuadros", "authentication.view_plantilla_mov_posiciones_aduanas")
 
     def get(self, request, *args, **kwargs):
         un_scope = get_un_scope_for_request(request)
@@ -12309,6 +12352,8 @@ class AduanasOcupacionVacanciaView(APIView):
 
     un_scope = UN_SCOPE_APLICADO
     view_permission = "authentication.view_plantilla_mov_posiciones"
+    # Sub-pestaña de Mov. Posiciones a la que pertenece (se exige ADEMÁS del tab).
+    extra_permission = "authentication.view_plantilla_mov_posiciones_aduanas"
 
     def get(self, request, *args, **kwargs):
         un_scope = get_un_scope_for_request(request)
@@ -12520,6 +12565,8 @@ class AnuenciaAnexo3View(APIView):
     """
 
     view_permission = "authentication.view_plantilla_mov_posiciones"
+    # Sub-pestaña de Mov. Posiciones a la que pertenece (se exige ADEMÁS del tab).
+    extra_permission = "authentication.view_plantilla_mov_posiciones_anuencia"
 
     def post(self, request, *args, **kwargs):
         from presupuesto.views import _build_catalogo_index, _resolver_catalogo

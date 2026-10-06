@@ -296,6 +296,14 @@ class ModulePermission(models.Model):
             ("view_plantilla_geografia_mapa", "Plantilla de Empleados: ver sub-tab Mapa Nacional (Distribución Geográfica)"),
             ("view_plantilla_geografia_torre", "Plantilla de Empleados: ver sub-tab Torre Caballito (Distribución Geográfica)"),
             ("view_plantilla_catalogos", "Plantilla de Empleados: ver tab Catálogos"),
+            # Sub-pestañas de Mov. Posiciones: el permiso del tab solo lo abre;
+            # estos deciden qué se ve dentro (el backend los exige con
+            # `extra_permission`, igual que las de Distribución Geográfica).
+            ("view_plantilla_mov_posiciones_tabla", "Plantilla de Empleados: ver sub-tab Tabla Principal (Mov. Posiciones)"),
+            ("view_plantilla_mov_posiciones_cuadros", "Plantilla de Empleados: ver sub-tab Cuadros Vacancia (Mov. Posiciones)"),
+            ("view_plantilla_mov_posiciones_alineacion", "Plantilla de Empleados: ver sub-tab Comprobar Alineación (Mov. Posiciones)"),
+            ("view_plantilla_mov_posiciones_aduanas", "Plantilla de Empleados: ver sub-tab Aduanas Ocupación vs Vacantes (Mov. Posiciones)"),
+            ("view_plantilla_mov_posiciones_anuencia", "Plantilla de Empleados: ver sub-tab Anuencia (Mov. Posiciones)"),
             ("edit_plantilla_detalle", "Plantilla de Empleados: editar celdas en tab Detalle"),
             ("edit_datos_personales", "Plantilla de Empleados: editar Escolaridad/Contacto/Domicilio en Datos Personales"),
             ("view_plantilla_historico", "Plantilla de Empleados: consultar plantillas históricas (tab Detalle)"),
