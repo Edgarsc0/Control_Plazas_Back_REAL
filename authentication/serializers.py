@@ -401,8 +401,9 @@ class WhitelistSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'email', 'rol', 'rol_nombre', 'ua', 'ua_nombre', 'activo',
             'password', 'tiene_password', 'debe_cambiar_password', 'tablero',
+            'terminos_aceptados_at',
         ]
-        read_only_fields = ['debe_cambiar_password']
+        read_only_fields = ['debe_cambiar_password', 'terminos_aceptados_at']
 
     def get_tiene_password(self, obj):
         return bool(obj.user and obj.user.has_usable_password())

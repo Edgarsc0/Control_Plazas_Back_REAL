@@ -16,6 +16,11 @@ TABLERO_CHOICES = [
 ]
 
 
+# Versión vigente del aviso de confidencialidad (el texto vive en el front,
+# components/system/TerminosGate.jsx). Cambiarla obliga a todos a aceptarlo de nuevo.
+TERMINOS_VERSION = "2026-10"
+
+
 class Whitelist(models.Model):
     email = models.EmailField(unique=True)
     user = models.OneToOneField(
@@ -33,6 +38,18 @@ class Whitelist(models.Model):
     debe_cambiar_password = models.BooleanField(default=True)
     # Vacío/None = sin tablero asignado, entra al dashboard normal.
     tablero = models.CharField(max_length=50, blank=True, null=True, choices=TABLERO_CHOICES)
+    # Aviso de confidencialidad y términos de uso: se muestra al entrar y no
+    # se puede usar el sistema sin aceptarlo. Se guarda la versión aceptada
+    # para poder volver a pedirlo si el texto cambia (ver TERMINOS_VERSION).
+    terminos_aceptados_at = models.DateTimeField(null=True, blank=True)
+    # null=True (no default ""): la BD es compartida con otra máquina cuyo código
+    # aún no conoce estas columnas y debe poder insertar usuarios sin ellas.
+    terminos_version = models.CharField(max_length=20, blank=True, null=True)
+    terminos_ip = models.CharField(max_length=64, blank=True, null=True)
+
+    @property
+    def terminos_vigentes_aceptados(self):
+        return bool(self.terminos_aceptados_at) and self.terminos_version == TERMINOS_VERSION
 
     def __str__(self):
         return f"{self.email} - {self.rol.name}"

@@ -1,6 +1,7 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
+    AceptarTerminosView,
     ChangePasswordView,
     LoginView,
     MantenimientoView,
@@ -29,6 +30,7 @@ urlpatterns = [
     path('change-password/', ChangePasswordView.as_view(), name='change-password'),
     path('permissions/', PermissionListView.as_view(), name='permission-list'),
     path('me/permissions/', MePermissionsView.as_view(), name='me-permissions'),
+    path('me/aceptar-terminos/', AceptarTerminosView.as_view(), name='aceptar-terminos'),
     path('presence/heartbeat/', PresenceHeartbeatView.as_view(), name='presence-heartbeat'),
     path('presence/active/', PresenceListView.as_view(), name='presence-active'),
     path('visits/', UserVisitsView.as_view(), name='user-visits'),

@@ -136,8 +136,35 @@ class MePermissionsView(views.APIView):
                 "ua_scope": ua_scope,
                 "un_scope_fingerprint": un_scope_fingerprint,
                 "columnas_detalle_permitidas": columnas_detalle,
+                # Sin entrada en la whitelist no hay dónde registrar la
+                # aceptación (cuentas técnicas): no se les exige.
+                "terminos_aceptados": whitelist_entry.terminos_vigentes_aceptados if whitelist_entry else True,
             }
         )
+
+
+class AceptarTerminosView(views.APIView):
+    """Registra que el usuario aceptó el aviso de confidencialidad y los
+    términos de uso vigentes (fecha, versión e IP). El front no deja entrar
+    al sistema hasta que esto responde 200 (ver TerminosGate.jsx)."""
+
+    maintenance_exempt = True
+    un_scope = UN_SCOPE_NO_APLICA
+
+    def post(self, request):
+        from django.utils import timezone
+
+        from .models import TERMINOS_VERSION
+
+        entrada = getattr(request.user, "perfil", None)
+        if entrada is None:
+            return Response({"terminos_aceptados": True})
+        reenviada = (request.META.get("HTTP_X_FORWARDED_FOR") or "").split(",")[0].strip()
+        entrada.terminos_aceptados_at = timezone.now()
+        entrada.terminos_version = TERMINOS_VERSION
+        entrada.terminos_ip = (reenviada or request.META.get("REMOTE_ADDR") or "")[:64]
+        entrada.save(update_fields=["terminos_aceptados_at", "terminos_version", "terminos_ip"])
+        return Response({"terminos_aceptados": True})
 
 
 class PresenceHeartbeatView(views.APIView):
