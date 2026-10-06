@@ -3,6 +3,8 @@
 import contextvars
 import logging
 
+from django.utils.functional import empty
+
 _current_request = contextvars.ContextVar("current_request", default=None)
 
 _access_logger = logging.getLogger("controlplazas.request")
@@ -39,7 +41,15 @@ class RequestUserLogFilter(logging.Filter):
         email = None
         endpoint = "-"
         if request is not None:
-            user = getattr(request, "user", None)
+            # Solo se usa el usuario si YA fue resuelto. request.user es un
+            # SimpleLazyObject: evaluarlo aquí carga la sesión, y si la cookie
+            # `sessionid` es inválida (firmada con otra SECRET_KEY) Django
+            # registra "Session data corrupted" -> este filtro vuelve a evaluar
+            # request.user -> vuelve a fallar -> recursión que llenaba el log
+            # con miles de tracebacks por minuto.
+            user = request.__dict__.get("user")
+            if user is not None and getattr(user, "_wrapped", None) is empty:
+                user = None
             if user is not None and getattr(user, "is_authenticated", False):
                 email = getattr(user, "email", None) or getattr(user, "username", None)
             endpoint = f"{request.method} {request.path}"

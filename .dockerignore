@@ -1,0 +1,9 @@
+.venv
+venv
+.git
+logs
+backups
+ai_sessions
+celerybeat-schedule
+*.xlsx
+__pycache__
