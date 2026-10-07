@@ -2252,6 +2252,24 @@ Q_FUERA_DE_PLANTILLA_OFICIAL = (
 
 PERMISO_SWITCH_PLANTILLA_OFICIAL = "authentication.view_plantilla_switch_oficial"
 
+PERMISO_MOVIMIENTOS = "authentication.view_plantilla_movimientos"
+PERMISO_DETALLE = "authentication.view_plantilla_detalle"
+# Quien ve Plantilla Detalle ya conoce a las personas y plazas de su unidad,
+# así que también puede ver los movimientos que se capturaron HOY sobre ellas
+# (widgets "Movimientos de hoy" del tablero) — pero no el histórico completo
+# del tab Movimientos, que sigue pidiendo su propio permiso.
+PERMISOS_MOVIMIENTOS_O_DETALLE = [PERMISO_MOVIMIENTOS, PERMISO_DETALLE]
+
+
+def _solo_movimientos_de_hoy(request, queryset):
+    """Sin el permiso del tab Movimientos (entró solo con el de Detalle) la
+    consulta queda amarrada a lo capturado hoy, pida lo que pida el cliente."""
+    if request.user.has_perm(PERMISO_MOVIMIENTOS):
+        return queryset
+    from django.utils import timezone
+
+    return queryset.filter(fecha_captura=timezone.localdate())
+
 
 def _solo_plantilla_oficial(request):
     """True si quien pide NO puede salirse de la plantilla oficial: sin el
@@ -2594,7 +2612,9 @@ def _respuesta_completa_cacheada(request, base_cache_key, obtener_datos_fn, un_c
 # dígitos, ver authentication/ua_catalog.py), por nombre de campo del modelo.
 # Un modelo/fila que no tenga ninguna NO se puede recortar por UA: los helpers
 # de abajo devuelven vacío en ese caso (fail-closed) en vez de dejar pasar.
-CAMPOS_UA = ("cd_ua", "unidad_adva", "unidad_admon")
+# "Cd UA": las filas de desglose_jerarquico salen de SQL crudo y conservan el
+# nombre de columna de la BD en vez del nombre de campo del modelo.
+CAMPOS_UA = ("cd_ua", "unidad_adva", "unidad_admon", "Cd UA")
 
 
 def _campo_ua_de_modelo(modelo):
@@ -2818,12 +2838,17 @@ def _scope_un_movimientos(queryset, un_codes, field="un"):
         return queryset
     if not un_codes:
         return queryset.none()
-    if ua_de_alcance(un_codes) is not None:
-        # cp_tbl_mov_completo guarda la UA en `un_admin`, cuya escritura no se
-        # ha auditado (su `un` trae el mismo código con y sin ceros). Hasta
-        # hacerlo, un rol con alcance por UA no ve movimientos por esta vía.
+    queryset = queryset.filter(**{f"{field}__in": _variantes_padding_un(un_codes)})
+    ua_codes = ua_de_alcance(un_codes)
+    if ua_codes is None:
+        return queryset
+    if not ua_codes:
         return queryset.none()
-    return queryset.filter(**{f"{field}__in": _variantes_padding_un(un_codes)})
+    # La UA vive en `un_admin`, con el mismo vicio que `un`: 84 valores de 3
+    # dígitos ("139") y unos pocos con y sin ceros ("4"/"004"). Se exige la UA
+    # ADEMÁS de la UN: hay códigos de UA históricos que aparecen bajo más de
+    # una UN (118, 121, 180), y solo cuentan los de la unidad del rol.
+    return queryset.filter(un_admin__in=_variantes_padding_un(ua_codes))
 
 
 def _strip_columnas_filas(filas, columnas_permitidas):
@@ -4406,8 +4431,18 @@ class EmpleadosPorNivelYEstatusView(APIView):
     """
 
     # Filtra por Unidad de Negocio (ver el bloque de helpers _scope_un_*).
+    # y por Unidad Administrativa (_scope_un_queryset recorta por `cd_ua`).
     un_scope = UN_SCOPE_APLICADO
-    view_permission = "authentication.view_plantilla_estatus_nomina"
+    ua_scope = UN_SCOPE_APLICADO
+    # Es también el listado que abre cada barra de los widgets de vacancia y
+    # ocupación por nivel, así que entra con los mismos permisos que ellos:
+    # Detalle o la sub-pestaña Cuadros Vacancia. Son filas de la misma
+    # plantilla, con el mismo recorte por UN, UA y columnas.
+    view_permission = [
+        "authentication.view_plantilla_estatus_nomina",
+        "authentication.view_plantilla_detalle",
+        "authentication.view_plantilla_mov_posiciones_cuadros",
+    ]
 
     def get(self, request):
         nivel = request.query_params.get("nivel")
@@ -4509,6 +4544,10 @@ class EmpleadosPorNivelYEstatusView(APIView):
             # puede ver, no el universo completo — si no, el modal delataría
             # cuántos registros hay fuera de su unidad.
             queryset = _scope_un_queryset(queryset, get_un_scope_for_request(request))
+            # Igual que en Plantilla Detalle: sin el permiso del switch, las
+            # plazas fuera de la plantilla oficial no salen del servidor.
+            if _solo_plantilla_oficial(request):
+                queryset = queryset.exclude(Q_FUERA_DE_PLANTILLA_OFICIAL)
             # Estas filas son las mismas de EMPLEADOS_COMPLETOS_SIG que sirve
             # Plantilla Detalle (aquí sin enriquecer), así que se les aplica
             # también el scope de columnas — de lo contrario el drill-down del
@@ -4923,9 +4962,13 @@ class EmpleadosEstatusPorNivelUaView(APIView):
     de los empleados correspondientes a las posiciones activas.
     """
 
-    # Filtra por Unidad de Negocio (ver el bloque de helpers _scope_un_*).
+    # Filtra por Unidad de Negocio (ver el bloque de helpers _scope_un_*) y por
+    # Unidad Administrativa: _scope_un_filas recorta los grupos por su `cd_ua`.
     un_scope = UN_SCOPE_APLICADO
-    view_permission = "authentication.view_plantilla_estatus_nomina"
+    ua_scope = UN_SCOPE_APLICADO
+    # También con el permiso de Detalle: quien ve la plantilla de su unidad
+    # puede contar por sí mismo estos mismos estatus y vacantes.
+    view_permission = ["authentication.view_plantilla_estatus_nomina", "authentication.view_plantilla_detalle"]
 
     # Lo que se cachea ya NO es la respuesta, sino los grupos crudos que la
     # componen — con `cd_un` como una dimensión más. Esto es lo que permite
@@ -9373,7 +9416,8 @@ class MovimientosPersonalListView(APIView):
     # Filtra por Unidad de Negocio (ver _scope_un_movimientos: la columna `un`
     # de esta tabla no está normalizada y necesita trato propio).
     un_scope = UN_SCOPE_APLICADO
-    view_permission = "authentication.view_plantilla_movimientos"
+    ua_scope = UN_SCOPE_APLICADO
+    view_permission = PERMISOS_MOVIMIENTOS_O_DETALLE
     pagination_class = MovimientosPersonalPagination
 
     def get(self, request):
@@ -9387,6 +9431,7 @@ class MovimientosPersonalListView(APIView):
         queryset = _scope_un_movimientos(
             CpTblMovCompleto290526.objects.all(), get_un_scope_for_request(request)
         )
+        queryset = _solo_movimientos_de_hoy(request, queryset)
 
         # Check if requesting distinct values for a field
         distinct_field = request.query_params.get("distinct_field", "").strip()
@@ -11190,9 +11235,10 @@ class MovimientosPersonalStatsView(APIView):
     }
     """
 
-    # Filtra por Unidad de Negocio (ver _scope_un_movimientos).
+    # Filtra por Unidad de Negocio y Administrativa (ver _scope_un_movimientos).
     un_scope = UN_SCOPE_APLICADO
-    view_permission = "authentication.view_plantilla_movimientos"
+    ua_scope = UN_SCOPE_APLICADO
+    view_permission = PERMISOS_MOVIMIENTOS_O_DETALLE
 
     def get(self, request):
         accion_nombre = request.query_params.get("accion_nombre")
@@ -11209,6 +11255,7 @@ class MovimientosPersonalStatsView(APIView):
         queryset = _scope_un_movimientos(
             CpTblMovCompleto290526.objects.all(), get_un_scope_for_request(request)
         )
+        queryset = _solo_movimientos_de_hoy(request, queryset)
 
         if fecha_captura__in:
             val_list = [v.strip() for v in fecha_captura__in.split(",") if v.strip()]
@@ -12072,6 +12119,45 @@ class PlazasMovimientoMesView(APIView):
             )
 
 
+# desglose_jerarquico / desglose_jerarquico_ocupados alimentan Cuadros Vacancia
+# y Aduanas (Mov. Posiciones) y, desde el tablero, los widgets de vacancia y
+# ocupación por nivel. Entra quien tenga el tab Mov. Posiciones CON alguna de
+# esas dos sub-pestañas, o quien tenga Plantilla Detalle: son las mismas plazas
+# y personas que ya ve ahí, con el mismo recorte por UN, UA y columnas.
+PERMISOS_DESGLOSE_VISTA = ["authentication.view_plantilla_mov_posiciones", PERMISO_DETALLE]
+PERMISOS_DESGLOSE_EXTRA = (
+    "authentication.view_plantilla_mov_posiciones_cuadros",
+    "authentication.view_plantilla_mov_posiciones_aduanas",
+    PERMISO_DETALLE,
+)
+
+# Dimensiones con las que se arman los cuadros (familia de nivel, nivel
+# jerárquico, tipo de plaza, unidad). Sobreviven al recorte por columnas: sin
+# ellas no hay nada que contar, y no describen a la persona sino a la plaza.
+COLUMNAS_DESGLOSE_ESTRUCTURALES = frozenset({
+    "NJ", "nombreNJ", "Nivel", "Posición", "Partida", "TIPO DE CONTRATACIÓN",
+    "Nombre Puesto Funcional", "Cd UN", "Unidad de Negocio", "Cd UA", "nombre_ua",
+    "Estado Nómina", "Fecha Vacancia", "mov_pos_id",
+})
+
+
+def _strip_columnas_desglose(filas, columnas_permitidas):
+    """Recorte por columnas (RolColumnScope) para las filas de desglose, que
+    salen de SQL crudo con el nombre de columna de la BD ("Nombres", "RFC")
+    y no con la clave del catálogo de Plantilla Detalle ("nombres", "rfc").
+    Se traduce con el `db_column` del modelo; una columna que no se pueda
+    traducir se descarta (fail-closed). None = rol sin restricción."""
+    if columnas_permitidas is None:
+        return filas
+    permitidas = set(columnas_permitidas) | COLUMNAS_DETALLE_SIEMPRE_INCLUIDAS
+    clave_de = {f.column: f.name for f in EmpleadosCompletosSig._meta.concrete_fields}
+    visibles = {
+        col for col in (filas[0].keys() if filas else ())
+        if col in COLUMNAS_DESGLOSE_ESTRUCTURALES or clave_de.get(col) in permitidas
+    }
+    return [{k: v for k, v in fila.items() if k in visibles} for fila in filas]
+
+
 class DesgloseJerarquicoView(APIView):
     """Filas plaza×persona del sub-tab Cuadros Vacancia.
 
@@ -12082,19 +12168,20 @@ class DesgloseJerarquicoView(APIView):
     """
 
     un_scope = UN_SCOPE_APLICADO
-    view_permission = "authentication.view_plantilla_mov_posiciones"
-    # Sub-pestaña de Mov. Posiciones a la que pertenece (se exige ADEMÁS del tab).
-    extra_permission = ("authentication.view_plantilla_mov_posiciones_cuadros", "authentication.view_plantilla_mov_posiciones_aduanas")
+    ua_scope = UN_SCOPE_APLICADO
+    view_permission = PERMISOS_DESGLOSE_VISTA
+    extra_permission = PERMISOS_DESGLOSE_EXTRA
 
     def get(self, request, *args, **kwargs):
         from django.db import connection
 
         un_scope = get_un_scope_for_request(request)
+        columnas = get_columnas_scope_for_request(request)
         cache_key = "desglose_jerarquico"
         cached_data = cache.get(cache_key)
         if cached_data is not None:
             return Response(
-                _scope_un_filas(cached_data, un_scope, key="Cd UN"),
+                _strip_columnas_desglose(_scope_un_filas(cached_data, un_scope, key="Cd UN"), columnas),
                 status=status.HTTP_200_OK,
             )
 
@@ -12192,7 +12279,7 @@ class DesgloseJerarquicoView(APIView):
 
             cache.set(cache_key, results, None)
             return Response(
-                _scope_un_filas(results, un_scope, key="Cd UN"),
+                _strip_columnas_desglose(_scope_un_filas(results, un_scope, key="Cd UN"), columnas),
                 status=status.HTTP_200_OK,
             )
         except Exception:
@@ -12207,28 +12294,29 @@ class DesgloseJerarquicoOcupadosView(APIView):
     recorte por UN, misma columna `Cd UN`."""
 
     un_scope = UN_SCOPE_APLICADO
-    view_permission = "authentication.view_plantilla_mov_posiciones"
-    # Sub-pestaña de Mov. Posiciones a la que pertenece (se exige ADEMÁS del tab).
-    extra_permission = ("authentication.view_plantilla_mov_posiciones_cuadros", "authentication.view_plantilla_mov_posiciones_aduanas")
+    ua_scope = UN_SCOPE_APLICADO
+    view_permission = PERMISOS_DESGLOSE_VISTA
+    extra_permission = PERMISOS_DESGLOSE_EXTRA
 
     def get(self, request, *args, **kwargs):
         un_scope = get_un_scope_for_request(request)
+        columnas = get_columnas_scope_for_request(request)
+
+        def recortar():
+            return _strip_columnas_desglose(
+                _scope_un_filas(self._obtener_desglose_ocupados(), un_scope, key="Cd UN"), columnas
+            )
 
         try:
+            # `columnas` entra en la huella de la clave: dos roles de la misma
+            # unidad con distinto alcance de columnas no comparten copia.
             cacheada = _respuesta_completa_cacheada(
-                request,
-                "desglose_jerarquico_ocupados",
-                lambda: _scope_un_filas(self._obtener_desglose_ocupados(), un_scope, key="Cd UN"),
-                un_scope,
+                request, "desglose_jerarquico_ocupados", recortar, un_scope, columnas
             )
             if cacheada is not None:
                 return cacheada
 
-            resultados = self._obtener_desglose_ocupados()
-            return Response(
-                _scope_un_filas(resultados, un_scope, key="Cd UN"),
-                status=status.HTTP_200_OK,
-            )
+            return Response(recortar(), status=status.HTTP_200_OK)
         except Exception:
             logger.exception("Error inesperado en {}".format(request.path))
             return Response(
