@@ -59,6 +59,7 @@ from .views import (
     IniciarSincronizacionZafiroView,
     InvalidarCacheManualView,
     InvalidarCacheZafiroView,
+    ZafiroToleranciasView,
     ZafiroSSEView,
     ZafiroEnCursoSSEView,
     CeldaUpdatesSSEView,
@@ -341,6 +342,11 @@ urlpatterns = [
         "bitacora/invalidar-cache-manual/",
         InvalidarCacheManualView.as_view(),
         name="zafiro_invalidar_cache_manual",
+    ),
+    path(
+        "bitacora/tolerancias/",
+        ZafiroToleranciasView.as_view(),
+        name="zafiro_tolerancias",
     ),
     path(
         "bitacora/en-curso/",

@@ -1498,6 +1498,39 @@ class DatosPersonalesStaging(DatosPersonalesBase):
         db_table = "DATOS_PERSONALES_STAGING"
 
 
+class ZafiroToleranciaConsulta(models.Model):
+    """
+    Porcentaje de baja de registros que `importar_zafiro` acepta por consulta
+    respecto al máximo de las últimas corridas exitosas. Se edita desde el
+    front (ZafiroToleranciasView) y la tarea — que corre en la PC Windows
+    (copia_back), con la que solo se comparte la BD — lo lee de esta tabla
+    justo antes de validar cada consulta, así que un cambio aplica sin
+    reiniciar workers. Si una consulta no tiene fila, se usa el valor por
+    defecto (ver zafiro_tolerancias.py).
+    """
+
+    CONSULTAS = [
+        ("posiciones", "Posiciones"),
+        ("completos", "Empleados Completos"),
+        ("bajas", "Empleados Bajas"),
+        ("historial", "Historial Posición"),
+        ("datos_personales", "Datos Personales"),
+    ]
+
+    consulta = models.CharField(max_length=32, unique=True, choices=CONSULTAS)
+    tolerancia_pct = models.DecimalField(max_digits=5, decimal_places=2)
+    actualizado_en = models.DateTimeField(auto_now=True)
+    actualizado_por = models.CharField(max_length=150, null=True, blank=True)
+
+    class Meta:
+        managed = True
+        db_table = "ZAFIRO_TOLERANCIA_CONSULTA"
+        ordering = ["consulta"]
+
+    def __str__(self):
+        return f"{self.consulta}: {self.tolerancia_pct}%"
+
+
 class ZafiroBitacora(models.Model):
     fecha_ejecucion = models.DateTimeField(auto_now_add=True)
     duracion_segundos = models.FloatField(null=True, blank=True)

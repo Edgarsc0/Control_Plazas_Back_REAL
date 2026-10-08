@@ -8105,6 +8105,110 @@ class InvalidarCacheManualView(APIView):
         )
 
 
+class ZafiroToleranciasView(APIView):
+    """
+    Tolerancia de baja de registros (%) que `importar_zafiro` acepta por
+    consulta respecto al máximo de las últimas corridas exitosas (panel
+    "Tolerancia por consulta" en Monitoreo ZAFIRO).
+
+    GET  → valor vigente, valor por defecto y referencia actual por consulta.
+    PUT  → {"posiciones": 6, "historial": 7.5, ...} (solo las que cambian;
+           `null` quita el ajuste y regresa esa consulta a su valor por defecto).
+
+    No avisa al worker: escribe en ZAFIRO_TOLERANCIA_CONSULTA y la tarea, que
+    corre en la PC Windows (copia_back), relee esa tabla justo antes de
+    validar cada consulta.
+    """
+
+    view_permission = "authentication.view_monitoreo_zafiro"
+
+    # Cuántas corridas exitosas forman la referencia; debe coincidir con
+    # ZAFIRO_CORRIDAS_DE_REFERENCIA en tasks.py de copia_back.
+    CORRIDAS_DE_REFERENCIA = 20
+    CAMPO_BITACORA = {
+        "posiciones": "registros_posiciones",
+        "completos": "registros_completos",
+        "bajas": "registros_bajas",
+        "historial": "registros_historial",
+        "datos_personales": "registros_datos_personales",
+    }
+
+    def _estado(self):
+        from .models import ZafiroToleranciaConsulta
+        from .zafiro_tolerancias import tolerancias_por_defecto
+
+        por_defecto = tolerancias_por_defecto()
+        filas = {f.consulta: f for f in ZafiroToleranciaConsulta.objects.all()}
+        recientes = list(
+            ZafiroBitacora.objects.filter(status="EXITO").values(
+                *self.CAMPO_BITACORA.values()
+            )[: self.CORRIDAS_DE_REFERENCIA]
+        )
+        consultas = []
+        for clave, nombre in ZafiroToleranciaConsulta.CONSULTAS:
+            fila = filas.get(clave)
+            campo = self.CAMPO_BITACORA[clave]
+            consultas.append(
+                {
+                    "consulta": clave,
+                    "nombre": nombre,
+                    "tolerancia_pct": float(fila.tolerancia_pct) if fila else por_defecto[clave],
+                    "tolerancia_por_defecto_pct": por_defecto[clave],
+                    "personalizada": fila is not None,
+                    "actualizado_en": fila.actualizado_en if fila else None,
+                    "actualizado_por": fila.actualizado_por if fila else None,
+                    "referencia": max((r[campo] or 0 for r in recientes), default=0),
+                }
+            )
+        return {"consultas": consultas}
+
+    def get(self, request):
+        return Response(self._estado(), status=status.HTTP_200_OK)
+
+    def put(self, request):
+        from .models import ZafiroToleranciaConsulta
+
+        validas = {clave for clave, _ in ZafiroToleranciaConsulta.CONSULTAS}
+        if not isinstance(request.data, dict) or not request.data:
+            return Response(
+                {"error": "Se esperaba un objeto {consulta: porcentaje}."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        cambios = {}
+        for clave, valor in request.data.items():
+            if clave not in validas:
+                return Response(
+                    {"error": f"Consulta desconocida: '{clave}'. Válidas: {sorted(validas)}."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if valor is None:
+                cambios[clave] = None
+                continue
+            try:
+                pct = round(float(valor), 2)
+            except (TypeError, ValueError):
+                pct = -1
+            if isinstance(valor, bool) or not 0 <= pct <= 100:
+                return Response(
+                    {"error": f"La tolerancia de '{clave}' debe ser un número entre 0 y 100."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            cambios[clave] = pct
+
+        usuario = getattr(request.user, "email", "") or request.user.get_username()
+        with transaction.atomic():
+            for clave, pct in cambios.items():
+                if pct is None:
+                    ZafiroToleranciaConsulta.objects.filter(consulta=clave).delete()
+                else:
+                    ZafiroToleranciaConsulta.objects.update_or_create(
+                        consulta=clave,
+                        defaults={"tolerancia_pct": pct, "actualizado_por": usuario[:150]},
+                    )
+        return Response(self._estado(), status=status.HTTP_200_OK)
+
+
 class InvalidarCacheZafiroView(APIView):
     """
     Endpoint interno: lo llama el worker de Celery de `copia_back` (PC
