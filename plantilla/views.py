@@ -4480,6 +4480,7 @@ class EmpleadosPorNivelYEstatusView(APIView):
             "Vacantes Eventuales",
             "Vacantes Permanentes",
             "Vacantes Eventuales Nueva Creación",
+            "Total",
         }
 
         try:
@@ -4500,7 +4501,12 @@ class EmpleadosPorNivelYEstatusView(APIView):
                 base_qs = base_qs.annotate(
                     partida_trim=Trim("partida"), posicion_trim=Trim("posicion")
                 )
-                if estado_nomina == "Ocupadas":
+                if estado_nomina == "Total":
+                    # La barra completa de la gráfica: ocupadas + vacantes del
+                    # nivel, en el universo de Cuadros de Vacancia (plantilla
+                    # oficial) para que el conteo coincida con su rótulo.
+                    queryset = base_qs.exclude(Q_FUERA_DE_PLANTILLA_OFICIAL)
+                elif estado_nomina == "Ocupadas":
                     queryset = base_qs.exclude(estado_nomina=" ")
                 elif estado_nomina == "Ocupadas Permanentes":
                     queryset = base_qs.exclude(estado_nomina=" ").filter(
